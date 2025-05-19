@@ -62,7 +62,10 @@ class AnacImporter:
             logger.error(f"❌ Non hai i permessi di lettura per {BASE_PATH}")
             # Mostra i permessi attuali
             try:
-                perms = subprocess.check_output(['ls', '-la', str(BASE_PATH)]).decode()
+                if os.name == 'nt':  # Windows
+                    perms = subprocess.check_output(['icacls', str(BASE_PATH)]).decode()
+                else:  # Linux/Unix
+                    perms = subprocess.check_output(['ls', '-la', str(BASE_PATH)]).decode()
                 logger.info(f"📋 Permessi attuali:\n{perms}")
             except Exception as e:
                 logger.error(f"❌ Errore nel verificare i permessi: {e}")

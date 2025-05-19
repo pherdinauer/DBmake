@@ -3,15 +3,16 @@ import os
 from typing import List
 
 # Base paths
-BASE_PATH = Path("/FileSystem/anacd2/downloads")  # Percorso base dei file JSON
-DB_PATH = Path("/database/anac.db")  # Mount point /database su /dev/sdc3
-BACKUP_PATH = Path("/database/backups")  # Backup nella stessa partizione del DB
+WORKSPACE_PATH = Path(__file__).parent.parent
+BASE_PATH = Path("/database/JSON")  # Percorso base dei file JSON
+DB_PATH = WORKSPACE_PATH / "database" / "anac.db"  # Database SQLite
+BACKUP_PATH = WORKSPACE_PATH / "database" / "backups"  # Backup nella stessa partizione del DB
 
 # Verifica che il percorso base esista
 if not BASE_PATH.exists():
     print(f"⚠️ ATTENZIONE: Il percorso {BASE_PATH} non esiste!")
     print("Per favore, verifica il percorso corretto dei file JSON e aggiorna BASE_PATH in config/config.py")
-    print("Esempio di percorso corretto: /path/to/your/json/files")
+    print("Esempio di percorso corretto: /database/JSON")
 
 # Database settings
 DB_SETTINGS = {
@@ -21,7 +22,7 @@ DB_SETTINGS = {
 }
 
 # Logging settings
-LOG_PATH = Path("logs")
+LOG_PATH = WORKSPACE_PATH / "logs"
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
