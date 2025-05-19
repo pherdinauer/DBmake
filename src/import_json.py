@@ -108,9 +108,18 @@ def import_json_folder(folder_path: str, conn: sqlite3.Connection) -> None:
         create_table_if_not_exists(conn, table_name)
         
         total_rows = 0
+        start_time = time.time()
+        last_progress_time = start_time
+        last_rows = 0
+        
         for json_file in json_files:
             file_path = os.path.join(folder_path, json_file)
+            file_start_time = time.time()
+            file_rows = 0
+            
             try:
+                logger.info(f"📄 Elaborazione file: {json_file}")
+                
                 # Leggi il file JSON in chunks
                 for chunk in read_json_file(file_path):
                     if chunk:
@@ -119,16 +128,45 @@ def import_json_folder(folder_path: str, conn: sqlite3.Connection) -> None:
                         
                         # Importa il chunk nel database
                         df.to_sql(table_name, conn, if_exists='append', index=False)
-                        total_rows += len(chunk)
+                        chunk_rows = len(chunk)
+                        total_rows += chunk_rows
+                        file_rows += chunk_rows
                         
                         # Commit dopo ogni chunk
                         conn.commit()
                         
-                logger.info(f"✅ Importata tabella '{table_name}' con {total_rows} righe")
+                        # Calcola e mostra statistiche ogni 5 secondi
+                        current_time = time.time()
+                        if current_time - last_progress_time >= 5:
+                            elapsed = current_time - start_time
+                            rows_per_second = total_rows / elapsed if elapsed > 0 else 0
+                            memory_usage = get_memory_usage()
+                            
+                            logger.info(f"""
+📊 Statistiche di importazione:
+   - Righe elaborate: {total_rows:,}
+   - Velocità: {rows_per_second:.1f} righe/secondo
+   - Memoria utilizzata: {memory_usage}
+   - Tempo trascorso: {elapsed:.1f} secondi
+""")
+                            last_progress_time = current_time
+                            last_rows = total_rows
+                
+                file_elapsed = time.time() - file_start_time
+                logger.info(f"✅ File completato: {json_file} ({file_rows:,} righe in {file_elapsed:.1f} secondi)")
                 
             except Exception as e:
                 logger.error(f"❌ Errore nell'importazione del file {json_file}: {str(e)}")
                 continue
+        
+        total_elapsed = time.time() - start_time
+        logger.info(f"""
+🎉 Importazione completata per {folder_name}:
+   - Totale righe: {total_rows:,}
+   - Tempo totale: {total_elapsed:.1f} secondi
+   - Velocità media: {total_rows/total_elapsed:.1f} righe/secondo
+   - Memoria finale: {get_memory_usage()}
+""")
                 
     except Exception as e:
         logger.error(f"❌ Errore nell'importazione della cartella {folder_path}: {str(e)}")
