@@ -28,20 +28,20 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Cartelle da importare
 CARTELLE_RILEVANTI: List[str] = [
-    "bando-cig-modalita-realizzazione",
-    "bandi-cig-tipo-scelta-contraente",
-    "aggiudicazioni",
-    "partecipanti",
-    "collaudo",
-    "fine-contratto",
-    "lavorazioni",
-    "pubblicazioni",
-    "quadro-economico",
-    "sospensioni",
-    "stati-avanzamento",
-    "subappalti",
-    "varianti",
-    "fonti-finanziamento"
+    "bandi-cig-modalita-realizzazione_json",
+    "bandi-cig-tipo-scelta-contraente_json",
+    "aggiudicazioni_json",
+    "partecipanti_json",
+    "collaudo_json",
+    "fine-contratto_json",
+    "lavorazioni_json",
+    "pubblicazioni_json",
+    "quadro-economico_json",
+    "sospensioni_json",
+    "stati-avanzamento_json",
+    "subappalti_json",
+    "varianti_json",
+    "fonti-finanziamento_json"
 ]
 
 # Validazione dati
