@@ -9,6 +9,9 @@ import shutil
 from typing import List, Dict, Any, Optional
 import sys
 import subprocess
+import zipfile
+import argparse
+from tqdm import tqdm
 
 # Import configurazione
 sys.path.append(str(Path(__file__).parent.parent))
@@ -38,6 +41,23 @@ class AnacImporter:
         self._verify_base_path()
         self._setup_database()
         self._setup_backup()
+        self.extracted_path = Path("/database/extracted")
+
+    def _list_directory_contents(self, path: Path, depth: int = 0, max_depth: int = 2) -> None:
+        """Lista il contenuto di una directory fino a una profondità specificata."""
+        if depth > max_depth:
+            return
+
+        try:
+            for item in path.iterdir():
+                indent = "  " * depth
+                if item.is_dir():
+                    logger.info(f"{indent}📁 {item.name}/")
+                    self._list_directory_contents(item, depth + 1, max_depth)
+                else:
+                    logger.info(f"{indent}📄 {item.name}")
+        except Exception as e:
+            logger.error(f"❌ Errore nel listare {path}: {e}")
 
     def _verify_base_path(self) -> None:
         """Verifica l'accesso al percorso base e alle cartelle."""
@@ -90,6 +110,10 @@ class AnacImporter:
             if not os.access(path_cartella, os.R_OK):
                 logger.error(f"❌ Non hai i permessi di lettura per {cartella}")
                 continue
+
+            # Lista il contenuto della cartella
+            logger.info(f"📂 Contenuto di {cartella}:")
+            self._list_directory_contents(path_cartella)
                 
             # Cerca i file JSON in modo ricorsivo
             json_files = list(path_cartella.rglob("*.json"))
@@ -130,6 +154,7 @@ class AnacImporter:
     def _setup_backup(self) -> None:
         """Prepara la directory per i backup."""
         BACKUP_PATH.mkdir(parents=True, exist_ok=True)
+        self.extracted_path.mkdir(parents=True, exist_ok=True)
 
     def _create_backup(self) -> None:
         """Crea un backup del database."""
@@ -167,11 +192,41 @@ class AnacImporter:
                 return False
         return True
 
-    def importa_cartella_json(self, cartella: str) -> None:
-        """Importa i file JSON da una cartella nel database."""
+    def extract_zip_files(self, cartella: str) -> None:
+        """Estrae i file ZIP da una cartella."""
         path_cartella = BASE_PATH / cartella
         if not path_cartella.is_dir():
             logger.error(f"Cartella non trovata: {cartella}")
+            return
+
+        # Crea la directory per i file estratti
+        extracted_dir = self.extracted_path / cartella
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+
+        # Cerca i file ZIP
+        zip_files = list(path_cartella.rglob("*.zip"))
+        if not zip_files:
+            logger.warning(f"⚠️ Nessun file ZIP trovato in {cartella}")
+            return
+
+        logger.info(f"📦 Estrazione di {len(zip_files)} file ZIP da {cartella}")
+        
+        for zip_file in tqdm(zip_files, desc=f"Estraendo {cartella}"):
+            try:
+                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                    # Estrai solo i file JSON
+                    json_files = [f for f in zip_ref.namelist() if f.endswith('.json')]
+                    if json_files:
+                        zip_ref.extractall(extracted_dir, json_files)
+                        logger.debug(f"Estratti {len(json_files)} file da {zip_file.name}")
+            except Exception as e:
+                logger.error(f"Errore nell'estrazione di {zip_file}: {e}")
+
+    def importa_cartella_json(self, cartella: str) -> None:
+        """Importa i file JSON da una cartella nel database."""
+        path_cartella = self.extracted_path / cartella
+        if not path_cartella.is_dir():
+            logger.error(f"Cartella estratta non trovata: {cartella}")
             return
 
         all_records = []
@@ -184,12 +239,11 @@ class AnacImporter:
 
         logger.info(f"📂 Elaborazione {len(json_files)} file in {cartella}")
 
-        for file in json_files:
+        for file in tqdm(json_files, desc=f"Importando {cartella}"):
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     
-                    # Normalizzazione dati
                     if isinstance(data, list):
                         df = pd.json_normalize(data)
                     elif isinstance(data, dict):
@@ -203,7 +257,6 @@ class AnacImporter:
 
                     df["__origine_file__"] = str(file.relative_to(path_cartella))
                     all_records.append(df)
-                    logger.debug(f"Processato file: {file.relative_to(path_cartella)}")
 
             except Exception as e:
                 logger.error(f"Errore nel file {file.relative_to(path_cartella)}: {e}")
@@ -212,17 +265,22 @@ class AnacImporter:
             try:
                 df_all = pd.concat(all_records, ignore_index=True)
                 
-                # Validazione dati
                 if not self._validate_dataframe(df_all, nome_tabella):
                     logger.error(f"Validazione fallita per la tabella {nome_tabella}")
                     return
 
-                # Salvataggio nel database
                 df_all.to_sql(nome_tabella, self.conn, if_exists='replace', index=False)
                 logger.info(f"✅ Importata tabella '{nome_tabella}' con {len(df_all)} righe")
                 
             except Exception as e:
                 logger.error(f"Errore nell'importazione della tabella {nome_tabella}: {e}")
+
+    def extract_all(self) -> None:
+        """Estrae tutti i file ZIP dalle cartelle configurate."""
+        logger.info("🚀 Inizio estrazione file ZIP...")
+        for cartella in CARTELLE_RILEVANTI:
+            self.extract_zip_files(cartella)
+        logger.info("✅ Estrazione completata")
 
     def importa_tutto(self) -> None:
         """Importa tutte le cartelle configurate."""
@@ -243,6 +301,25 @@ class AnacImporter:
                 self.conn.close()
                 logger.info("Connessione al database chiusa")
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description='Gestione importazione dati ANAC')
+    parser.add_argument('--extract', action='store_true', help='Estrae i file ZIP')
+    parser.add_argument('--import', dest='import_data', action='store_true', help='Importa i file JSON nel database')
+    parser.add_argument('--all', action='store_true', help='Esegue sia l\'estrazione che l\'importazione')
+    
+    args = parser.parse_args()
+    
+    if not (args.extract or args.import_data or args.all):
+        parser.print_help()
+        return
+
     importer = AnacImporter()
-    importer.importa_tutto() 
+    
+    if args.extract or args.all:
+        importer.extract_all()
+    
+    if args.import_data or args.all:
+        importer.importa_tutto()
+
+if __name__ == "__main__":
+    main() 
