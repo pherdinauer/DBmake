@@ -8,122 +8,146 @@ NC='\033[0m' # No Color
 
 # Ottieni il percorso assoluto dello script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
-# Verifica se lo script è stato eseguito con sudo
+# Verifica se lo script è eseguito con sudo
 if [ "$EUID" -eq 0 ]; then
-    echo "⚠️  Script eseguito con sudo, riavvio come utente originale..."
+    echo -e "${YELLOW}⚠️ Script eseguito con sudo. Verifica dei permessi...${NC}"
     ORIGINAL_USER=$(logname)
-    echo "👤 Utente originale: $ORIGINAL_USER"
-    
-    # Riavvia lo script come utente originale
-    exec su - "$ORIGINAL_USER" -c "bash '$SCRIPT_PATH' $@"
+    echo -e "${YELLOW}👤 Utente originale: $ORIGINAL_USER${NC}"
+    echo -e "${YELLOW}🔄 Riavvio script come utente $ORIGINAL_USER...${NC}"
+    exec su - "$ORIGINAL_USER" -c "bash '$SCRIPT_PATH'"
     exit
 fi
 
-# Funzione per mostrare l'help
-show_help() {
-    echo "Uso: $0 [opzioni]"
-    echo ""
-    echo "Opzioni:"
-    echo "  --extract     Estrae i file ZIP dalle cartelle"
-    echo "  --import      Importa i file JSON nel database"
-    echo "  --all         Esegue sia l'estrazione che l'importazione"
-    echo "  --help        Mostra questo messaggio di aiuto"
-    echo ""
-    echo "Esempi:"
-    echo "  $0 --extract     # Estrae solo i file ZIP"
-    echo "  $0 --import      # Importa solo i file JSON"
-    echo "  $0 --all         # Esegue entrambe le operazioni"
-}
+# URL del repository
+REPO_URL="https://github.com/pherdinauer/DBmake.git"
 
-# Gestione degli argomenti
-if [ $# -eq 0 ]; then
-    show_help
-    exit 1
-fi
+# Spostamento nella directory DBmake
+echo -e "${YELLOW}📂 Spostamento nella directory DBmake...${NC}"
+cd "$(dirname "$SCRIPT_PATH")"
 
-# Verifica se è stata richiesta l'help
-if [ "$1" == "--help" ]; then
-    show_help
-    exit 0
-fi
-
-# Verifica se gli argomenti sono validi
-VALID_ARGS=("--extract" "--import" "--all")
-VALID_ARG=false
-for arg in "${VALID_ARGS[@]}"; do
-    if [ "$1" == "$arg" ]; then
-        VALID_ARG=true
-        break
-    fi
-done
-
-if [ "$VALID_ARG" = false ]; then
-    echo "❌ Argomento non valido: $1"
-    show_help
-    exit 1
-fi
-
-# Sposta nella directory dello script
-cd "$SCRIPT_DIR"
-
-# Verifica se la directory è un repository git
-if [ ! -d ".git" ]; then
-    echo "⚠️  Directory non inizializzata come repository git"
+# Verifica se siamo nella directory DBmake
+if [ "$(basename $(pwd))" != "DBmake" ]; then
+    echo -e "${YELLOW}📥 Directory DBmake non trovata. Clonazione in corso...${NC}"
     
-    # Verifica se la directory esiste e non è vuota
-    if [ -d "DBmake" ] && [ "$(ls -A DBmake)" ]; then
-        echo "🗑️  Rimozione directory DBmake esistente..."
+    # Se la directory esiste ma non è un repository git valido
+    if [ -d "DBmake" ]; then
+        echo -e "${YELLOW}⚠️ Directory DBmake esiste ma non è un repository git valido${NC}"
+        echo -e "${YELLOW}🗑️ Rimozione directory esistente...${NC}"
         rm -rf DBmake
     fi
     
-    echo "📥 Clonazione repository..."
-    git clone https://github.com/desiderato/DBmake.git
-    cd DBmake
-else
-    # Configura git per la directory corrente
-    git config --global --add safe.directory "$(pwd)"
-    
-    # Verifica se ci sono modifiche locali
-    if ! git diff --quiet 2>/dev/null; then
-        echo "💾 Backup modifiche locali..."
-        git stash save "Modifiche locali prima del pull"
+    # Clona il repository
+    git clone $REPO_URL DBmake
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Repository clonato con successo${NC}"
+        cd DBmake
+    else
+        echo -e "${RED}❌ Errore durante la clonazione del repository${NC}"
+        exit 1
     fi
+fi
+
+# Configurazione sicurezza Git
+echo -e "${YELLOW}🔒 Configurazione sicurezza Git...${NC}"
+git config --global --add safe.directory "$(pwd)"
+
+# Verifica se siamo in un repository git
+if [ ! -d ".git" ]; then
+    echo -e "${RED}❌ Directory non è un repository git valido${NC}"
+    exit 1
+fi
+
+# Gestione delle modifiche locali
+echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
+if git diff --quiet 2>/dev/null; then
+    echo -e "${GREEN}✅ Nessuna modifica locale da gestire${NC}"
+else
+    echo -e "${YELLOW}📦 Backup delle modifiche locali...${NC}"
+    git stash save "Modifiche locali $(date '+%Y-%m-%d %H:%M:%S')"
+fi
+
+# Aggiornamento repository
+echo -e "${YELLOW}🔄 Aggiornamento repository...${NC}"
+if git pull; then
+    echo -e "${GREEN}✅ Repository aggiornato con successo${NC}"
     
-    # Aggiorna il repository
-    echo "📥 Aggiornamento repository..."
-    git pull
-    
-    # Ripristina le modifiche locali se presenti
-    if git stash list | grep -q "Modifiche locali prima del pull"; then
-        echo "📤 Ripristino modifiche locali..."
-        if ! git stash pop; then
-            echo "⚠️  Conflitti durante il ripristino delle modifiche locali"
-            echo "📝 Risolvi manualmente i conflitti e poi esegui:"
-            echo "   git stash drop"
+    # Ripristino modifiche locali se presenti
+    if git stash list | grep -q "Modifiche locali"; then
+        echo -e "${YELLOW}🔄 Ripristino modifiche locali...${NC}"
+        if git stash pop; then
+            echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
+            echo -e "${YELLOW}📋 Stato attuale:${NC}"
+            git status
+            echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
             exit 1
         fi
     fi
+else
+    echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+    exit 1
 fi
 
-# Crea e attiva l'ambiente virtuale se non esiste
-if [ ! -d "venv" ]; then
-    echo "🔧 Creazione ambiente virtuale..."
-    python -m venv venv
+# Gestione ambiente virtuale
+echo -e "${YELLOW}🔧 Gestione ambiente virtuale...${NC}"
+
+# Rimuovi l'ambiente virtuale esistente se presente
+if [ -d "venv" ]; then
+    echo -e "${YELLOW}🗑️ Rimozione ambiente virtuale esistente...${NC}"
+    rm -rf venv
 fi
+
+# Crea nuovo ambiente virtuale
+echo -e "${YELLOW}📦 Creazione nuovo ambiente virtuale...${NC}"
+python3 -m venv venv
 
 # Attiva l'ambiente virtuale
-echo "🔌 Attivazione ambiente virtuale..."
+echo -e "${YELLOW}🔌 Attivazione ambiente virtuale...${NC}"
 source venv/bin/activate
 
-# Installa/aggiorna le dipendenze
-echo "📦 Installazione dipendenze..."
+# Verifica che l'ambiente virtuale sia attivo
+if [ -z "$VIRTUAL_ENV" ]; then
+    echo -e "${RED}❌ Errore nell'attivazione dell'ambiente virtuale${NC}"
+    exit 1
+fi
+
+# Aggiorna pip
+echo -e "${YELLOW}📦 Aggiornamento pip...${NC}"
+pip install --upgrade pip
+
+# Installa le dipendenze
+echo -e "${YELLOW}📦 Installazione dipendenze...${NC}"
 pip install -r requirements.txt
 
-# Esegui lo script Python con gli argomenti passati
-echo "🚀 Avvio importazione dati..."
-python src/anac_importer.py "$@"
+# Verifica l'installazione di pandas
+echo -e "${YELLOW}🔍 Verifica installazione pandas...${NC}"
+python3 -c "import pandas; print(f'✅ Pandas versione {pandas.__version__} installato correttamente')"
+
+# Verifica che la directory /database sia montata
+if ! mountpoint -q /database; then
+    echo -e "${RED}❌ La directory /database non è montata${NC}"
+    echo -e "${YELLOW}⚠️ Tentativo di montaggio...${NC}"
+    sudo mount /dev/sdc3 /database
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}❌ Impossibile montare /database. Verifica i permessi e la configurazione${NC}"
+        exit 1
+    fi
+fi
+
+# Crea le directory necessarie se non esistono
+mkdir -p logs database/backups
+
+# Imposta i permessi
+echo -e "${YELLOW}🔧 Impostazione permessi...${NC}"
+sudo chown -R $USER:$USER .
+chmod -R 755 .
+
+# Avvia l'importer
+echo -e "${YELLOW}🚀 Avvio importazione dati...${NC}"
+python src/anac_importer.py
 
 # Disattiva l'ambiente virtuale
 deactivate
