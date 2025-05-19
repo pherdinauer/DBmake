@@ -107,8 +107,8 @@ python3 -m venv venv
 echo -e "${YELLOW}🔌 Attivazione ambiente virtuale...${NC}"
 source venv/bin/activate
 
-# Imposta PYTHONPATH
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+# Imposta PYTHONPATH per includere la directory corrente e src
+export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH}"
 
 # Verifica che l'ambiente virtuale sia attivo
 if [ -z "$VIRTUAL_ENV" ]; then
@@ -164,7 +164,7 @@ show_menu() {
 # Funzione per importare i dati
 import_data() {
     echo -e "${YELLOW}Inizio importazione dati...${NC}"
-    python src/import_json.py
+    python -m src.import_json
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Importazione completata con successo!${NC}"
     else

@@ -1,9 +1,16 @@
 from typing import List, Dict, Generator
 import json
-from .log import logger
+import os
+import sys
+
+# Aggiungi la directory corrente al path di Python
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+from log import logger
 import time
 import psutil
-import os
 import sqlite3
 import pandas as pd
 import gc
