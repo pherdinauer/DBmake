@@ -10,6 +10,7 @@ Questo progetto gestisce l'importazione di dati JSON dal portale ANAC (Autorità
 - Logging dettagliato delle operazioni
 - Validazione dei dati
 - Gestione degli errori robusta
+- Interfaccia a menu per la gestione delle operazioni
 
 ## Struttura del Progetto
 
@@ -18,27 +19,28 @@ Questo progetto gestisce l'importazione di dati JSON dal portale ANAC (Autorità
 ├── config/
 │   └── config.py           # Configurazioni del progetto
 ├── src/
-│   └── anac_importer.py    # Codice principale
+│   ├── import_json.py      # Importazione dati JSON
+│   └── cig_cli.py         # Interfaccia di ricerca CIG
 ├── logs/                   # Directory per i log
 ├── database/              # Directory per il database
 │   └── backups/          # Directory per i backup
 ├── requirements.txt       # Dipendenze Python
+├── run.sh                # Script di setup e menu principale
 └── README.md             # Questo file
 ```
 
 ## Installazione
 
 1. Clona il repository
-2. Crea un ambiente virtuale:
+2. Esegui lo script di setup:
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # Linux/Mac
-   venv\Scripts\activate     # Windows
+   ./run.sh
    ```
-3. Installa le dipendenze:
-   ```bash
-   pip install -r requirements.txt
-   ```
+   Lo script si occuperà di:
+   - Configurare l'ambiente virtuale
+   - Installare le dipendenze
+   - Verificare i permessi
+   - Mostrare il menu di gestione
 
 ## Configurazione
 
@@ -53,8 +55,13 @@ Le configurazioni sono gestite tramite variabili d'ambiente o direttamente nel f
 Esegui lo script principale:
 
 ```bash
-python src/anac_importer.py
+./run.sh
 ```
+
+Il menu ti permetterà di:
+1. Importare dati JSON nel database
+2. Cercare CIG nel database
+3. Uscire dal programma
 
 ## Logging
 

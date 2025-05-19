@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Colori per output
+# Colori per i messaggi
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -145,11 +145,61 @@ echo -e "${YELLOW}🔧 Impostazione permessi...${NC}"
 sudo chown -R $USER:$USER .
 chmod -R 755 .
 
-# Avvia l'importer
-echo -e "${YELLOW}🚀 Avvio importazione dati...${NC}"
-python src/anac_importer.py
+# Funzione per mostrare il menu
+show_menu() {
+    clear
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
+    echo -e "║                         CIG Database Management Tool                            ║"
+    echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo "1. Importa dati JSON nel database"
+    echo "2. Cerca CIG nel database"
+    echo "3. Esci"
+    echo
+}
 
-# Disattiva l'ambiente virtuale
-deactivate
+# Funzione per importare i dati
+import_data() {
+    echo -e "${YELLOW}Inizio importazione dati...${NC}"
+    python src/import_json.py
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Importazione completata con successo!${NC}"
+    else
+        echo -e "${RED}Errore durante l'importazione.${NC}"
+    fi
+    echo
+    read -p "Premi Invio per continuare..."
+}
 
-echo -e "${GREEN}✅ Script completato${NC}" 
+# Funzione per cercare CIG
+search_cig() {
+    echo -e "${YELLOW}Avvio ricerca CIG...${NC}"
+    python src/cig_cli.py
+    echo
+    read -p "Premi Invio per continuare..."
+}
+
+# Loop principale del menu
+while true; do
+    show_menu
+    read -p "Scegli un'opzione (1-3): " choice
+    
+    case $choice in
+        1)
+            import_data
+            ;;
+        2)
+            search_cig
+            ;;
+        3)
+            echo -e "${GREEN}Arrivederci!${NC}"
+            # Disattiva l'ambiente virtuale prima di uscire
+            deactivate
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Opzione non valida.${NC}"
+            read -p "Premi Invio per continuare..."
+            ;;
+    esac
+done 
