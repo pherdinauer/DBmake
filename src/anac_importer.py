@@ -8,6 +8,7 @@ from datetime import datetime
 import shutil
 from typing import List, Dict, Any, Optional
 import sys
+import subprocess
 
 # Import configurazione
 sys.path.append(str(Path(__file__).parent.parent))
@@ -34,8 +35,71 @@ class AnacImporter:
     def __init__(self):
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
+        self._verify_base_path()
         self._setup_database()
         self._setup_backup()
+
+    def _verify_base_path(self) -> None:
+        """Verifica l'accesso al percorso base e alle cartelle."""
+        logger.info(f"🔍 Verifica percorso base: {BASE_PATH}")
+        
+        # Verifica se il percorso esiste
+        if not BASE_PATH.exists():
+            logger.error(f"❌ Il percorso base {BASE_PATH} non esiste!")
+            # Prova a listare il contenuto della directory padre
+            parent = BASE_PATH.parent
+            if parent.exists():
+                logger.info(f"📂 Contenuto di {parent}:")
+                try:
+                    for item in parent.iterdir():
+                        logger.info(f"  - {item.name} ({'directory' if item.is_dir() else 'file'})")
+                except Exception as e:
+                    logger.error(f"❌ Errore nel listare {parent}: {e}")
+            return
+
+        # Verifica i permessi
+        if not os.access(BASE_PATH, os.R_OK):
+            logger.error(f"❌ Non hai i permessi di lettura per {BASE_PATH}")
+            # Mostra i permessi attuali
+            try:
+                perms = subprocess.check_output(['ls', '-la', str(BASE_PATH)]).decode()
+                logger.info(f"📋 Permessi attuali:\n{perms}")
+            except Exception as e:
+                logger.error(f"❌ Errore nel verificare i permessi: {e}")
+            return
+
+        logger.info(f"✅ Percorso base verificato: {BASE_PATH}")
+        
+        # Lista il contenuto della directory base
+        logger.info(f"📂 Contenuto di {BASE_PATH}:")
+        try:
+            for item in BASE_PATH.iterdir():
+                logger.info(f"  - {item.name} ({'directory' if item.is_dir() else 'file'})")
+        except Exception as e:
+            logger.error(f"❌ Errore nel listare {BASE_PATH}: {e}")
+        
+        # Verifica ogni cartella
+        for cartella in CARTELLE_RILEVANTI:
+            path_cartella = BASE_PATH / cartella
+            logger.info(f"🔍 Verifica cartella: {cartella}")
+            
+            if not path_cartella.exists():
+                logger.warning(f"⚠️ Cartella non trovata: {cartella}")
+                continue
+                
+            if not os.access(path_cartella, os.R_OK):
+                logger.error(f"❌ Non hai i permessi di lettura per {cartella}")
+                continue
+                
+            # Conta i file JSON
+            json_files = list(path_cartella.glob("*.json"))
+            logger.info(f"📁 Cartella {cartella}: {len(json_files)} file JSON trovati")
+            
+            # Lista i primi 5 file JSON se presenti
+            if json_files:
+                logger.info(f"📄 Primi 5 file in {cartella}:")
+                for file in json_files[:5]:
+                    logger.info(f"  - {file.name}")
 
     def _setup_database(self) -> None:
         """Inizializza la connessione al database."""
@@ -97,8 +161,15 @@ class AnacImporter:
 
         all_records = []
         nome_tabella = cartella.replace("-", "_")
+        json_files = list(path_cartella.glob("*.json"))
+        
+        if not json_files:
+            logger.warning(f"⚠️ Nessun file JSON trovato in {cartella}")
+            return
 
-        for file in path_cartella.glob("*.json"):
+        logger.info(f"📂 Elaborazione {len(json_files)} file in {cartella}")
+
+        for file in json_files:
             try:
                 with open(file, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -133,7 +204,7 @@ class AnacImporter:
 
                 # Salvataggio nel database
                 df_all.to_sql(nome_tabella, self.conn, if_exists='replace', index=False)
-                logger.info(f"Importata tabella '{nome_tabella}' con {len(df_all)} righe")
+                logger.info(f"✅ Importata tabella '{nome_tabella}' con {len(df_all)} righe")
                 
             except Exception as e:
                 logger.error(f"Errore nell'importazione della tabella {nome_tabella}: {e}")
