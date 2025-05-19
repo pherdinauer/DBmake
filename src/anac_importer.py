@@ -189,24 +189,23 @@ class AnacImporter:
 
         for file in json_files:
             try:
+                records = []
                 with open(file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            try:
+                                data = json.loads(line)
+                                records.append(data)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Errore nel parsing della linea in {file}: {e}")
+                                continue
                     
-                    # Normalizzazione dati
-                    if isinstance(data, list):
-                        df = pd.json_normalize(data)
-                    elif isinstance(data, dict):
-                        liste = [v for v in data.values() if isinstance(v, list)]
-                        if liste:
-                            df = pd.json_normalize(liste[0])
-                        else:
-                            df = pd.json_normalize(data)
-                    else:
-                        continue
-
-                    df["__origine_file__"] = str(file.relative_to(path_cartella))
-                    all_records.append(df)
-                    logger.debug(f"Processato file: {file.relative_to(path_cartella)}")
+                    if records:
+                        df = pd.json_normalize(records)
+                        df["__origine_file__"] = str(file.relative_to(path_cartella))
+                        all_records.append(df)
+                        logger.debug(f"Processato file: {file.relative_to(path_cartella)}")
 
             except Exception as e:
                 logger.error(f"Errore nel file {file.relative_to(path_cartella)}: {e}")
