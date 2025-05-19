@@ -91,15 +91,30 @@ class AnacImporter:
                 logger.error(f"❌ Non hai i permessi di lettura per {cartella}")
                 continue
                 
-            # Conta i file JSON
-            json_files = list(path_cartella.glob("*.json"))
+            # Cerca i file JSON in modo ricorsivo
+            json_files = list(path_cartella.rglob("*.json"))
             logger.info(f"📁 Cartella {cartella}: {len(json_files)} file JSON trovati")
             
             # Lista i primi 5 file JSON se presenti
             if json_files:
                 logger.info(f"📄 Primi 5 file in {cartella}:")
                 for file in json_files[:5]:
-                    logger.info(f"  - {file.name}")
+                    logger.info(f"  - {file.relative_to(path_cartella)}")
+                    
+                # Verifica il contenuto del primo file
+                if json_files:
+                    try:
+                        with open(json_files[0], 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            logger.info(f"📋 Struttura del primo file ({json_files[0].name}):")
+                            if isinstance(data, list):
+                                logger.info(f"  - Tipo: Lista con {len(data)} elementi")
+                                if data:
+                                    logger.info(f"  - Primo elemento: {list(data[0].keys())}")
+                            elif isinstance(data, dict):
+                                logger.info(f"  - Tipo: Dizionario con chiavi: {list(data.keys())}")
+                    except Exception as e:
+                        logger.error(f"❌ Errore nella lettura del file {json_files[0]}: {e}")
 
     def _setup_database(self) -> None:
         """Inizializza la connessione al database."""
@@ -161,7 +176,7 @@ class AnacImporter:
 
         all_records = []
         nome_tabella = cartella.replace("-", "_")
-        json_files = list(path_cartella.glob("*.json"))
+        json_files = list(path_cartella.rglob("*.json"))
         
         if not json_files:
             logger.warning(f"⚠️ Nessun file JSON trovato in {cartella}")
@@ -186,12 +201,12 @@ class AnacImporter:
                     else:
                         continue
 
-                    df["__origine_file__"] = str(file.name)
+                    df["__origine_file__"] = str(file.relative_to(path_cartella))
                     all_records.append(df)
-                    logger.debug(f"Processato file: {file.name}")
+                    logger.debug(f"Processato file: {file.relative_to(path_cartella)}")
 
             except Exception as e:
-                logger.error(f"Errore nel file {file.name}: {e}")
+                logger.error(f"Errore nel file {file.relative_to(path_cartella)}: {e}")
 
         if all_records:
             try:

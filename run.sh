@@ -6,55 +6,65 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Ottieni il percorso assoluto dello script
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 # Verifica se lo script è eseguito con sudo
 if [ "$EUID" -eq 0 ]; then
     echo -e "${YELLOW}⚠️ Script eseguito con sudo. Verifica dei permessi...${NC}"
     ORIGINAL_USER=$(logname)
     echo -e "${YELLOW}👤 Utente originale: $ORIGINAL_USER${NC}"
     echo -e "${YELLOW}🔄 Riavvio script come utente $ORIGINAL_USER...${NC}"
-    exec su - "$ORIGINAL_USER" -c "bash $0"
+    exec su - "$ORIGINAL_USER" -c "bash '$SCRIPT_PATH'"
     exit
 fi
 
 # URL del repository
 REPO_URL="https://github.com/pherdinauer/DBmake.git"
 
-# Configurazione sicurezza Git
-echo -e "${YELLOW}🔒 Configurazione sicurezza Git...${NC}"
-git config --global --add safe.directory "$(pwd)"
-
 # Spostamento nella directory DBmake
 echo -e "${YELLOW}📂 Spostamento nella directory DBmake...${NC}"
-cd "$(dirname "$0")"
-
-# Gestione delle modifiche locali
-echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
-if git diff --quiet; then
-    echo -e "${GREEN}✅ Nessuna modifica locale da gestire${NC}"
-else
-    echo -e "${YELLOW}📦 Backup delle modifiche locali...${NC}"
-    git stash save "Modifiche locali $(date '+%Y-%m-%d %H:%M:%S')"
-fi
+cd "$(dirname "$SCRIPT_PATH")"
 
 # Verifica se siamo nella directory DBmake
 if [ "$(basename $(pwd))" != "DBmake" ]; then
     echo -e "${YELLOW}📥 Directory DBmake non trovata. Clonazione in corso...${NC}"
+    
+    # Se la directory esiste ma non è un repository git valido
+    if [ -d "DBmake" ]; then
+        echo -e "${YELLOW}⚠️ Directory DBmake esiste ma non è un repository git valido${NC}"
+        echo -e "${YELLOW}🗑️ Rimozione directory esistente...${NC}"
+        rm -rf DBmake
+    fi
+    
+    # Clona il repository
     git clone $REPO_URL DBmake
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✅ Repository clonato con successo${NC}"
         cd DBmake
-        # Configura anche la nuova directory clonata come sicura
-        git config --global --add safe.directory /database/DBmake
     else
         echo -e "${RED}❌ Errore durante la clonazione del repository${NC}"
         exit 1
     fi
 fi
 
+# Configurazione sicurezza Git
+echo -e "${YELLOW}🔒 Configurazione sicurezza Git...${NC}"
+git config --global --add safe.directory "$(pwd)"
+
 # Verifica se siamo in un repository git
 if [ ! -d ".git" ]; then
     echo -e "${RED}❌ Directory non è un repository git valido${NC}"
     exit 1
+fi
+
+# Gestione delle modifiche locali
+echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
+if git diff --quiet 2>/dev/null; then
+    echo -e "${GREEN}✅ Nessuna modifica locale da gestire${NC}"
+else
+    echo -e "${YELLOW}📦 Backup delle modifiche locali...${NC}"
+    git stash save "Modifiche locali $(date '+%Y-%m-%d %H:%M:%S')"
 fi
 
 # Aggiornamento repository
@@ -69,7 +79,7 @@ if git pull; then
             echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
         else
             echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
-            echo -e "${YELLOW}�� Stato attuale:${NC}"
+            echo -e "${YELLOW}📋 Stato attuale:${NC}"
             git status
             echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
             exit 1
