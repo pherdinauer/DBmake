@@ -6,194 +6,171 @@ import psutil
 import os
 import sqlite3
 import pandas as pd
+import gc
 
 def get_memory_usage() -> str:
     """Returns current memory usage in MB"""
     process = psutil.Process(os.getpid())
     return f"{process.memory_info().rss / 1024 / 1024:.1f}MB"
 
-def read_json_file(file_path: str, chunk_size: int = 100) -> Generator[List[Dict], None, None]:
-    """Legge un file JSONL (JSON Lines) e restituisce i dati come generator di liste di dizionari.
+def create_table_schema(conn: sqlite3.Connection, table_name: str, first_record: Dict) -> None:
+    """Crea lo schema della tabella basato sul primo record."""
+    columns = []
+    for key, value in first_record.items():
+        # Determina il tipo di colonna basato sul valore
+        if isinstance(value, int):
+            col_type = "INTEGER"
+        elif isinstance(value, float):
+            col_type = "REAL"
+        else:
+            col_type = "TEXT"
+        columns.append(f"{key} {col_type}")
     
-    Args:
-        file_path: Percorso del file JSONL
-        chunk_size: Numero di righe da processare per volta
-        
-    Yields:
-        Lista di dizionari contenenti i dati JSON
-        
-    Raises:
-        FileNotFoundError: Se il file non esiste
-    """
+    create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({', '.join(columns)})"
+    conn.execute(create_sql)
+    conn.commit()
+
+def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 1000) -> None:
+    """Importa un file JSONL nel database in modo efficiente."""
     try:
-        # Prima contiamo il numero totale di righe
+        # Ottieni il nome della tabella dal nome del file
+        table_name = os.path.splitext(os.path.basename(file_path))[0].replace('-', '_')
+        
+        # Conta le righe totali
         with open(file_path, 'r', encoding='utf-8') as f:
             total_lines = sum(1 for _ in f)
         
-        logger.info(f"📊 File contiene {total_lines} righe da processare")
-        logger.info(f"💾 Memoria iniziale: {get_memory_usage()}")
+        logger.info(f"📊 File {file_path} contiene {total_lines} righe da processare")
+        
+        # Disabilita gli indici temporaneamente
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA journal_mode = OFF")
+        conn.execute("PRAGMA synchronous = OFF")
         
         processed_lines = 0
-        chunk = []
-        last_progress_time = time.time()
-        error_count = 0
-        max_errors = 1000  # Numero massimo di errori prima di interrompere
+        batch = []
+        start_time = time.time()
+        last_progress_time = start_time
         
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
-                if not line:  # Skip empty lines
+                if not line:
                     continue
-                    
+                
                 try:
-                    json_obj = json.loads(line)
-                    chunk.append(json_obj)
+                    record = json.loads(line)
+                    
+                    # Se è il primo record, crea la tabella
+                    if processed_lines == 0:
+                        create_table_schema(conn, table_name, record)
+                    
+                    # Prepara i valori per l'inserimento
+                    values = [record.get(key, None) for key in record.keys()]
+                    batch.append(values)
+                    
                     processed_lines += 1
                     
-                    # Se abbiamo raggiunto la dimensione del chunk, lo restituiamo
-                    if len(chunk) >= chunk_size:
-                        yield chunk
-                        chunk = []
+                    # Se abbiamo raggiunto la dimensione del batch, inserisci nel database
+                    if len(batch) >= batch_size:
+                        placeholders = ','.join(['?' for _ in record.keys()])
+                        insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
+                        conn.executemany(insert_sql, batch)
+                        conn.commit()
+                        batch = []
                         
-                        # Forza garbage collection dopo ogni chunk
-                        import gc
-                        gc.collect()
-                        
-                        # Mostra progresso ogni 5 secondi o ogni 1000 righe
+                        # Mostra progresso ogni 5 secondi
                         current_time = time.time()
                         if current_time - last_progress_time >= 5:
                             progress = (processed_lines / total_lines) * 100
-                            memory_usage = get_memory_usage()
+                            elapsed = current_time - start_time
+                            speed = processed_lines / elapsed if elapsed > 0 else 0
                             logger.info(f"""
 ⏳ Progresso: {progress:.1f}% ({processed_lines}/{total_lines} righe)
-💾 Memoria attuale: {memory_usage}
-❌ Errori: {error_count}
+🚀 Velocità: {speed:.1f} righe/secondo
+💾 Memoria: {get_memory_usage()}
 """)
                             last_progress_time = current_time
                             
-                            # Se la memoria è troppo alta, forza una pausa
-                            if float(memory_usage.replace('MB', '')) > 1000:  # 1GB
-                                logger.warning("⚠️ Memoria elevata, pausa di 5 secondi...")
-                                time.sleep(5)
-                                gc.collect()
-                            
+                            # Forza garbage collection
+                            gc.collect()
+                
                 except json.JSONDecodeError as e:
-                    error_count += 1
                     logger.error(f"❌ Errore nel parsing della riga JSON: {str(e)}")
-                    logger.error(f"📝 Contenuto riga problematica: {line[:200]}...")  # Mostra i primi 200 caratteri della riga
-                    if error_count >= max_errors:
-                        logger.error(f"❌ Troppi errori ({error_count}), interruzione elaborazione")
-                        break
+                    logger.error(f"📝 Contenuto riga problematica: {line[:200]}...")
                     continue
         
-        # Restituisci l'ultimo chunk se non è vuoto
-        if chunk:
-            yield chunk
-            
+        # Inserisci l'ultimo batch se non è vuoto
+        if batch:
+            placeholders = ','.join(['?' for _ in record.keys()])
+            insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
+            conn.executemany(insert_sql, batch)
+            conn.commit()
+        
+        # Riabilita gli indici
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        
+        # Crea indici per le colonne più utilizzate
+        for key in record.keys():
+            if key.endswith('_codice') or key.endswith('_id'):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_{key} ON {table_name}({key})")
+        
+        conn.commit()
+        
+        total_time = time.time() - start_time
         logger.info(f"""
-✅ Processamento completato:
-   - Righe elaborate: {processed_lines}
-   - Errori riscontrati: {error_count}
+✅ Importazione completata per {table_name}:
+   - Righe elaborate: {processed_lines:,}
+   - Tempo totale: {total_time:.1f} secondi
+   - Velocità media: {processed_lines/total_time:.1f} righe/secondo
    - Memoria finale: {get_memory_usage()}
 """)
         
-    except FileNotFoundError:
-        logger.error(f"❌ File non trovato: {file_path}")
-        raise
     except Exception as e:
-        logger.error(f"❌ Errore nella lettura del file {file_path}: {str(e)}")
+        logger.error(f"❌ Errore nell'importazione del file {file_path}: {str(e)}")
         raise
 
-def import_json_folder(folder_path: str, conn: sqlite3.Connection) -> None:
-    """Importa tutti i file JSON da una cartella nel database.
-    
-    Args:
-        folder_path: Percorso della cartella contenente i file JSON
-        conn: Connessione al database SQLite
-    """
+def find_json_files(base_path: str) -> List[str]:
+    """Trova ricorsivamente tutti i file JSON in una directory e nelle sue sottodirectory."""
+    json_files = []
+    for root, _, files in os.walk(base_path):
+        for file in files:
+            if file.endswith('.json'):
+                json_files.append(os.path.join(root, file))
+    return json_files
+
+def import_all_json_files(base_path: str, db_path: str) -> None:
+    """Importa tutti i file JSONL da una directory e dalle sue sottodirectory nel database."""
     try:
-        # Verifica che la cartella esista
-        if not os.path.exists(folder_path):
-            logger.error(f"❌ Cartella non trovata: {folder_path}")
-            return
-            
-        # Ottieni il nome della cartella per il nome della tabella
-        folder_name = os.path.basename(folder_path)
-        table_name = folder_name.replace('-', '_')
+        # Crea la connessione al database
+        conn = sqlite3.connect(db_path)
         
-        # Trova tutti i file JSON nella cartella
-        json_files = [f for f in os.listdir(folder_path) if f.endswith('.json')]
+        # Verifica che la directory esista
+        if not os.path.exists(base_path):
+            logger.error(f"❌ Directory non trovata: {base_path}")
+            return
+        
+        # Trova tutti i file JSON ricorsivamente
+        json_files = find_json_files(base_path)
         
         if not json_files:
-            logger.warning(f"⚠️ Nessun file JSON trovato in {folder_path}")
+            logger.warning(f"⚠️ Nessun file JSON trovato in {base_path} o nelle sue sottodirectory")
             return
-            
-        logger.info(f"📂 Elaborazione {len(json_files)} file in {folder_name}")
         
-        # Crea la tabella se non esiste
-        create_table_if_not_exists(conn, table_name)
+        logger.info(f"📂 Trovati {len(json_files)} file JSON da importare")
         
-        total_rows = 0
-        start_time = time.time()
-        last_progress_time = start_time
-        last_rows = 0
-        
+        # Importa ogni file
         for json_file in json_files:
-            file_path = os.path.join(folder_path, json_file)
-            file_start_time = time.time()
-            file_rows = 0
-            
-            try:
-                logger.info(f"📄 Elaborazione file: {json_file}")
-                
-                # Leggi il file JSON in chunks
-                for chunk in read_json_file(file_path):
-                    if chunk:
-                        # Converti il chunk in DataFrame
-                        df = pd.DataFrame(chunk)
-                        
-                        # Importa il chunk nel database
-                        df.to_sql(table_name, conn, if_exists='append', index=False)
-                        chunk_rows = len(chunk)
-                        total_rows += chunk_rows
-                        file_rows += chunk_rows
-                        
-                        # Commit dopo ogni chunk
-                        conn.commit()
-                        
-                        # Calcola e mostra statistiche ogni 5 secondi
-                        current_time = time.time()
-                        if current_time - last_progress_time >= 5:
-                            elapsed = current_time - start_time
-                            rows_per_second = total_rows / elapsed if elapsed > 0 else 0
-                            memory_usage = get_memory_usage()
-                            
-                            logger.info(f"""
-📊 Statistiche di importazione:
-   - Righe elaborate: {total_rows:,}
-   - Velocità: {rows_per_second:.1f} righe/secondo
-   - Memoria utilizzata: {memory_usage}
-   - Tempo trascorso: {elapsed:.1f} secondi
-""")
-                            last_progress_time = current_time
-                            last_rows = total_rows
-                
-                file_elapsed = time.time() - file_start_time
-                logger.info(f"✅ File completato: {json_file} ({file_rows:,} righe in {file_elapsed:.1f} secondi)")
-                
-            except Exception as e:
-                logger.error(f"❌ Errore nell'importazione del file {json_file}: {str(e)}")
-                continue
+            logger.info(f"📄 Elaborazione file: {json_file}")
+            import_json_file(json_file, conn)
         
-        total_elapsed = time.time() - start_time
-        logger.info(f"""
-🎉 Importazione completata per {folder_name}:
-   - Totale righe: {total_rows:,}
-   - Tempo totale: {total_elapsed:.1f} secondi
-   - Velocità media: {total_rows/total_elapsed:.1f} righe/secondo
-   - Memoria finale: {get_memory_usage()}
-""")
-                
+        conn.close()
+        
     except Exception as e:
-        logger.error(f"❌ Errore nell'importazione della cartella {folder_path}: {str(e)}")
-        raise 
+        logger.error(f"❌ Errore nell'importazione dei file: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    import_all_json_files("/database/JSON", "database.db") 
