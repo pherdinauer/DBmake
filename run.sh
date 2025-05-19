@@ -107,6 +107,9 @@ python3 -m venv venv
 echo -e "${YELLOW}🔌 Attivazione ambiente virtuale...${NC}"
 source venv/bin/activate
 
+# Imposta PYTHONPATH
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+
 # Verifica che l'ambiente virtuale sia attivo
 if [ -z "$VIRTUAL_ENV" ]; then
     echo -e "${RED}❌ Errore nell'attivazione dell'ambiente virtuale${NC}"

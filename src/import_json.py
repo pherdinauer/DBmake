@@ -1,6 +1,6 @@
 from typing import List, Dict, Generator
 import json
-from src.log import logger
+from .log import logger
 import time
 import psutil
 import os
