@@ -21,7 +21,7 @@ def get_memory_usage() -> str:
     return f"{process.memory_info().rss / 1024 / 1024:.1f}MB"
 
 def create_database_schema(conn: sqlite3.Connection) -> None:
-    """Crea lo schema del database unificato."""
+    """Crea lo schema del database unificato e la tabella raw_import."""
     # Tabella principale per i CIG
     conn.execute("""
     CREATE TABLE IF NOT EXISTS cig (
@@ -78,6 +78,15 @@ def create_database_schema(conn: sqlite3.Connection) -> None:
         importo_variante REAL,
         data_variante TEXT,
         FOREIGN KEY (cig) REFERENCES cig(cig)
+    )
+    """)
+    
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS raw_import (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cig TEXT,
+        raw_json TEXT,
+        source_file TEXT
     )
     """)
     
@@ -164,47 +173,31 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
         logger.error(f"📝 Record problematico: {record}")
 
 def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 100) -> None:
-    """Importa un file JSONL nel database unificato."""
+    """Importa un file JSONL nel database unificato e nella tabella raw_import."""
     try:
-        # Determina il tipo di record dal nome del file
         file_name = os.path.basename(file_path)
-        source_type = file_name.split('_')[0]  # Es: 'bandi-cig-modalita-realizzazione_json.json' -> 'bandi'
-        
-        # Conta le righe totali
-        with open(file_path, 'r', encoding='utf-8') as f:
-            total_lines = sum(1 for _ in f)
-        
-        logger.info(f"📊 File {file_path} contiene {total_lines} righe da processare")
-        
-        # Disabilita gli indici temporaneamente
-        conn.execute("PRAGMA foreign_keys = OFF")
-        conn.execute("PRAGMA journal_mode = OFF")
-        conn.execute("PRAGMA synchronous = OFF")
-        
-        processed_lines = 0
-        batch = []
-        start_time = time.time()
-        last_progress_time = start_time
-        
+        source_type = file_name.split('_')[0]
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                
                 try:
                     record = json.loads(line)
+                    cig = record.get('cig', None)
+                    # Inserisci nella tabella raw_import
+                    conn.execute(
+                        "INSERT INTO raw_import (cig, raw_json, source_file) VALUES (?, ?, ?)",
+                        (cig, json.dumps(record, ensure_ascii=False), file_name)
+                    )
+                    # ... importazione normale (opzionale, puoi commentare se vuoi solo raw_import) ...
                     batch.append(record)
                     processed_lines += 1
-                    
-                    # Processa il batch quando raggiunge la dimensione massima
                     if len(batch) >= batch_size:
                         for record in batch:
                             process_record(conn, record, source_type)
                         conn.commit()
                         batch = []
-                        
-                        # Mostra progresso ogni 5 secondi
                         current_time = time.time()
                         if current_time - last_progress_time >= 5:
                             progress = (processed_lines / total_lines) * 100
@@ -217,22 +210,14 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
 """)
                             last_progress_time = current_time
                             gc.collect()
-                
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ Errore nel parsing della riga JSON: {str(e)}")
                     logger.error(f"📝 Contenuto riga problematica: {line[:200]}...")
                     continue
-        
-        # Processa l'ultimo batch se non è vuoto
         if batch:
             for record in batch:
                 process_record(conn, record, source_type)
             conn.commit()
-        
-        # Riabilita gli indici
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
         
         # Crea indici per le colonne più utilizzate
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cig ON cig(cig)")
@@ -288,10 +273,50 @@ def import_all_json_files(base_path: str, db_path: str) -> None:
         
         logger.info(f"📂 Trovati {len(json_files)} file JSON da importare")
         
+        # Statistiche di importazione
+        total_records = 0
+        start_time = time.time()
+        
         # Importa ogni file
         for json_file in json_files:
             logger.info(f"📄 Elaborazione file: {json_file}")
             import_json_file(json_file, conn)
+            
+            # Conta i record importati
+            file_name = os.path.basename(json_file)
+            source_type = file_name.split('_')[0]
+            cursor = conn.cursor()
+            
+            if source_type == 'bandi':
+                cursor.execute("SELECT COUNT(*) FROM bandi")
+            elif source_type == 'aggiudicazioni':
+                cursor.execute("SELECT COUNT(*) FROM aggiudicazioni")
+            elif source_type == 'partecipanti':
+                cursor.execute("SELECT COUNT(*) FROM partecipanti")
+            elif source_type == 'varianti':
+                cursor.execute("SELECT COUNT(*) FROM varianti")
+                
+            count = cursor.fetchone()[0]
+            total_records += count
+        
+        # Calcola statistiche finali
+        total_time = time.time() - start_time
+        total_cig = conn.execute("SELECT COUNT(DISTINCT cig) FROM cig").fetchone()[0]
+        
+        logger.info(f"""
+✅ Importazione completata con successo!
+
+📊 Riepilogo:
+   - File elaborati: {len(json_files)}
+   - Record totali: {total_records:,}
+   - CIG unici: {total_cig:,}
+   - Tempo totale: {total_time:.1f} secondi
+   - Velocità media: {total_records/total_time:.1f} record/secondo
+   - Memoria finale: {get_memory_usage()}
+
+📁 Database salvato in: {os.path.abspath(db_path)}
+📝 Log disponibili in: {os.path.abspath('logs')}
+""")
         
         conn.close()
         
