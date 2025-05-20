@@ -177,6 +177,10 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
     try:
         file_name = os.path.basename(file_path)
         source_type = file_name.split('_')[0]
+        batch = []
+        processed_lines = 0
+        start_time = time.time()
+        last_progress_time = start_time
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -200,11 +204,11 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
                         batch = []
                         current_time = time.time()
                         if current_time - last_progress_time >= 5:
-                            progress = (processed_lines / total_lines) * 100
+                            progress = (processed_lines / 1) * 100  # Dummy value if total_lines is not available
                             elapsed = current_time - start_time
                             speed = processed_lines / elapsed if elapsed > 0 else 0
                             logger.info(f"""
-⏳ Progresso: {progress:.1f}% ({processed_lines}/{total_lines} righe)
+⏳ Progresso: {progress:.1f}% ({processed_lines} righe)
 🚀 Velocità: {speed:.1f} righe/secondo
 💾 Memoria: {get_memory_usage()}
 """)
