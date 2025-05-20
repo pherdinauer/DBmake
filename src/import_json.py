@@ -172,7 +172,7 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
         logger.error(f"❌ Errore nel processare il record: {str(e)}")
         logger.error(f"📝 Record problematico: {record}")
 
-def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 100) -> None:
+def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 1000) -> None:
     """Importa un file JSONL nel database unificato e nella tabella raw_import."""
     batch = []
     processed_lines = 0
@@ -253,7 +253,7 @@ def find_json_files(base_path: str) -> List[str]:
                 json_files.append(os.path.join(root, file))
     return json_files
 
-def import_all_json_files(base_path: str, db_path: str) -> None:
+def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) -> None:
     """Importa tutti i file JSONL da una directory e dalle sue sottodirectory nel database unificato."""
     try:
         # Crea la connessione al database
@@ -269,21 +269,28 @@ def import_all_json_files(base_path: str, db_path: str) -> None:
         
         # Trova tutti i file JSON ricorsivamente
         json_files = find_json_files(base_path)
+        total_files = len(json_files)
         
         if not json_files:
             logger.warning(f"⚠️ Nessun file JSON trovato in {base_path} o nelle sue sottodirectory")
             return
         
-        logger.info(f"📂 Trovati {len(json_files)} file JSON da importare")
+        logger.info(f"📂 Trovati {total_files} file JSON da importare")
         
         # Statistiche di importazione
         total_records = 0
         start_time = time.time()
         
-        # Importa ogni file
-        for json_file in json_files:
-            logger.info(f"📄 Elaborazione file: {json_file}")
-            import_json_file(json_file, conn)
+        # Batch size configurabile
+        if batch_size is None:
+            batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 1000))
+        logger.info(f"🚀 Batch size impostato a {batch_size}")
+        
+        # Importa ogni file con avanzamento globale
+        for idx, json_file in enumerate(json_files, 1):
+            percent = (idx / total_files) * 100
+            logger.info(f"[{idx:>3}/{total_files}] ({percent:.1f}%) Elaborazione file: {json_file}")
+            import_json_file(json_file, conn, batch_size=batch_size)
             
             # Conta i record importati
             file_name = os.path.basename(json_file)
@@ -308,13 +315,17 @@ def import_all_json_files(base_path: str, db_path: str) -> None:
         
         # Calcola statistiche finali
         total_time = time.time() - start_time
-        total_cig = conn.execute("SELECT COUNT(DISTINCT cig) FROM cig").fetchone()[0]
+        result = conn.execute("SELECT COUNT(DISTINCT cig) FROM cig").fetchone()
+        if result is not None:
+            total_cig = result[0]
+        else:
+            total_cig = 0
         
         logger.info(f"""
 ✅ Importazione completata con successo!
 
 📊 Riepilogo:
-   - File elaborati: {len(json_files)}
+   - File elaborati: {total_files}
    - Record totali: {total_records:,}
    - CIG unici: {total_cig:,}
    - Tempo totale: {total_time:.1f} secondi
@@ -332,4 +343,6 @@ def import_all_json_files(base_path: str, db_path: str) -> None:
         raise
 
 if __name__ == "__main__":
-    import_all_json_files("/database/JSON", "database.db") 
+    # Permetti override batch_size da variabile d'ambiente
+    batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 1000))
+    import_all_json_files("/database/JSON", "database.db", batch_size=batch_size) 
