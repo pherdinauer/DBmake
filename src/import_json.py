@@ -90,6 +90,14 @@ def create_database_schema(conn: sqlite3.Connection) -> None:
     )
     """)
     
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS import_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_file TEXT UNIQUE,
+        import_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    
     conn.commit()
 
 def extract_cig_data(record: Dict) -> Dict:
@@ -286,14 +294,20 @@ def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) 
             batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 1000))
         logger.info(f"🚀 Batch size impostato a {batch_size}")
         
+        # Recupera i file già importati
+        imported_files = set(row[0] for row in conn.execute("SELECT source_file FROM import_log").fetchall())
+        
         # Importa ogni file con avanzamento globale
         for idx, json_file in enumerate(json_files, 1):
+            file_name = os.path.basename(json_file)
             percent = (idx / total_files) * 100
+            if file_name in imported_files:
+                logger.info(f"[{idx:>3}/{total_files}] ({percent:.1f}%) File già importato, salto: {json_file}")
+                continue
             logger.info(f"[{idx:>3}/{total_files}] ({percent:.1f}%) Elaborazione file: {json_file}")
             import_json_file(json_file, conn, batch_size=batch_size)
             
             # Conta i record importati
-            file_name = os.path.basename(json_file)
             source_type = file_name.split('_')[0]
             cursor = conn.cursor()
             
@@ -312,6 +326,9 @@ def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) 
             else:
                 count = 0
             total_records += count
+            # Registra il file come importato
+            conn.execute("INSERT OR IGNORE INTO import_log (source_file) VALUES (?)", (file_name,))
+            conn.commit()
         
         # Calcola statistiche finali
         total_time = time.time() - start_time
