@@ -299,7 +299,11 @@ def import_all_json_files(base_path: str, db_path: str) -> None:
             elif source_type == 'varianti':
                 cursor.execute("SELECT COUNT(*) FROM varianti")
                 
-            count = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            if result is not None:
+                count = result[0]
+            else:
+                count = 0
             total_records += count
         
         # Calcola statistiche finali
