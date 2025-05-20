@@ -181,6 +181,7 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
         processed_lines = 0
         start_time = time.time()
         last_progress_time = start_time
+
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
@@ -194,7 +195,6 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
                         "INSERT INTO raw_import (cig, raw_json, source_file) VALUES (?, ?, ?)",
                         (cig, json.dumps(record, ensure_ascii=False), file_name)
                     )
-                    # ... importazione normale (opzionale, puoi commentare se vuoi solo raw_import) ...
                     batch.append(record)
                     processed_lines += 1
                     if len(batch) >= batch_size:
@@ -204,11 +204,10 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
                         batch = []
                         current_time = time.time()
                         if current_time - last_progress_time >= 5:
-                            progress = (processed_lines / 1) * 100  # Dummy value if total_lines is not available
                             elapsed = current_time - start_time
                             speed = processed_lines / elapsed if elapsed > 0 else 0
                             logger.info(f"""
-⏳ Progresso: {progress:.1f}% ({processed_lines} righe)
+⏳ Progresso: {processed_lines} righe
 🚀 Velocità: {speed:.1f} righe/secondo
 💾 Memoria: {get_memory_usage()}
 """)
@@ -218,6 +217,7 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
                     logger.error(f"❌ Errore nel parsing della riga JSON: {str(e)}")
                     logger.error(f"📝 Contenuto riga problematica: {line[:200]}...")
                     continue
+        # Processa l'ultimo batch se non è vuoto
         if batch:
             for record in batch:
                 process_record(conn, record, source_type)
