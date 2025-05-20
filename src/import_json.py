@@ -174,14 +174,13 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
 
 def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 100) -> None:
     """Importa un file JSONL nel database unificato e nella tabella raw_import."""
+    batch = []
+    processed_lines = 0
+    start_time = time.time()
+    last_progress_time = start_time
     try:
         file_name = os.path.basename(file_path)
         source_type = file_name.split('_')[0]
-        batch = []
-        processed_lines = 0
-        start_time = time.time()
-        last_progress_time = start_time
-
         with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
