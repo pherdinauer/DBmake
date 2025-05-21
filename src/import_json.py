@@ -180,7 +180,7 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
         logger.error(f"❌ Errore nel processare il record: {str(e)}")
         logger.error(f"📝 Record problematico: {record}")
 
-def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 1000) -> None:
+def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 5000) -> None:
     """Importa un file JSONL nel database unificato e nella tabella raw_import."""
     batch = []
     processed_lines = 0
