@@ -180,7 +180,7 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
         logger.error(f"❌ Errore nel processare il record: {str(e)}")
         logger.error(f"📝 Record problematico: {record}")
 
-def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 5000) -> None:
+def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 10000) -> None:
     """Importa un file JSONL nel database unificato e nella tabella raw_import."""
     batch = []
     processed_lines = 0
@@ -291,7 +291,7 @@ def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) 
         
         # Batch size configurabile
         if batch_size is None:
-            batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 1000))
+            batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 10000))
         logger.info(f"🚀 Batch size impostato a {batch_size}")
         
         # Recupera i file già importati
@@ -361,5 +361,5 @@ def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) 
 
 if __name__ == "__main__":
     # Permetti override batch_size da variabile d'ambiente
-    batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 1000))
+    batch_size = int(os.environ.get("IMPORT_BATCH_SIZE", 10000))
     import_all_json_files("/database/JSON", "database.db", batch_size=batch_size) 
