@@ -180,8 +180,7 @@ def process_record(conn: sqlite3.Connection, record: Dict, source_type: str) -> 
         logger.error(f"❌ Errore nel processare il record: {str(e)}")
         logger.error(f"📝 Record problematico: {record}")
 
-def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 200000) -> None:
-    """Importa un file JSONL nel database unificato e nella tabella raw_import."""
+def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int = 50000) -> None:
     batch = []
     processed_lines = 0
     start_time = time.time()
@@ -229,25 +228,6 @@ def import_json_file(file_path: str, conn: sqlite3.Connection, batch_size: int =
             for record in batch:
                 process_record(conn, record, source_type)
             conn.commit()
-        
-        # Crea indici per le colonne più utilizzate
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_cig ON cig(cig)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_bandi_cig ON bandi(cig)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_aggiudicazioni_cig ON aggiudicazioni(cig)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_partecipanti_cig ON partecipanti(cig)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_varianti_cig ON varianti(cig)")
-        
-        conn.commit()
-        
-        total_time = time.time() - start_time
-        logger.info(f"""
-✅ Importazione completata per {file_path}:
-   - Righe elaborate: {processed_lines:,}
-   - Tempo totale: {total_time:.1f} secondi
-   - Velocità media: {processed_lines/total_time:.1f} righe/secondo
-   - Memoria finale: {get_memory_usage()}
-""")
-        
     except Exception as e:
         logger.error(f"❌ Errore nell'importazione del file {file_path}: {str(e)}")
         raise
@@ -337,6 +317,17 @@ def import_all_json_files(base_path: str, db_path: str, batch_size: int = None) 
             total_cig = result[0]
         else:
             total_cig = 0
+        
+        # --- CREAZIONE INDICI ALLA FINE ---
+        logger.info("🛠️ Creazione indici sulle tabelle...")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cig ON cig(cig)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bandi_cig ON bandi(cig)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_aggiudicazioni_cig ON aggiudicazioni(cig)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_partecipanti_cig ON partecipanti(cig)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_varianti_cig ON varianti(cig)")
+        conn.commit()
+        logger.info("✅ Indici creati con successo!")
+        # --- FINE CREAZIONE INDICI ---
         
         logger.info(f"""
 ✅ Importazione completata con successo!
