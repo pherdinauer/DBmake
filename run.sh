@@ -157,10 +157,11 @@ show_menu() {
     echo
     echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
     echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
-    echo -e "${YELLOW}3)${NC} Cerca CIG nel database"
-    echo -e "${YELLOW}4)${NC} Esci"
+    echo -e "${YELLOW}3)${NC} Importa direttamente i JSON in MySQL"
+    echo -e "${YELLOW}4)${NC} Cerca CIG nel database"
+    echo -e "${YELLOW}5)${NC} Esci"
     echo
-    echo -n -e "${YELLOW}Scegli un'opzione (1-4): ${NC}"
+    echo -n -e "${YELLOW}Scegli un'opzione (1-5): ${NC}"
 }
 
 # Funzione per importare in SQLite
@@ -186,6 +187,17 @@ generate_mysql_sql() {
     fi
 }
 
+# Funzione per import diretto in MySQL
+import_to_mysql() {
+    echo -e "${YELLOW}Importazione diretta dei JSON in MySQL...${NC}"
+    python src/import_json_mysql.py
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Importazione completata con successo!${NC}"
+    else
+        echo -e "${RED}Errore durante l'importazione in MySQL.${NC}"
+    fi
+}
+
 # Funzione per cercare CIG
 search_cig() {
     echo -e "${YELLOW}Avvio ricerca CIG...${NC}"
@@ -206,9 +218,12 @@ while true; do
             generate_mysql_sql
             ;;
         3)
-            search_cig
+            import_to_mysql
             ;;
         4)
+            search_cig
+            ;;
+        5)
             echo -e "${GREEN}Arrivederci!${NC}"
             deactivate
             exit 0

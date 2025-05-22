@@ -5,6 +5,9 @@ import gc
 import glob
 import mysql.connector
 from mysql.connector import errorcode
+import psutil
+import threading
+import math
 
 # Parametri di connessione da variabili d'ambiente
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
@@ -13,6 +16,60 @@ MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
+
+# Calcola la RAM totale del sistema
+TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
+TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
+MEMORY_BUFFER_RATIO = 0.2  # 20% di buffer di sicurezza
+USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
+USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
+
+# Chunk size dinamico in base alla RAM
+CHUNK_SIZE_INIT_RATIO = 0.005  # 0.5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.05    # 5% della RAM usabile
+AVG_RECORD_SIZE_BYTES = 6 * 1024
+INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
+MIN_CHUNK_SIZE = 100
+
+class MemoryMonitor:
+    def __init__(self, max_memory_bytes):
+        self.max_memory_bytes = max_memory_bytes
+        self.current_chunk_size = INITIAL_CHUNK_SIZE
+        self.process = psutil.Process()
+        self.lock = threading.Lock()
+        self.running = True
+        self.monitor_thread = threading.Thread(target=self._monitor_memory)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+
+    def _monitor_memory(self):
+        while self.running:
+            try:
+                memory_info = self.process.memory_info()
+                memory_usage = memory_info.rss
+                percent_used = memory_usage / self.max_memory_bytes
+                with self.lock:
+                    if percent_used > 0.98:
+                        self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.5))
+                        print(f"\n🚨 Memoria quasi satura ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
+                        gc.collect()
+                    elif percent_used > 0.90:
+                        self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
+                        print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
+                        gc.collect()
+                    elif percent_used < 0.80 and self.current_chunk_size < MAX_CHUNK_SIZE:
+                        self.current_chunk_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.3))
+                        print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
+            except Exception as e:
+                print(f"Errore nel monitoraggio memoria: {e}")
+            time.sleep(1)
+    def get_chunk_size(self):
+        with self.lock:
+            return self.current_chunk_size
+    def stop(self):
+        self.running = False
+        self.monitor_thread.join()
 
 # Funzione per connettersi a MySQL
 def connect_mysql():
@@ -184,55 +241,93 @@ def find_json_files(base_path):
                 json_files.append(os.path.join(root, file))
     return json_files
 
-def import_all_json_files(base_path, conn, batch_size=BATCH_SIZE):
+def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
-    print(f"Trovati {total_files} file JSON da importare")
+    print(f"📁 Trovati {total_files} file JSON da importare")
     cursor = conn.cursor()
-    for idx, json_file in enumerate(json_files, 1):
-        percent = (idx / total_files) * 100
-        print(f"[{idx:>3}/{total_files}] ({percent:.1f}%) Elaborazione file: {json_file}")
-        file_name = os.path.basename(json_file)
-        processed_lines = 0
-        batch = []
-        with open(json_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    cig = record.get('cig', None)
-                    # Inserisci nella tabella raw_import
-                    cursor.execute(
-                        "INSERT INTO raw_import (cig, raw_json, source_file) VALUES (%s, %s, %s)",
-                        (cig, json.dumps(record, ensure_ascii=False), file_name)
-                    )
-                    batch.append((record, file_name))
-                    processed_lines += 1
-                    if len(batch) >= batch_size:
-                        for rec, _ in batch:
-                            process_record(cursor, rec, file_name.split('_')[0])
-                        conn.commit()
-                        batch = []
-                        print(f"  ... {processed_lines} righe elaborate")
-                        gc.collect()
-                except Exception as e:
-                    print(f"Errore nel parsing o inserimento: {e}")
-                    continue
-        # Processa l'ultimo batch
-        if batch:
-            for rec, _ in batch:
-                process_record(cursor, rec, file_name.split('_')[0])
-            conn.commit()
-        print(f"✅ File {json_file} importato con successo ({processed_lines} righe)")
-    cursor.close()
-    print("✅ Importazione completata!")
+    memory_monitor = MemoryMonitor(USABLE_MEMORY_BYTES)
+    start_time = time.time()
+    total_records = 0
+    files_processed = 0
+    total_time_so_far = 0
+    try:
+        for idx, json_file in enumerate(json_files, 1):
+            file_start_time = time.time()
+            file_name = os.path.basename(json_file)
+            source_type = file_name.split('_')[0]
+            file_records = 0
+            batch = []
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        cig = record.get('cig', None)
+                        # Serializza il JSON in modo compatibile con MySQL
+                        raw_json_str = json.dumps(record, ensure_ascii=True)
+                        raw_json_str = raw_json_str.replace('\\', '\\\\')
+                        cursor.execute(
+                            "INSERT INTO raw_import (cig, raw_json, source_file) VALUES (%s, %s, %s)",
+                            (cig, raw_json_str, file_name)
+                        )
+                        batch.append((record, file_name))
+                        file_records += 1
+                        total_records += 1
+                        current_chunk_size = memory_monitor.get_chunk_size()
+                        if len(batch) >= current_chunk_size:
+                            for rec, _ in batch:
+                                process_record(cursor, rec, source_type)
+                            conn.commit()
+                            batch = []
+                            gc.collect()
+                    except Exception as e:
+                        print(f"Errore nel parsing o inserimento: {e}")
+                        continue
+            # Processa l'ultimo batch
+            if batch:
+                for rec, _ in batch:
+                    process_record(cursor, rec, source_type)
+                conn.commit()
+            file_time = time.time() - file_start_time
+            total_time_so_far += file_time
+            files_processed += 1
+            avg_time_per_file = total_time_so_far / files_processed
+            remaining_files = total_files - files_processed
+            eta_seconds = avg_time_per_file * remaining_files
+            print(f"\n📊 Progresso file {idx}/{total_files}:")
+            print(f"   • File: {file_name}")
+            print(f"   • Record processati: {file_records:,}")
+            print(f"   • Tempo file: {str(int(file_time//60))}:{int(file_time%60):02d}")
+            print(f"   • Record totali: {total_records:,}")
+            print(f"   • Velocità media: {total_records/total_time_so_far:.1f} record/s")
+            print(f"   • ETA totale: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
+            print(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
+            print(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
+            gc.collect()
+        total_time = time.time() - start_time
+        print(f"\n✨ Importazione completata!")
+        print(f"📊 Statistiche finali:")
+        print(f"   • Record totali: {total_records:,}")
+        print(f"   • File processati: {total_files}")
+        print(f"   • Chunk size finale: {memory_monitor.get_chunk_size()}")
+        print(f"   • Tempo totale: {str(int(total_time//60))}:{int(total_time%60):02d}")
+        print(f"   • Velocità media: {total_records/total_time:.1f} record/s")
+    finally:
+        memory_monitor.stop()
+        cursor.close()
 
 def main():
+    print(f"🕒 Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
+    print(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
+    print(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
+    print(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
     conn = connect_mysql()
     create_tables(conn)
-    import_all_json_files(JSON_BASE_PATH, conn, batch_size=BATCH_SIZE)
+    import_all_json_files(JSON_BASE_PATH, conn)
     conn.close()
     print("Tutte le connessioni chiuse.")
 
