@@ -151,72 +151,62 @@ chmod -R 755 .
 # Funzione per mostrare il menu
 show_menu() {
     clear
-    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
-    echo -e "║                         CIG Database Management Tool                            ║"
-    echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
-    echo
+    echo "=== Menu Principale ==="
+    echo "1) Importa dati in SQLite"
+    echo "2) Genera file SQL per MySQL"
+    echo "3) Cerca CIG nel database"
+    echo "4) Esci"
+    echo "======================"
+    echo -n "Scegli un'opzione (1-4): "
 }
 
-# Funzione per importare i dati in SQLite
-data_import_sqlite() {
-    echo -e "${YELLOW}Inizio importazione dati in SQLite...${NC}"
-    python src/import_json.py
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Importazione completata con successo!${NC}"
-    else
-        echo -e "${RED}Errore durante l'importazione.${NC}"
-    fi
-    echo
-    read -p "Premi Invio per continuare..."
+# Funzione per importare in SQLite
+import_to_sqlite() {
+    echo "Importazione dati in SQLite..."
+    python src/import_json_to_sqlite.py
 }
 
-# Funzione per generare file SQL per MySQL
-data_export_mysql_sql() {
-    echo -e "${YELLOW}Generazione file SQL per MySQL...${NC}"
-    python src/export_to_mysql_sql.py
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}File SQL generato con successo!${NC}"
-    else
-        echo -e "${RED}Errore durante la generazione del file SQL.${NC}"
-    fi
-    echo
-    read -p "Premi Invio per continuare..."
+# Funzione per generare SQL MySQL
+generate_mysql_sql() {
+    echo "Generazione file SQL per MySQL..."
+    read -p "Inserisci la dimensione del chunk (default: 10000): " chunk_size
+    chunk_size=${chunk_size:-10000}  # Se vuoto, usa 10000 come default
+    python src/export_to_mysql_sql.py --chunk-size "$chunk_size"
 }
 
 # Funzione per cercare CIG
 search_cig() {
-    echo -e "${YELLOW}Avvio ricerca CIG...${NC}"
-    python src/cig_cli.py
-    echo
-    read -p "Premi Invio per continuare..."
+    echo "Ricerca CIG nel database..."
+    read -p "Inserisci il CIG da cercare: " cig
+    python src/search_cig.py "$cig"
 }
 
-# Loop principale del menu
+# Loop principale
 while true; do
     show_menu
-    echo "1. Importa dati JSON in SQLite (database.db)"
-    echo "2. Genera file SQL per MySQL (export_mysql.sql)"
-    echo "3. Cerca CIG nel database"
-    echo "4. Esci"
-    read -p "Scegli un'opzione (1-4): " choice
+    read choice
+
     case $choice in
         1)
-            data_import_sqlite
+            import_to_sqlite
             ;;
         2)
-            data_export_mysql_sql
+            generate_mysql_sql
             ;;
         3)
             search_cig
             ;;
         4)
-            echo -e "${GREEN}Arrivederci!${NC}"
+            echo "Arrivederci!"
             deactivate
             exit 0
             ;;
         *)
-            echo -e "${RED}Opzione non valida.${NC}"
-            read -p "Premi Invio per continuare..."
+            echo "Opzione non valida. Premi INVIO per continuare..."
+            read
             ;;
     esac
+
+    echo "Premi INVIO per tornare al menu principale..."
+    read
 done 
