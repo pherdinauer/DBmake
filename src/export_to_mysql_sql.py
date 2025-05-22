@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import argparse
 
 # Configurazione
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import')
@@ -82,7 +83,20 @@ def sql_escape(val):
         return str(val)
     return "'" + str(val).replace("'", "''") + "'"
 
+def write_insert_chunk(f, table, columns, rows):
+    if not rows:
+        return
+    f.write(f"INSERT INTO {table} ({columns}) VALUES\n  " + ',\n  '.join(rows) + ";\n\n")
+
 def main():
+    parser = argparse.ArgumentParser(description='Esporta dati JSON in formato SQL per MySQL')
+    parser.add_argument('--chunk-size', type=int, default=10000,
+                      help='Numero di righe per ogni blocco di INSERT (default: 10000)')
+    args = parser.parse_args()
+    
+    CHUNK_SIZE = args.chunk_size
+    print(f"Utilizzo chunk size di {CHUNK_SIZE} righe")
+
     with open(SQL_FILE, 'w', encoding='utf-8') as f:
         # CREATE DATABASE
         f.write(f"CREATE DATABASE IF NOT EXISTS `{MYSQL_DATABASE}` DEFAULT CHARACTER SET utf8mb4;\nUSE `{MYSQL_DATABASE}`;\n\n")
@@ -116,36 +130,48 @@ def main():
                         cig = record.get('cig', '')
                         # raw_import
                         raw_import_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(json.dumps(record, ensure_ascii=False))}, {sql_escape(file_name)})")
+                        if len(raw_import_rows) >= CHUNK_SIZE:
+                            write_insert_chunk(f, 'raw_import', 'id, cig, raw_json, source_file', raw_import_rows)
+                            raw_import_rows = []
                         # relazionali
                         if cig:
                             if source_type == 'bandi':
                                 bandi_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(record.get('tipo_bando', ''))}, {sql_escape(record.get('modalita_realizzazione', ''))}, {sql_escape(record.get('tipo_scelta_contraente', ''))})")
+                                if len(bandi_rows) >= CHUNK_SIZE:
+                                    write_insert_chunk(f, 'bandi', 'id, cig, tipo_bando, modalita_realizzazione, tipo_scelta_contraente', bandi_rows)
+                                    bandi_rows = []
                             elif source_type == 'aggiudicazioni':
                                 aggiudicazioni_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(record.get('importo_aggiudicazione', 0.0))}, {sql_escape(record.get('data_aggiudicazione', ''))})")
+                                if len(aggiudicazioni_rows) >= CHUNK_SIZE:
+                                    write_insert_chunk(f, 'aggiudicazioni', 'id, cig, importo_aggiudicazione, data_aggiudicazione', aggiudicazioni_rows)
+                                    aggiudicazioni_rows = []
                             elif source_type == 'partecipanti':
                                 partecipanti_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(record.get('codice_fiscale', ''))}, {sql_escape(record.get('ragione_sociale', ''))}, {sql_escape(record.get('importo_offerto', 0.0))})")
+                                if len(partecipanti_rows) >= CHUNK_SIZE:
+                                    write_insert_chunk(f, 'partecipanti', 'id, cig, codice_fiscale, ragione_sociale, importo_offerto', partecipanti_rows)
+                                    partecipanti_rows = []
                             elif source_type == 'varianti':
                                 varianti_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(record.get('importo_variante', 0.0))}, {sql_escape(record.get('data_variante', ''))})")
+                                if len(varianti_rows) >= CHUNK_SIZE:
+                                    write_insert_chunk(f, 'varianti', 'id, cig, importo_variante, data_variante', varianti_rows)
+                                    varianti_rows = []
                             # cig
                             if source_type in ['bandi', 'aggiudicazioni', 'partecipanti', 'varianti']:
                                 cig_row = f"({sql_escape(cig)}, {sql_escape(record.get('oggetto', ''))}, {sql_escape(record.get('importo', 0.0))}, {sql_escape(record.get('data_pubblicazione', ''))}, {sql_escape(record.get('data_scadenza', ''))}, {sql_escape(record.get('stato', ''))}, NOW())"
                                 cig_rows.append(cig_row)
+                                if len(cig_rows) >= CHUNK_SIZE:
+                                    write_insert_chunk(f, 'cig', 'cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at', cig_rows)
+                                    cig_rows = []
                     except Exception as e:
                         print(f"Errore nel parsing o esportazione: {e}")
                         continue
-        # Scrivi INSERT INTO
-        if cig_rows:
-            f.write("INSERT IGNORE INTO cig (cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at) VALUES\n  " + ',\n  '.join(cig_rows) + ";\n\n")
-        if bandi_rows:
-            f.write("INSERT INTO bandi (id, cig, tipo_bando, modalita_realizzazione, tipo_scelta_contraente) VALUES\n  " + ',\n  '.join(bandi_rows) + ";\n\n")
-        if aggiudicazioni_rows:
-            f.write("INSERT INTO aggiudicazioni (id, cig, importo_aggiudicazione, data_aggiudicazione) VALUES\n  " + ',\n  '.join(aggiudicazioni_rows) + ";\n\n")
-        if partecipanti_rows:
-            f.write("INSERT INTO partecipanti (id, cig, codice_fiscale, ragione_sociale, importo_offerto) VALUES\n  " + ',\n  '.join(partecipanti_rows) + ";\n\n")
-        if varianti_rows:
-            f.write("INSERT INTO varianti (id, cig, importo_variante, data_variante) VALUES\n  " + ',\n  '.join(varianti_rows) + ";\n\n")
-        if raw_import_rows:
-            f.write("INSERT INTO raw_import (id, cig, raw_json, source_file) VALUES\n  " + ',\n  '.join(raw_import_rows) + ";\n\n")
+        # Scrivi gli ultimi chunk rimasti
+        write_insert_chunk(f, 'cig', 'cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at', cig_rows)
+        write_insert_chunk(f, 'bandi', 'id, cig, tipo_bando, modalita_realizzazione, tipo_scelta_contraente', bandi_rows)
+        write_insert_chunk(f, 'aggiudicazioni', 'id, cig, importo_aggiudicazione, data_aggiudicazione', aggiudicazioni_rows)
+        write_insert_chunk(f, 'partecipanti', 'id, cig, codice_fiscale, ragione_sociale, importo_offerto', partecipanti_rows)
+        write_insert_chunk(f, 'varianti', 'id, cig, importo_variante, data_variante', varianti_rows)
+        write_insert_chunk(f, 'raw_import', 'id, cig, raw_json, source_file', raw_import_rows)
     print(f"✅ File SQL generato: {SQL_FILE}")
 
 if __name__ == "__main__":
