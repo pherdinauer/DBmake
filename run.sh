@@ -123,6 +123,15 @@ pip install --upgrade pip
 # Installa le dipendenze
 echo -e "${YELLOW}📦 Installazione dipendenze...${NC}"
 pip install -r requirements.txt
+# Installa anche mysql-connector-python se non presente
+if ! python -c "import mysql.connector" 2>/dev/null; then
+    echo -e "${YELLOW}📦 Installazione modulo mysql-connector-python...${NC}"
+    pip install mysql-connector-python
+    # Aggiungi a requirements.txt se non già presente
+    if ! grep -q "mysql-connector-python" requirements.txt; then
+        echo "mysql-connector-python" >> requirements.txt
+    fi
+fi
 
 # Verifica l'installazione di pandas
 echo -e "${YELLOW}🔍 Verifica installazione pandas...${NC}"
