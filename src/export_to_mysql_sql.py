@@ -76,17 +76,26 @@ CREATE_TABLES = {
 
 # Configurazione memoria
 # Calcola la RAM totale del sistema
-TOTAL_MEMORY_GB = psutil.virtual_memory().total / (1024 ** 3)
+TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
+TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
 MEMORY_BUFFER_RATIO = 0.2  # 20% di buffer di sicurezza
-MAX_MEMORY_GB = TOTAL_MEMORY_GB * (1 - MEMORY_BUFFER_RATIO)
+USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
+USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
-INITIAL_CHUNK_SIZE = 20000  # Chunk size iniziale
-MIN_CHUNK_SIZE = 100  # Chunk size minimo
-MAX_CHUNK_SIZE = 500000  # Chunk size massimo teorico
+# Chunk size dinamico in base alla RAM
+CHUNK_SIZE_INIT_RATIO = 0.005  # 0.5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.05    # 5% della RAM usabile
+
+# Stima: ogni record medio pesa 6KB (puoi regolare se vuoi più aggressivo)
+AVG_RECORD_SIZE_BYTES = 6 * 1024
+
+INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
+MIN_CHUNK_SIZE = 100
 
 class MemoryMonitor:
-    def __init__(self, max_memory_gb):
-        self.max_memory_bytes = max_memory_gb * 1024 * 1024 * 1024
+    def __init__(self, max_memory_bytes):
+        self.max_memory_bytes = max_memory_bytes
         self.current_chunk_size = INITIAL_CHUNK_SIZE
         self.process = psutil.Process()
         self.lock = threading.Lock()
@@ -105,15 +114,15 @@ class MemoryMonitor:
                 with self.lock:
                     if percent_used > 0.98:  # Sopra il 98% del limite
                         self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.5))
-                        print(f"\n🚨 Memoria quasi satura ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
+                        print(f"\n🚨 Memoria quasi satura ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
                         gc.collect()
                     elif percent_used > 0.90:  # Sopra il 90% del limite
                         self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
-                        print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
+                        print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
                         gc.collect()
                     elif percent_used < 0.80 and self.current_chunk_size < MAX_CHUNK_SIZE:  # Sotto l'80% del limite
                         self.current_chunk_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.3))
-                        print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
+                        print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
             except Exception as e:
                 print(f"Errore nel monitoraggio memoria: {e}")
             time.sleep(1)
@@ -200,12 +209,14 @@ def main():
     args = parser.parse_args()
     
     # Inizializza il monitor di memoria
-    memory_monitor = MemoryMonitor(MAX_MEMORY_GB)
+    memory_monitor = MemoryMonitor(USABLE_MEMORY_BYTES)
     
     start_time = time.time()
     print(f"🕒 Inizio esportazione: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📊 Limite memoria dinamico: {MAX_MEMORY_GB:.1f}GB su {TOTAL_MEMORY_GB:.1f}GB totali (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    print(f"📊 Chunk size iniziale: {args.chunk_size}")
+    print(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
+    print(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
+    print(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
+    print(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
 
     try:
         with open(SQL_FILE, 'w', encoding='utf-8', buffering=1) as f:
