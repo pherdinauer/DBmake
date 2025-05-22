@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import gc  # Garbage Collector
 import psutil
 import threading
+import math
 
 # Configurazione
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import')
@@ -74,10 +75,14 @@ CREATE_TABLES = {
 }
 
 # Configurazione memoria
-MAX_MEMORY_GB = 3.0  # Limite massimo di RAM in GB
+# Calcola la RAM totale del sistema
+TOTAL_MEMORY_GB = psutil.virtual_memory().total / (1024 ** 3)
+MEMORY_BUFFER_RATIO = 0.2  # 20% di buffer di sicurezza
+MAX_MEMORY_GB = TOTAL_MEMORY_GB * (1 - MEMORY_BUFFER_RATIO)
+
 INITIAL_CHUNK_SIZE = 20000  # Chunk size iniziale
 MIN_CHUNK_SIZE = 100  # Chunk size minimo
-MAX_CHUNK_SIZE = 50000  # Chunk size massimo
+MAX_CHUNK_SIZE = 500000  # Chunk size massimo teorico
 
 class MemoryMonitor:
     def __init__(self, max_memory_gb):
@@ -95,26 +100,23 @@ class MemoryMonitor:
             try:
                 memory_info = self.process.memory_info()
                 memory_usage = memory_info.rss  # Resident Set Size
+                percent_used = memory_usage / self.max_memory_bytes
 
                 with self.lock:
-                    if memory_usage > self.max_memory_bytes * 0.9:  # 90% del limite
-                        # Riduci il chunk size
-                        self.current_chunk_size = max(MIN_CHUNK_SIZE, 
-                                                    int(self.current_chunk_size * 0.8))
-                        print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB), "
-                              f"riduco chunk size a {self.current_chunk_size}")
+                    if percent_used > 0.98:  # Sopra il 98% del limite
+                        self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.5))
+                        print(f"\n🚨 Memoria quasi satura ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
                         gc.collect()
-                    elif memory_usage < self.max_memory_bytes * 0.7:  # 70% del limite
-                        # Aumenta il chunk size
-                        self.current_chunk_size = min(MAX_CHUNK_SIZE,
-                                                    int(self.current_chunk_size * 1.2))
-                        print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB), "
-                              f"aumento chunk size a {self.current_chunk_size}")
-
+                    elif percent_used > 0.90:  # Sopra il 90% del limite
+                        self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
+                        print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
+                        gc.collect()
+                    elif percent_used < 0.80 and self.current_chunk_size < MAX_CHUNK_SIZE:  # Sotto l'80% del limite
+                        self.current_chunk_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.3))
+                        print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{MAX_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
             except Exception as e:
                 print(f"Errore nel monitoraggio memoria: {e}")
-            
-            time.sleep(1)  # Controlla ogni secondo
+            time.sleep(1)
 
     def get_chunk_size(self):
         with self.lock:
@@ -202,7 +204,7 @@ def main():
     
     start_time = time.time()
     print(f"🕒 Inizio esportazione: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📊 Limite memoria: {MAX_MEMORY_GB}GB")
+    print(f"📊 Limite memoria dinamico: {MAX_MEMORY_GB:.1f}GB su {TOTAL_MEMORY_GB:.1f}GB totali (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
     print(f"📊 Chunk size iniziale: {args.chunk_size}")
 
     try:
