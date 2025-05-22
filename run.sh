@@ -155,20 +155,29 @@ show_menu() {
     echo -e "║                         CIG Database Management Tool                            ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
-    echo "1. Importa dati JSON nel database"
-    echo "2. Cerca CIG nel database"
-    echo "3. Esci"
-    echo
 }
 
-# Funzione per importare i dati
-import_data() {
-    echo -e "${YELLOW}Inizio importazione dati...${NC}"
-    python -m src.import_json
+# Funzione per importare i dati in SQLite
+data_import_sqlite() {
+    echo -e "${YELLOW}Inizio importazione dati in SQLite...${NC}"
+    python src/import_json.py
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Importazione completata con successo!${NC}"
     else
         echo -e "${RED}Errore durante l'importazione.${NC}"
+    fi
+    echo
+    read -p "Premi Invio per continuare..."
+}
+
+# Funzione per generare file SQL per MySQL
+data_export_mysql_sql() {
+    echo -e "${YELLOW}Generazione file SQL per MySQL...${NC}"
+    python src/export_to_mysql_sql.py
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}File SQL generato con successo!${NC}"
+    else
+        echo -e "${RED}Errore durante la generazione del file SQL.${NC}"
     fi
     echo
     read -p "Premi Invio per continuare..."
@@ -185,18 +194,23 @@ search_cig() {
 # Loop principale del menu
 while true; do
     show_menu
-    read -p "Scegli un'opzione (1-3): " choice
-    
+    echo "1. Importa dati JSON in SQLite (database.db)"
+    echo "2. Genera file SQL per MySQL (export_mysql.sql)"
+    echo "3. Cerca CIG nel database"
+    echo "4. Esci"
+    read -p "Scegli un'opzione (1-4): " choice
     case $choice in
         1)
-            import_data
+            data_import_sqlite
             ;;
         2)
-            search_cig
+            data_export_mysql_sql
             ;;
         3)
+            search_cig
+            ;;
+        4)
             echo -e "${GREEN}Arrivederci!${NC}"
-            # Disattiva l'ambiente virtuale prima di uscire
             deactivate
             exit 0
             ;;
