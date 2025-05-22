@@ -177,11 +177,8 @@ import_to_sqlite() {
 # Funzione per generare SQL MySQL
 generate_mysql_sql() {
     echo -e "${YELLOW}Generazione file SQL per MySQL...${NC}"
-    echo -e "${YELLOW}Inserisci la dimensione del chunk (default: 10000): ${NC}"
-    read chunk_size
-    chunk_size=${chunk_size:-10000}  # Se vuoto, usa 10000 come default
-    echo -e "${GREEN}Utilizzo chunk size di ${chunk_size} righe${NC}"
-    python src/export_to_mysql_sql.py --chunk-size "$chunk_size"
+    echo -e "${GREEN}Il chunk size ora è dinamico e adattato automaticamente alla RAM disponibile.${NC}"
+    python src/export_to_mysql_sql.py
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}File SQL generato con successo!${NC}"
     else
