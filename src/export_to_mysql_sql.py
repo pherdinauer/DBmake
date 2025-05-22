@@ -125,9 +125,11 @@ def main():
         print(f"📁 Trovati {total_files} file JSON da esportare")
         
         total_records = 0
+        files_processed = 0
+        total_time_so_far = 0
+        
         for idx, json_file in enumerate(json_files, 1):
             file_start_time = time.time()
-            print(f"\n[{idx:>3}/{total_files}] 📄 Esporto file: {json_file}")
             file_name = os.path.basename(json_file)
             source_type = file_name.split('_')[0]
             
@@ -141,13 +143,6 @@ def main():
                         record = json.loads(line)
                         file_records += 1
                         total_records += 1
-                        
-                        # Calcola e mostra progresso ogni 1000 record
-                        if file_records % 1000 == 0:
-                            elapsed = time.time() - start_time
-                            records_per_second = total_records / elapsed
-                            eta = (total_files - idx) * (file_records / (time.time() - file_start_time))
-                            print(f"   ⏳ Progresso: {file_records:,} record | Velocità: {records_per_second:.1f} record/s | ETA: {format_time(eta)}", end='\r')
                         
                         cig = record.get('cig', '')
                         # raw_import
@@ -189,7 +184,23 @@ def main():
                         continue
             
             file_time = time.time() - file_start_time
-            print(f"\n   ✅ File completato: {file_records:,} record in {format_time(file_time)}")
+            total_time_so_far += file_time
+            files_processed += 1
+            
+            # Calcola statistiche e ETA
+            avg_time_per_file = total_time_so_far / files_processed
+            remaining_files = total_files - files_processed
+            eta_seconds = avg_time_per_file * remaining_files
+            
+            # Mostra progresso alla fine di ogni file
+            print(f"\n📊 Progresso file {idx}/{total_files}:")
+            print(f"   • File: {file_name}")
+            print(f"   • Record processati: {file_records:,}")
+            print(f"   • Tempo file: {format_time(file_time)}")
+            print(f"   • Record totali: {total_records:,}")
+            print(f"   • Velocità media: {total_records/total_time_so_far:.1f} record/s")
+            print(f"   • ETA totale: {format_time(eta_seconds)}")
+            print(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
         
         # Scrivi gli ultimi chunk rimasti
         write_insert_chunk(f, 'cig', 'cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at', cig_rows)
@@ -201,7 +212,7 @@ def main():
     
     total_time = time.time() - start_time
     print(f"\n✨ Esportazione completata!")
-    print(f"📊 Statistiche:")
+    print(f"📊 Statistiche finali:")
     print(f"   • Record totali: {total_records:,}")
     print(f"   • File processati: {total_files}")
     print(f"   • Chunk size: {CHUNK_SIZE:,}")
