@@ -254,6 +254,7 @@ def import_all_json_files(base_path, conn):
     total_records = 0
     files_processed = 0
     total_time_so_far = 0
+    
     try:
         for idx, json_file in enumerate(json_files, 1):
             file_start_time = time.time()
@@ -261,6 +262,12 @@ def import_all_json_files(base_path, conn):
             source_type = file_name.split('_')[0]
             file_records = 0
             batch = []
+            
+            # Aggiungi una linea di separazione per ogni nuovo file
+            print("\n" + "="*80)
+            print(f"📂 Processando file {idx}/{total_files}: {file_name}")
+            print("="*80)
+            
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
@@ -279,6 +286,13 @@ def import_all_json_files(base_path, conn):
                         batch.append((record, file_name))
                         file_records += 1
                         total_records += 1
+                        
+                        # Mostra progresso ogni 1000 record
+                        if file_records % 1000 == 0:
+                            elapsed = time.time() - file_start_time
+                            speed = file_records / elapsed if elapsed > 0 else 0
+                            print(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                        
                         current_chunk_size = memory_monitor.get_chunk_size()
                         if len(batch) >= current_chunk_size:
                             for rec, _ in batch:
@@ -287,37 +301,48 @@ def import_all_json_files(base_path, conn):
                             batch = []
                             gc.collect()
                     except Exception as e:
-                        print(f"Errore nel parsing o inserimento: {e}")
+                        print(f"\n❌ Errore nel parsing o inserimento: {e}")
                         continue
+            
             # Processa l'ultimo batch
             if batch:
                 for rec, _ in batch:
                     process_record(cursor, rec, source_type)
                 conn.commit()
+            
             file_time = time.time() - file_start_time
             total_time_so_far += file_time
             files_processed += 1
             avg_time_per_file = total_time_so_far / files_processed
             remaining_files = total_files - files_processed
             eta_seconds = avg_time_per_file * remaining_files
-            print(f"\n📊 Progresso file {idx}/{total_files}:")
-            print(f"   • File: {file_name}")
+            
+            # Statistiche dettagliate dopo ogni file
+            print("\n\n📈 Statistiche file:")
             print(f"   • Record processati: {file_records:,}")
-            print(f"   • Tempo file: {str(int(file_time//60))}:{int(file_time%60):02d}")
+            print(f"   • Tempo elaborazione: {str(int(file_time//60))}:{int(file_time%60):02d}")
+            print(f"   • Velocità media: {file_records/file_time:.1f} record/s")
+            
+            print("\n📊 Statistiche totali:")
             print(f"   • Record totali: {total_records:,}")
-            print(f"   • Velocità media: {total_records/total_time_so_far:.1f} record/s")
-            print(f"   • ETA totale: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
+            print(f"   • File completati: {files_processed}/{total_files}")
             print(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
+            print(f"   • ETA stimata: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
             print(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
+            
             gc.collect()
+        
         total_time = time.time() - start_time
-        print(f"\n✨ Importazione completata!")
+        print("\n" + "="*80)
+        print("✨ Importazione completata!")
+        print("="*80)
         print(f"📊 Statistiche finali:")
         print(f"   • Record totali: {total_records:,}")
         print(f"   • File processati: {total_files}")
         print(f"   • Chunk size finale: {memory_monitor.get_chunk_size()}")
         print(f"   • Tempo totale: {str(int(total_time//60))}:{int(total_time%60):02d}")
         print(f"   • Velocità media: {total_records/total_time:.1f} record/s")
+        print("="*80)
     finally:
         memory_monitor.stop()
         cursor.close()
