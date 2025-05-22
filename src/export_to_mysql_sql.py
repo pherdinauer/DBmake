@@ -2,6 +2,8 @@ import os
 import json
 import glob
 import argparse
+import time
+from datetime import datetime, timedelta
 
 # Configurazione
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import')
@@ -88,6 +90,9 @@ def write_insert_chunk(f, table, columns, rows):
         return
     f.write(f"INSERT INTO {table} ({columns}) VALUES\n  " + ',\n  '.join(rows) + ";\n\n")
 
+def format_time(seconds):
+    return str(timedelta(seconds=int(seconds)))
+
 def main():
     parser = argparse.ArgumentParser(description='Esporta dati JSON in formato SQL per MySQL')
     parser.add_argument('--chunk-size', type=int, default=10000,
@@ -95,7 +100,9 @@ def main():
     args = parser.parse_args()
     
     CHUNK_SIZE = args.chunk_size
-    print(f"Utilizzo chunk size di {CHUNK_SIZE} righe")
+    start_time = time.time()
+    print(f"🕒 Inizio esportazione: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📊 Utilizzo chunk size di {CHUNK_SIZE} righe")
 
     with open(SQL_FILE, 'w', encoding='utf-8') as f:
         # CREATE DATABASE
@@ -115,11 +122,16 @@ def main():
 
         json_files = find_json_files(JSON_BASE_PATH)
         total_files = len(json_files)
-        print(f"Trovati {total_files} file JSON da esportare")
+        print(f"📁 Trovati {total_files} file JSON da esportare")
+        
+        total_records = 0
         for idx, json_file in enumerate(json_files, 1):
-            print(f"[{idx:>3}/{total_files}] Esporto file: {json_file}")
+            file_start_time = time.time()
+            print(f"\n[{idx:>3}/{total_files}] 📄 Esporto file: {json_file}")
             file_name = os.path.basename(json_file)
             source_type = file_name.split('_')[0]
+            
+            file_records = 0
             with open(json_file, 'r', encoding='utf-8') as jf:
                 for line in jf:
                     line = line.strip()
@@ -127,6 +139,16 @@ def main():
                         continue
                     try:
                         record = json.loads(line)
+                        file_records += 1
+                        total_records += 1
+                        
+                        # Calcola e mostra progresso ogni 1000 record
+                        if file_records % 1000 == 0:
+                            elapsed = time.time() - start_time
+                            records_per_second = total_records / elapsed
+                            eta = (total_files - idx) * (file_records / (time.time() - file_start_time))
+                            print(f"   ⏳ Progresso: {file_records:,} record | Velocità: {records_per_second:.1f} record/s | ETA: {format_time(eta)}", end='\r')
+                        
                         cig = record.get('cig', '')
                         # raw_import
                         raw_import_rows.append(f"(NULL, {sql_escape(cig)}, {sql_escape(json.dumps(record, ensure_ascii=False))}, {sql_escape(file_name)})")
@@ -163,8 +185,12 @@ def main():
                                     write_insert_chunk(f, 'cig', 'cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at', cig_rows)
                                     cig_rows = []
                     except Exception as e:
-                        print(f"Errore nel parsing o esportazione: {e}")
+                        print(f"❌ Errore nel parsing o esportazione: {e}")
                         continue
+            
+            file_time = time.time() - file_start_time
+            print(f"\n   ✅ File completato: {file_records:,} record in {format_time(file_time)}")
+        
         # Scrivi gli ultimi chunk rimasti
         write_insert_chunk(f, 'cig', 'cig, oggetto, importo, data_pubblicazione, data_scadenza, stato, created_at', cig_rows)
         write_insert_chunk(f, 'bandi', 'id, cig, tipo_bando, modalita_realizzazione, tipo_scelta_contraente', bandi_rows)
@@ -172,7 +198,17 @@ def main():
         write_insert_chunk(f, 'partecipanti', 'id, cig, codice_fiscale, ragione_sociale, importo_offerto', partecipanti_rows)
         write_insert_chunk(f, 'varianti', 'id, cig, importo_variante, data_variante', varianti_rows)
         write_insert_chunk(f, 'raw_import', 'id, cig, raw_json, source_file', raw_import_rows)
-    print(f"✅ File SQL generato: {SQL_FILE}")
+    
+    total_time = time.time() - start_time
+    print(f"\n✨ Esportazione completata!")
+    print(f"📊 Statistiche:")
+    print(f"   • Record totali: {total_records:,}")
+    print(f"   • File processati: {total_files}")
+    print(f"   • Chunk size: {CHUNK_SIZE:,}")
+    print(f"   • Tempo totale: {format_time(total_time)}")
+    print(f"   • Velocità media: {total_records/total_time:.1f} record/s")
+    print(f"   • File generato: {SQL_FILE}")
+    print(f"🕒 Fine esportazione: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == "__main__":
     main() 
