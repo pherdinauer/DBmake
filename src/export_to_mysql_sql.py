@@ -75,9 +75,9 @@ CREATE_TABLES = {
 
 # Configurazione memoria
 MAX_MEMORY_GB = 3.0  # Limite massimo di RAM in GB
-INITIAL_CHUNK_SIZE = 5000  # Chunk size iniziale
+INITIAL_CHUNK_SIZE = 20000  # Chunk size iniziale
 MIN_CHUNK_SIZE = 100  # Chunk size minimo
-MAX_CHUNK_SIZE = 10000  # Chunk size massimo
+MAX_CHUNK_SIZE = 50000  # Chunk size massimo
 
 class MemoryMonitor:
     def __init__(self, max_memory_gb):
