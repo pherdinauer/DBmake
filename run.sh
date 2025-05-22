@@ -151,33 +151,48 @@ chmod -R 755 .
 # Funzione per mostrare il menu
 show_menu() {
     clear
-    echo "=== Menu Principale ==="
-    echo "1) Importa dati in SQLite"
-    echo "2) Genera file SQL per MySQL"
-    echo "3) Cerca CIG nel database"
-    echo "4) Esci"
-    echo "======================"
-    echo -n "Scegli un'opzione (1-4): "
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
+    echo -e "║                         CIG Database Management Tool                            ║"
+    echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
+    echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
+    echo -e "${YELLOW}3)${NC} Cerca CIG nel database"
+    echo -e "${YELLOW}4)${NC} Esci"
+    echo
+    echo -n -e "${YELLOW}Scegli un'opzione (1-4): ${NC}"
 }
 
 # Funzione per importare in SQLite
 import_to_sqlite() {
-    echo "Importazione dati in SQLite..."
+    echo -e "${YELLOW}Inizio importazione dati in SQLite...${NC}"
     python src/import_json_to_sqlite.py
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Importazione completata con successo!${NC}"
+    else
+        echo -e "${RED}Errore durante l'importazione.${NC}"
+    fi
 }
 
 # Funzione per generare SQL MySQL
 generate_mysql_sql() {
-    echo "Generazione file SQL per MySQL..."
-    read -p "Inserisci la dimensione del chunk (default: 10000): " chunk_size
+    echo -e "${YELLOW}Generazione file SQL per MySQL...${NC}"
+    echo -e "${YELLOW}Inserisci la dimensione del chunk (default: 10000): ${NC}"
+    read chunk_size
     chunk_size=${chunk_size:-10000}  # Se vuoto, usa 10000 come default
+    echo -e "${GREEN}Utilizzo chunk size di ${chunk_size} righe${NC}"
     python src/export_to_mysql_sql.py --chunk-size "$chunk_size"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}File SQL generato con successo!${NC}"
+    else
+        echo -e "${RED}Errore durante la generazione del file SQL.${NC}"
+    fi
 }
 
 # Funzione per cercare CIG
 search_cig() {
-    echo "Ricerca CIG nel database..."
-    read -p "Inserisci il CIG da cercare: " cig
+    echo -e "${YELLOW}Avvio ricerca CIG...${NC}"
+    read -p -e "${YELLOW}Inserisci il CIG da cercare: ${NC}" cig
     python src/search_cig.py "$cig"
 }
 
@@ -197,16 +212,16 @@ while true; do
             search_cig
             ;;
         4)
-            echo "Arrivederci!"
+            echo -e "${GREEN}Arrivederci!${NC}"
             deactivate
             exit 0
             ;;
         *)
-            echo "Opzione non valida. Premi INVIO per continuare..."
-            read
+            echo -e "${RED}Opzione non valida.${NC}"
             ;;
     esac
 
-    echo "Premi INVIO per tornare al menu principale..."
+    echo
+    echo -e "${YELLOW}Premi INVIO per tornare al menu principale...${NC}"
     read
 done 
