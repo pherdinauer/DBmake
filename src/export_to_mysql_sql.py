@@ -163,8 +163,10 @@ def write_insert_chunk(f, table, columns, rows):
 def process_record(record, file_name, source_type, f, rows_buffer):
     cig = record.get('cig', '')
     
-    # Aggiungi al buffer invece di scrivere subito
-    raw_import_row = f"(NULL, {sql_escape(cig)}, {sql_escape(json.dumps(record, ensure_ascii=False))}, {sql_escape(file_name)})"
+    # Serializza il JSON in modo compatibile con MySQL
+    raw_json_str = json.dumps(record, ensure_ascii=True)
+    raw_json_str = raw_json_str.replace('\\', '\\\\')  # Raddoppia i backslash
+    raw_import_row = f"(NULL, {sql_escape(cig)}, {sql_escape(raw_json_str)}, {sql_escape(file_name)})"
     rows_buffer['raw_import'].append(raw_import_row)
     
     if cig:
