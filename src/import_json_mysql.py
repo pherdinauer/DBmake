@@ -8,6 +8,9 @@ from mysql.connector import errorcode
 import psutil
 import threading
 import math
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Parametri di connessione da variabili d'ambiente
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
