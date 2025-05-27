@@ -292,14 +292,25 @@ def analyze_json_structure(json_files):
     
     return table_definitions
 
+def sanitize_field_name(field_name):
+    """Sanitizza il nome del campo per MySQL."""
+    # Sostituisce i caratteri non validi con underscore
+    sanitized = field_name.replace('-', '_')
+    # Rimuove altri caratteri non validi
+    sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '_')
+    return sanitized
+
 def create_dynamic_tables(conn, table_definitions):
     cursor = conn.cursor()
+    
+    # Crea un mapping tra nomi originali e nomi sanitizzati
+    field_mapping = {field: sanitize_field_name(field) for field in table_definitions.keys()}
     
     # Crea la tabella principale con tutti i campi
     create_main_table = f"""
     CREATE TABLE IF NOT EXISTS main_data (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        {', '.join(f"{field} {def_type}" for field, def_type in table_definitions.items())},
+        {', '.join(f"{field_mapping[field]} {def_type}" for field, def_type in table_definitions.items())},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source_file VARCHAR(255),
         batch_id VARCHAR(64),
@@ -314,11 +325,12 @@ def create_dynamic_tables(conn, table_definitions):
     # Crea tabelle separate per i campi JSON
     for field, def_type in table_definitions.items():
         if def_type == 'JSON':
+            sanitized_field = field_mapping[field]
             create_json_table = f"""
-            CREATE TABLE IF NOT EXISTS {field}_data (
+            CREATE TABLE IF NOT EXISTS {sanitized_field}_data (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 main_id INT,
-                {field}_json JSON,
+                {sanitized_field}_json JSON,
                 source_file VARCHAR(255),
                 batch_id VARCHAR(64),
                 FOREIGN KEY (main_id) REFERENCES main_data(id),
@@ -343,6 +355,27 @@ def create_dynamic_tables(conn, table_definitions):
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     """
     cursor.execute(create_processed_files)
+    
+    # Salva il mapping dei campi in una tabella di metadati
+    create_field_mapping = """
+    CREATE TABLE IF NOT EXISTS field_mapping (
+        original_name VARCHAR(255) PRIMARY KEY,
+        sanitized_name VARCHAR(255),
+        field_type VARCHAR(50),
+        INDEX idx_sanitized_name (sanitized_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    cursor.execute(create_field_mapping)
+    
+    # Inserisci il mapping dei campi
+    for field, def_type in table_definitions.items():
+        cursor.execute("""
+            INSERT INTO field_mapping (original_name, sanitized_name, field_type)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                sanitized_name = VALUES(sanitized_name),
+                field_type = VALUES(field_type)
+        """, (field, field_mapping[field], def_type))
     
     cursor.close()
 
@@ -381,6 +414,10 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         json_data = defaultdict(list)
         file_name = batch[0][1]  # Prendi il nome del file dal primo record
         
+        # Ottieni il mapping dei campi
+        cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
+        field_mapping = dict(cursor.fetchall())
+        
         for record, _ in batch:
             # Prepara i dati per la tabella principale
             main_values = []
@@ -389,7 +426,7 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 field_lower = field.lower().replace(' ', '_')
                 value = record.get(field_lower)
                 if def_type == 'JSON' and value is not None:
-                    json_data[field].append((len(main_data) + 1, json.dumps(value)))
+                    json_data[field_mapping[field]].append((len(main_data) + 1, json.dumps(value)))
                     value = None
                 main_values.append(value)
             
@@ -399,7 +436,7 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
         # Inserisci i dati nella tabella principale
         if main_data:
-            fields = list(table_definitions.keys()) + ['source_file', 'batch_id']
+            fields = [field_mapping[field] for field in table_definitions.keys()] + ['source_file', 'batch_id']
             placeholders = ', '.join(['%s'] * len(fields))
             insert_main = f"""
             INSERT INTO main_data ({', '.join(fields)})
