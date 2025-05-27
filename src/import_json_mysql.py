@@ -10,7 +10,21 @@ import threading
 import math
 from dotenv import load_dotenv
 from collections import defaultdict
+import logging
+from datetime import datetime
 
+# Configurazione logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'logs/import_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Carica le variabili d'ambiente
 load_dotenv()
 
 # Parametri di connessione da variabili d'ambiente
@@ -64,22 +78,22 @@ class MemoryMonitor:
                     with self.lock:
                         if percent_used > 0.95:  # 95% di memoria utilizzata
                             self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.5))
-                            print(f"\n🚨 Memoria critica ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
+                            logger.warning(f"Memoria critica ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
                             gc.collect()
                         elif percent_used > 0.85:  # 85% di memoria utilizzata
                             self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
-                            print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
+                            logger.warning(f"Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
                         elif percent_used < 0.70 and self.current_chunk_size < MAX_CHUNK_SIZE:  # 70% di memoria utilizzata
                             # Aumenta gradualmente il chunk size
                             new_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.2))
                             if new_size > self.current_chunk_size:
                                 self.current_chunk_size = new_size
-                                print(f"\n✅ Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
+                                logger.info(f"Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
                     
                     self.last_memory_check = current_time
             except Exception as e:
-                print(f"Errore nel monitoraggio memoria: {e}")
-            time.sleep(0.1)  # Controlla più frequentemente
+                logger.error(f"Errore nel monitoraggio memoria: {e}")
+            time.sleep(0.1)
 
     def get_chunk_size(self):
         with self.lock:
@@ -89,20 +103,19 @@ class MemoryMonitor:
         self.running = False
         self.monitor_thread.join()
 
-# Funzione per connettersi a MySQL
 def connect_mysql():
     max_retries = 3
     retry_delay = 5  # secondi
     
-    print("\n🔍 Verifica configurazione MySQL:")
-    print(f"   • Host: {MYSQL_HOST}")
-    print(f"   • User: {MYSQL_USER}")
-    print(f"   • Database: {MYSQL_DATABASE}")
-    print(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
+    logger.info("\n🔍 Verifica configurazione MySQL:")
+    logger.info(f"   • Host: {MYSQL_HOST}")
+    logger.info(f"   • User: {MYSQL_USER}")
+    logger.info(f"   • Database: {MYSQL_DATABASE}")
+    logger.info(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
     
     for attempt in range(max_retries):
         try:
-            print(f"\n🔄 Tentativo di connessione {attempt + 1}/{max_retries}...")
+            logger.info(f"\n🔄 Tentativo di connessione {attempt + 1}/{max_retries}...")
             conn = mysql.connector.connect(
                 host=MYSQL_HOST,
                 user=MYSQL_USER,
@@ -121,11 +134,11 @@ def connect_mysql():
             cursor.execute("SET GLOBAL max_allowed_packet=1073741824")
             cursor.close()
             
-            print("✅ Connessione riuscita!")
+            logger.info("✅ Connessione riuscita!")
             return conn
         except mysql.connector.Error as err:
             if err.errno == errorcode.ER_BAD_DB_ERROR:
-                print(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
+                logger.warning(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
                 # Crea il database se non esiste
                 tmp_conn = mysql.connector.connect(
                     host=MYSQL_HOST,
@@ -137,49 +150,82 @@ def connect_mysql():
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
                 tmp_conn.close()
-                print(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
+                logger.info(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
                 return connect_mysql()
             elif attempt < max_retries - 1:
-                print(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
-                print(f"🔄 Riprovo tra {retry_delay} secondi...")
+                logger.warning(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
+                logger.info(f"🔄 Riprovo tra {retry_delay} secondi...")
                 time.sleep(retry_delay)
             else:
-                print(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
+                logger.error(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
                 raise
 
-# Funzione per analizzare la struttura del JSON e creare le definizioni delle tabelle
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
     field_lengths = defaultdict(int)
     
-    print("🔍 Analisi della struttura dei JSON...")
+    logger.info("🔍 Analisi della struttura dei JSON...")
+    total_files = len(json_files)
+    files_analyzed = 0
+    records_analyzed = 0
+    start_time = time.time()
+    
     for json_file in json_files:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                try:
-                    record = json.loads(line.strip())
-                    for field, value in record.items():
-                        if value is None:
-                            continue
+        files_analyzed += 1
+        file_records = 0
+        file_start_time = time.time()
+        
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                        file_records += 1
+                        records_analyzed += 1
                         
-                        # Normalizza i nomi dei campi
-                        field = field.lower().replace(' ', '_')
+                        for field, value in record.items():
+                            if value is None:
+                                continue
+                            
+                            # Normalizza i nomi dei campi
+                            field = field.lower().replace(' ', '_')
+                            
+                            # Determina il tipo di campo
+                            if isinstance(value, bool):
+                                field_types[field]['BOOLEAN'] += 1
+                            elif isinstance(value, int):
+                                field_types[field]['INT'] += 1
+                            elif isinstance(value, float):
+                                field_types[field]['DOUBLE'] += 1
+                            elif isinstance(value, str):
+                                field_types[field]['VARCHAR'] += 1
+                                field_lengths[field] = max(field_lengths[field], len(value))
+                            elif isinstance(value, (list, dict)):
+                                field_types[field]['JSON'] += 1
                         
-                        # Determina il tipo di campo
-                        if isinstance(value, bool):
-                            field_types[field]['BOOLEAN'] += 1
-                        elif isinstance(value, int):
-                            field_types[field]['INT'] += 1
-                        elif isinstance(value, float):
-                            field_types[field]['DOUBLE'] += 1
-                        elif isinstance(value, str):
-                            field_types[field]['VARCHAR'] += 1
-                            field_lengths[field] = max(field_lengths[field], len(value))
-                        elif isinstance(value, (list, dict)):
-                            field_types[field]['JSON'] += 1
-                except Exception as e:
-                    print(f"⚠️ Errore nell'analisi del file {json_file}: {e}")
-                    continue
+                        # Aggiorna il progresso ogni 1000 record
+                        if file_records % 1000 == 0:
+                            elapsed = time.time() - file_start_time
+                            speed = file_records / elapsed if elapsed > 0 else 0
+                            logger.info(f"\r📊 File {files_analyzed}/{total_files} | Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                            
+                    except Exception as e:
+                        logger.error(f"⚠️ Errore nell'analisi del record nel file {json_file}: {e}")
+                        continue
+            
+            # Log alla fine di ogni file
+            file_time = time.time() - file_start_time
+            total_time = time.time() - start_time
+            avg_speed = records_analyzed / total_time if total_time > 0 else 0
+            logger.info(f"\n✅ File {files_analyzed}/{total_files} completato:")
+            logger.info(f"   • Record analizzati: {file_records:,}")
+            logger.info(f"   • Tempo file: {file_time:.1f}s")
+            logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
+            logger.info(f"   • Progresso totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
+            
+        except Exception as e:
+            logger.error(f"⚠️ Errore nell'analisi del file {json_file}: {e}")
+            continue
     
     # Crea le definizioni delle tabelle
     table_definitions = {}
@@ -205,9 +251,12 @@ def analyze_json_structure(json_files):
         table_definitions[field] = column_def
     
     # Stampa un riepilogo della struttura trovata
-    print("\n📊 Struttura JSON analizzata:")
+    logger.info("\n📊 Struttura JSON analizzata:")
+    logger.info(f"   • File analizzati: {files_analyzed}/{total_files}")
+    logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
+    logger.info(f"   • Campi trovati: {len(table_definitions)}")
     for field, def_type in table_definitions.items():
-        print(f"   • {field}: {def_type}")
+        logger.info(f"   • {field}: {def_type}")
     
     return table_definitions
 
@@ -286,7 +335,7 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         """, (file_name, record_count, status, error_message))
         conn.commit()
     except Exception as e:
-        print(f"❌ Errore nel marcare il file come processato: {e}")
+        logger.error(f"❌ Errore nel marcare il file come processato: {e}")
         conn.rollback()
     finally:
         cursor.close()
@@ -338,11 +387,11 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
-            print("\n⚠️ Batch troppo grande, riduco la dimensione...")
+            logger.warning("\n⚠️ Batch troppo grande, riduco la dimensione...")
             raise ValueError("BATCH_TOO_LARGE")
         raise
     except Exception as e:
-        print(f"\n❌ Errore durante il processing del batch: {e}")
+        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
         raise
 
 def find_json_files(base_path):
@@ -356,7 +405,7 @@ def find_json_files(base_path):
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
-    print(f"📁 Trovati {total_files} file JSON da importare")
+    logger.info(f"📁 Trovati {total_files} file JSON da importare")
     
     # Analizza la struttura dei JSON
     table_definitions = analyze_json_structure(json_files)
@@ -377,7 +426,7 @@ def import_all_json_files(base_path, conn):
             
             # Salta i file già processati con successo
             if is_file_processed(conn, file_name):
-                print(f"\n⏭️  File già processato: {file_name}")
+                logger.info(f"\n⏭️  File già processato: {file_name}")
                 continue
             
             file_start_time = time.time()
@@ -385,9 +434,9 @@ def import_all_json_files(base_path, conn):
             batch = []
             batch_id = f"{int(time.time())}_{idx}"
             
-            print("\n" + "="*80)
-            print(f"📂 Processando file {idx}/{total_files}: {file_name}")
-            print("="*80)
+            logger.info("\n" + "="*80)
+            logger.info(f"📂 Processando file {idx}/{total_files}: {file_name}")
+            logger.info("="*80)
             
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
@@ -404,7 +453,7 @@ def import_all_json_files(base_path, conn):
                             if file_records % 1000 == 0:
                                 elapsed = time.time() - file_start_time
                                 speed = file_records / elapsed if elapsed > 0 else 0
-                                print(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                                logger.info(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
                             
                             current_chunk_size = memory_monitor.get_chunk_size()
                             if len(batch) >= current_chunk_size:
@@ -418,11 +467,11 @@ def import_all_json_files(base_path, conn):
                                         # Riduci la dimensione del batch e riprova
                                         memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
                                             int(memory_monitor.current_chunk_size * 0.5))
-                                        print(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
+                                        logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
                                         continue
                                     raise
                         except Exception as e:
-                            print(f"\n❌ Errore nel parsing del record: {e}")
+                            logger.error(f"\n❌ Errore nel parsing del record: {e}")
                             continue
                 
                 # Processa l'ultimo batch
@@ -435,7 +484,7 @@ def import_all_json_files(base_path, conn):
                             # Riduci la dimensione del batch e riprova
                             memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
                                 int(memory_monitor.current_chunk_size * 0.5))
-                            print(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
+                            logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
                             # Riprova con il batch ridotto
                             process_batch(cursor, batch, table_definitions, batch_id)
                             conn.commit()
@@ -445,7 +494,7 @@ def import_all_json_files(base_path, conn):
                 
             except Exception as e:
                 error_message = str(e)
-                print(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
+                logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
                 mark_file_processed(conn, file_name, file_records, 'failed', error_message)
                 continue
             
@@ -456,45 +505,53 @@ def import_all_json_files(base_path, conn):
             remaining_files = total_files - files_processed
             eta_seconds = avg_time_per_file * remaining_files
             
-            print("\n\n📈 Statistiche file:")
-            print(f"   • Record processati: {file_records:,}")
-            print(f"   • Tempo elaborazione: {str(int(file_time//60))}:{int(file_time%60):02d}")
-            print(f"   • Velocità media: {file_records/file_time:.1f} record/s")
+            logger.info("\n\n📈 Statistiche file:")
+            logger.info(f"   • Record processati: {file_records:,}")
+            logger.info(f"   • Tempo elaborazione: {str(int(file_time//60))}:{int(file_time%60):02d}")
+            logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
             
-            print("\n📊 Statistiche totali:")
-            print(f"   • Record totali: {total_records:,}")
-            print(f"   • File completati: {files_processed}/{total_files}")
-            print(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
-            print(f"   • ETA stimata: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
-            print(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
+            logger.info("\n📊 Statistiche totali:")
+            logger.info(f"   • Record totali: {total_records:,}")
+            logger.info(f"   • File completati: {files_processed}/{total_files}")
+            logger.info(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
+            logger.info(f"   • ETA stimata: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
+            logger.info(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
             
             gc.collect()
         
         total_time = time.time() - start_time
-        print("\n" + "="*80)
-        print("✨ Importazione completata!")
-        print("="*80)
-        print(f"📊 Statistiche finali:")
-        print(f"   • Record totali: {total_records:,}")
-        print(f"   • File processati: {total_files}")
-        print(f"   • Chunk size finale: {memory_monitor.get_chunk_size()}")
-        print(f"   • Tempo totale: {str(int(total_time//60))}:{int(total_time%60):02d}")
-        print(f"   • Velocità media: {total_records/total_time:.1f} record/s")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info("✨ Importazione completata!")
+        logger.info("="*80)
+        logger.info(f"📊 Statistiche finali:")
+        logger.info(f"   • Record totali: {total_records:,}")
+        logger.info(f"   • File processati: {total_files}")
+        logger.info(f"   • Chunk size finale: {memory_monitor.get_chunk_size()}")
+        logger.info(f"   • Tempo totale: {str(int(total_time//60))}:{int(total_time%60):02d}")
+        logger.info(f"   • Velocità media: {total_records/total_time:.1f} record/s")
+        logger.info("="*80)
     finally:
         memory_monitor.stop()
         cursor.close()
 
 def main():
-    print(f"🕒 Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
-    print(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
-    print(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
-    print(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
-    conn = connect_mysql()
-    import_all_json_files(JSON_BASE_PATH, conn)
-    conn.close()
-    print("Tutte le connessioni chiuse.")
+    try:
+        # Crea la directory dei log se non esiste
+        os.makedirs('logs', exist_ok=True)
+        
+        logger.info(f"🕒 Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
+        logger.info(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
+        logger.info(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
+        logger.info(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
+        
+        conn = connect_mysql()
+        import_all_json_files(JSON_BASE_PATH, conn)
+        conn.close()
+        logger.info("Tutte le connessioni chiuse.")
+    except Exception as e:
+        logger.error(f"Errore durante l'importazione in MySQL: {e}")
+        raise
 
 if __name__ == "__main__":
     main() 
