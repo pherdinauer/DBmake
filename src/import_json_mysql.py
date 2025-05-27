@@ -332,6 +332,16 @@ def sanitize_field_name(field_name, existing_aliases=None):
     
     return sanitized
 
+def get_column_type(field_type, length):
+    """Determina il tipo di colonna appropriato in base alla lunghezza."""
+    if field_type == 'VARCHAR':
+        # Se la lunghezza è maggiore di 1000, usa TEXT
+        if length > 1000:
+            return 'TEXT'
+        # Altrimenti usa VARCHAR con la lunghezza specificata
+        return f'VARCHAR({length})'
+    return field_type
+
 def create_dynamic_tables(conn, table_definitions):
     cursor = conn.cursor()
     
@@ -343,18 +353,28 @@ def create_dynamic_tables(conn, table_definitions):
         field_mapping[field] = sanitized
         existing_aliases.add(sanitized)
     
+    # Converti i tipi di colonna in base alla lunghezza
+    column_types = {}
+    for field, def_type in table_definitions.items():
+        if def_type.startswith('VARCHAR'):
+            # Estrai la lunghezza dal tipo VARCHAR
+            length = int(def_type.split('(')[1].split(')')[0])
+            column_types[field] = get_column_type('VARCHAR', length)
+        else:
+            column_types[field] = def_type
+    
     # Crea la tabella principale con tutti i campi
     create_main_table = f"""
     CREATE TABLE IF NOT EXISTS main_data (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        {', '.join(f"{field_mapping[field]} {def_type}" for field, def_type in table_definitions.items())},
+        {', '.join(f"{field_mapping[field]} {column_types[field]}" for field in table_definitions.keys())},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source_file VARCHAR(255),
         batch_id VARCHAR(64),
         INDEX idx_created_at (created_at),
         INDEX idx_source_file (source_file),
         INDEX idx_batch_id (batch_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     
     cursor.execute(create_main_table)
@@ -374,7 +394,7 @@ def create_dynamic_tables(conn, table_definitions):
                 INDEX idx_main_id (main_id),
                 INDEX idx_source_file (source_file),
                 INDEX idx_batch_id (batch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
             """
             cursor.execute(create_json_table)
     
@@ -389,7 +409,7 @@ def create_dynamic_tables(conn, table_definitions):
         error_message TEXT,
         INDEX idx_file_name (file_name),
         INDEX idx_status (status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     cursor.execute(create_processed_files)
     
@@ -400,7 +420,7 @@ def create_dynamic_tables(conn, table_definitions):
         sanitized_name VARCHAR(64),
         field_type VARCHAR(50),
         INDEX idx_sanitized_name (sanitized_name)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     cursor.execute(create_field_mapping)
     
@@ -412,7 +432,7 @@ def create_dynamic_tables(conn, table_definitions):
             ON DUPLICATE KEY UPDATE
                 sanitized_name = VALUES(sanitized_name),
                 field_type = VALUES(field_type)
-        """, (field, field_mapping[field], def_type))
+        """, (field, field_mapping[field], column_types[field]))
     
     cursor.close()
 
@@ -462,6 +482,11 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 # Normalizza il nome del campo nel record
                 field_lower = field.lower().replace(' ', '_')
                 value = record.get(field_lower)
+                
+                # Gestisci i campi TEXT
+                if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
+                    value = str(value)[:1000]  # Tronca a 1000 caratteri per i campi VARCHAR
+                
                 if def_type == 'JSON' and value is not None:
                     json_data[field_mapping[field]].append((len(main_data) + 1, json.dumps(value)))
                     value = None
