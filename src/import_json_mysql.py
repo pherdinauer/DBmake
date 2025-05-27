@@ -150,7 +150,7 @@ def connect_mysql():
 # Funzione per analizzare la struttura del JSON e creare le definizioni delle tabelle
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
-    field_lengths = defaultdict(lambda: defaultdict(int))
+    field_lengths = defaultdict(int)
     
     print("🔍 Analisi della struttura dei JSON...")
     for json_file in json_files:
@@ -203,6 +203,11 @@ def analyze_json_structure(json_files):
             column_def = "TEXT"
         
         table_definitions[field] = column_def
+    
+    # Stampa un riepilogo della struttura trovata
+    print("\n📊 Struttura JSON analizzata:")
+    for field, def_type in table_definitions.items():
+        print(f"   • {field}: {def_type}")
     
     return table_definitions
 
