@@ -9,6 +9,7 @@ import psutil
 import threading
 import math
 from dotenv import load_dotenv
+from collections import defaultdict
 
 load_dotenv()
 
@@ -16,7 +17,7 @@ load_dotenv()
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import')
+MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import2')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
 
@@ -34,6 +35,9 @@ AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 100
+
+# Limita il chunk size massimo a 10000 record per evitare problemi con max_allowed_packet
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 10000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -65,7 +69,6 @@ class MemoryMonitor:
                         elif percent_used > 0.85:  # 85% di memoria utilizzata
                             self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
                             print(f"\n⚠️  Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
-                            gc.collect()
                         elif percent_used < 0.70 and self.current_chunk_size < MAX_CHUNK_SIZE:  # 70% di memoria utilizzata
                             # Aumenta gradualmente il chunk size
                             new_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.2))
@@ -95,7 +98,9 @@ def connect_mysql():
             password=MYSQL_PASSWORD,
             database=MYSQL_DATABASE,
             charset='utf8mb4',
-            autocommit=True
+            autocommit=True,
+            # Aumenta il max_allowed_packet a 1GB
+            max_allowed_packet=1073741824
         )
         return conn
     except mysql.connector.Error as err:
@@ -106,7 +111,8 @@ def connect_mysql():
                 user=MYSQL_USER,
                 password=MYSQL_PASSWORD,
                 charset='utf8mb4',
-                autocommit=True
+                autocommit=True,
+                max_allowed_packet=1073741824
             )
             cursor = tmp_conn.cursor()
             cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
@@ -115,236 +121,185 @@ def connect_mysql():
         else:
             raise
 
-# Funzione per creare le tabelle
-CREATE_TABLES = {
-    'cig': '''
-        CREATE TABLE IF NOT EXISTS cig (
-            cig VARCHAR(64) PRIMARY KEY,
-            oggetto_gara TEXT,
-            oggetto_lotto TEXT,
-            oggetto_principale_contratto VARCHAR(128),
-            importo_lotto DOUBLE,
-            importo_complessivo_gara DOUBLE,
-            stato VARCHAR(64),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_stato (stato),
-            INDEX idx_importo (importo_complessivo_gara)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''',
-    'localizzazione': '''
-        CREATE TABLE IF NOT EXISTS localizzazione (
-            cig VARCHAR(64) PRIMARY KEY,
-            citta VARCHAR(128),
-            regione VARCHAR(128),
-            indirizzo TEXT,
-            istat_comune VARCHAR(32),
-            sezione_regionale VARCHAR(128),
-            FOREIGN KEY (cig) REFERENCES cig(cig),
-            INDEX idx_citta (citta),
-            INDEX idx_regione (regione)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''',
-    'temporale': '''
-        CREATE TABLE IF NOT EXISTS temporale (
-            cig VARCHAR(64) PRIMARY KEY,
-            data_comunicazione DATE,
-            anno_comunicazione INT,
-            mese_comunicazione VARCHAR(2),
-            FOREIGN KEY (cig) REFERENCES cig(cig),
-            INDEX idx_data (data_comunicazione),
-            INDEX idx_anno (anno_comunicazione)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''',
-    'amministrazione': '''
-        CREATE TABLE IF NOT EXISTS amministrazione (
-            cig VARCHAR(64) PRIMARY KEY,
-            cf_amministrazione_appaltante VARCHAR(32),
-            denominazione_amministrazione_appaltante TEXT,
-            id_centro_costo VARCHAR(64),
-            denominazione_centro_costo TEXT,
-            FOREIGN KEY (cig) REFERENCES cig(cig),
-            INDEX idx_cf (cf_amministrazione_appaltante)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''',
-    'contratto': '''
-        CREATE TABLE IF NOT EXISTS contratto (
-            cig VARCHAR(64) PRIMARY KEY,
-            tipo_scelta_contraente VARCHAR(128),
-            cod_tipo_scelta_contraente VARCHAR(32),
-            tipo_fattispecie_contrattuale VARCHAR(128),
-            id_tipo_fattispecie_contrattuale VARCHAR(32),
-            n_lotti_componenti VARCHAR(32),
-            FOREIGN KEY (cig) REFERENCES cig(cig),
-            INDEX idx_tipo_scelta (tipo_scelta_contraente)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    ''',
-    'raw_import': '''
-        CREATE TABLE IF NOT EXISTS raw_import (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            cig VARCHAR(64),
-            raw_json JSON,
-            source_file VARCHAR(255),
-            INDEX idx_cig (cig)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    '''
-}
+# Funzione per analizzare la struttura del JSON e creare le definizioni delle tabelle
+def analyze_json_structure(json_files):
+    field_types = defaultdict(lambda: defaultdict(int))
+    field_lengths = defaultdict(lambda: defaultdict(int))
+    
+    print("🔍 Analisi della struttura dei JSON...")
+    for json_file in json_files:
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    record = json.loads(line.strip())
+                    for field, value in record.items():
+                        if value is None:
+                            continue
+                        
+                        # Determina il tipo di campo
+                        if isinstance(value, bool):
+                            field_types[field]['BOOLEAN'] += 1
+                        elif isinstance(value, int):
+                            field_types[field]['INT'] += 1
+                        elif isinstance(value, float):
+                            field_types[field]['DOUBLE'] += 1
+                        elif isinstance(value, str):
+                            field_types[field]['VARCHAR'] += 1
+                            field_lengths[field] = max(field_lengths[field], len(value))
+                        elif isinstance(value, (list, dict)):
+                            field_types[field]['JSON'] += 1
+                except Exception as e:
+                    print(f"⚠️ Errore nell'analisi del file {json_file}: {e}")
+                    continue
+    
+    # Crea le definizioni delle tabelle
+    table_definitions = {}
+    for field, types in field_types.items():
+        # Determina il tipo più comune
+        most_common_type = max(types.items(), key=lambda x: x[1])[0]
+        
+        # Crea la definizione della colonna
+        if most_common_type == 'VARCHAR':
+            length = min(field_lengths[field] * 2, 16383)  # Limita la lunghezza massima
+            column_def = f"VARCHAR({length})"
+        elif most_common_type == 'INT':
+            column_def = "INT"
+        elif most_common_type == 'DOUBLE':
+            column_def = "DOUBLE"
+        elif most_common_type == 'BOOLEAN':
+            column_def = "BOOLEAN"
+        elif most_common_type == 'JSON':
+            column_def = "JSON"
+        else:
+            column_def = "TEXT"
+        
+        table_definitions[field] = column_def
+    
+    return table_definitions
 
-def create_tables(conn):
+def create_dynamic_tables(conn, table_definitions):
     cursor = conn.cursor()
-    for name, ddl in CREATE_TABLES.items():
-        cursor.execute(ddl)
+    
+    # Crea la tabella principale con tutti i campi
+    create_main_table = f"""
+    CREATE TABLE IF NOT EXISTS main_data (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        {', '.join(f"{field} {def_type}" for field, def_type in table_definitions.items())},
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        source_file VARCHAR(255),
+        batch_id VARCHAR(64),
+        INDEX idx_created_at (created_at),
+        INDEX idx_source_file (source_file),
+        INDEX idx_batch_id (batch_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    
+    cursor.execute(create_main_table)
+    
+    # Crea tabelle separate per i campi JSON
+    for field, def_type in table_definitions.items():
+        if def_type == 'JSON':
+            create_json_table = f"""
+            CREATE TABLE IF NOT EXISTS {field}_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                main_id INT,
+                {field}_json JSON,
+                source_file VARCHAR(255),
+                batch_id VARCHAR(64),
+                FOREIGN KEY (main_id) REFERENCES main_data(id),
+                INDEX idx_main_id (main_id),
+                INDEX idx_source_file (source_file),
+                INDEX idx_batch_id (batch_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+            cursor.execute(create_json_table)
+    
+    # Crea tabella per tracciare i file processati
+    create_processed_files = """
+    CREATE TABLE IF NOT EXISTS processed_files (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        file_name VARCHAR(255) UNIQUE,
+        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        record_count INT,
+        status ENUM('completed', 'failed') DEFAULT 'completed',
+        error_message TEXT,
+        INDEX idx_file_name (file_name),
+        INDEX idx_status (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    cursor.execute(create_processed_files)
+    
     cursor.close()
 
-def extract_cig_data(record):
-    return {
-        'cig': record.get('cig', ''),
-        'oggetto': record.get('oggetto', ''),
-        'importo': record.get('importo', 0.0),
-        'data_pubblicazione': record.get('data_pubblicazione', ''),
-        'data_scadenza': record.get('data_scadenza', ''),
-        'stato': record.get('stato', '')
-    }
+def is_file_processed(conn, file_name):
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM processed_files WHERE file_name = %s", (file_name,))
+    result = cursor.fetchone()
+    cursor.close()
+    return result is not None and result[0] == 'completed'
 
-def process_batch(cursor, batch, source_type):
+def mark_file_processed(conn, file_name, record_count, status='completed', error_message=None):
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO processed_files (file_name, record_count, status, error_message)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                processed_at = CURRENT_TIMESTAMP,
+                record_count = VALUES(record_count),
+                status = VALUES(status),
+                error_message = VALUES(error_message)
+        """, (file_name, record_count, status, error_message))
+        conn.commit()
+    except Exception as e:
+        print(f"❌ Errore nel marcare il file come processato: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
+
+def process_batch(cursor, batch, table_definitions, batch_id):
     if not batch:
         return
 
     try:
-        # Prepara i dati per l'inserimento bulk
-        cig_data = []
-        localizzazione_data = []
-        temporale_data = []
-        amministrazione_data = []
-        contratto_data = []
-        raw_import_data = []
-
-        for record, file_name in batch:
-            cig = record.get('cig', '')
-            if not cig:
-                continue
-
-            # Prepara i dati per raw_import
-            raw_json_str = json.dumps(record, ensure_ascii=True).replace('\\', '\\\\')
-            raw_import_data.append((cig, raw_json_str, file_name))
-
-            # Prepara i dati per cig
-            cig_data.append((
-                cig,
-                record.get('oggetto_gara', ''),
-                record.get('oggetto_lotto', ''),
-                record.get('oggetto_principale_contratto', ''),
-                record.get('importo_lotto', 0.0),
-                record.get('importo_complessivo_gara', 0.0),
-                record.get('stato', '')
-            ))
-
-            # Prepara i dati per localizzazione
-            localizzazione_data.append((
-                cig,
-                record.get('citta', ''),
-                record.get('regione', ''),
-                record.get('indirizzo', ''),
-                record.get('istat_comune', ''),
-                record.get('sezione_regionale', '')
-            ))
-
-            # Prepara i dati per temporale
-            temporale_data.append((
-                cig,
-                record.get('data_comunicazione', None),
-                record.get('anno_comunicazione', None),
-                record.get('mese_comunicazione', '')
-            ))
-
-            # Prepara i dati per amministrazione
-            amministrazione_data.append((
-                cig,
-                record.get('cf_amministrazione_appaltante', ''),
-                record.get('denominazione_amministrazione_appaltante', ''),
-                record.get('id_centro_costo', ''),
-                record.get('denominazione_centro_costo', '')
-            ))
-
-            # Prepara i dati per contratto
-            contratto_data.append((
-                cig,
-                record.get('tipo_scelta_contraente', ''),
-                record.get('cod_tipo_scelta_contraente', ''),
-                record.get('tipo_fattispecie_contrattuale', ''),
-                record.get('id_tipo_fattispecie_contrattuale', ''),
-                record.get('n_lotti_componenti', '')
-            ))
-
-        # Esegui gli insert bulk
-        if raw_import_data:
-            cursor.executemany(
-                "INSERT INTO raw_import (cig, raw_json, source_file) VALUES (%s, %s, %s)",
-                raw_import_data
-            )
-
-        if cig_data:
-            cursor.executemany('''
-                INSERT INTO cig (cig, oggetto_gara, oggetto_lotto, oggetto_principale_contratto, 
-                               importo_lotto, importo_complessivo_gara, stato)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE 
-                    oggetto_gara=VALUES(oggetto_gara),
-                    oggetto_lotto=VALUES(oggetto_lotto),
-                    oggetto_principale_contratto=VALUES(oggetto_principale_contratto),
-                    importo_lotto=VALUES(importo_lotto),
-                    importo_complessivo_gara=VALUES(importo_complessivo_gara),
-                    stato=VALUES(stato)
-            ''', cig_data)
-
-        if localizzazione_data:
-            cursor.executemany('''
-                INSERT INTO localizzazione (cig, citta, regione, indirizzo, istat_comune, sezione_regionale)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    citta=VALUES(citta),
-                    regione=VALUES(regione),
-                    indirizzo=VALUES(indirizzo),
-                    istat_comune=VALUES(istat_comune),
-                    sezione_regionale=VALUES(sezione_regionale)
-            ''', localizzazione_data)
-
-        if temporale_data:
-            cursor.executemany('''
-                INSERT INTO temporale (cig, data_comunicazione, anno_comunicazione, mese_comunicazione)
+        main_data = []
+        json_data = defaultdict(list)
+        file_name = batch[0][1]  # Prendi il nome del file dal primo record
+        
+        for record, _ in batch:
+            # Prepara i dati per la tabella principale
+            main_values = []
+            for field, def_type in table_definitions.items():
+                value = record.get(field)
+                if def_type == 'JSON' and value is not None:
+                    json_data[field].append((len(main_data) + 1, json.dumps(value)))
+                    value = None
+                main_values.append(value)
+            
+            # Aggiungi file_name e batch_id
+            main_values.extend([file_name, batch_id])
+            main_data.append(tuple(main_values))
+        
+        # Inserisci i dati nella tabella principale
+        if main_data:
+            fields = list(table_definitions.keys()) + ['source_file', 'batch_id']
+            placeholders = ', '.join(['%s'] * len(fields))
+            insert_main = f"""
+            INSERT INTO main_data ({', '.join(fields)})
+            VALUES ({placeholders})
+            """
+            cursor.executemany(insert_main, main_data)
+        
+        # Inserisci i dati JSON nelle tabelle separate
+        for field, data in json_data.items():
+            if data:
+                json_data_with_metadata = [(main_id, json_str, file_name, batch_id) for main_id, json_str in data]
+                insert_json = f"""
+                INSERT INTO {field}_data (main_id, {field}_json, source_file, batch_id)
                 VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    data_comunicazione=VALUES(data_comunicazione),
-                    anno_comunicazione=VALUES(anno_comunicazione),
-                    mese_comunicazione=VALUES(mese_comunicazione)
-            ''', temporale_data)
-
-        if amministrazione_data:
-            cursor.executemany('''
-                INSERT INTO amministrazione (cig, cf_amministrazione_appaltante, 
-                                           denominazione_amministrazione_appaltante,
-                                           id_centro_costo, denominazione_centro_costo)
-                VALUES (%s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    cf_amministrazione_appaltante=VALUES(cf_amministrazione_appaltante),
-                    denominazione_amministrazione_appaltante=VALUES(denominazione_amministrazione_appaltante),
-                    id_centro_costo=VALUES(id_centro_costo),
-                    denominazione_centro_costo=VALUES(denominazione_centro_costo)
-            ''', amministrazione_data)
-
-        if contratto_data:
-            cursor.executemany('''
-                INSERT INTO contratto (cig, tipo_scelta_contraente, cod_tipo_scelta_contraente,
-                                      tipo_fattispecie_contrattuale, id_tipo_fattispecie_contrattuale,
-                                      n_lotti_componenti)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    tipo_scelta_contraente=VALUES(tipo_scelta_contraente),
-                    cod_tipo_scelta_contraente=VALUES(cod_tipo_scelta_contraente),
-                    tipo_fattispecie_contrattuale=VALUES(tipo_fattispecie_contrattuale),
-                    id_tipo_fattispecie_contrattuale=VALUES(id_tipo_fattispecie_contrattuale),
-                    n_lotti_componenti=VALUES(n_lotti_componenti)
-            ''', contratto_data)
-
+                """
+                cursor.executemany(insert_json, json_data_with_metadata)
+        
     except Exception as e:
         print(f"\n❌ Errore durante il processing del batch: {e}")
         raise
@@ -361,6 +316,13 @@ def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
     print(f"📁 Trovati {total_files} file JSON da importare")
+    
+    # Analizza la struttura dei JSON
+    table_definitions = analyze_json_structure(json_files)
+    
+    # Crea le tabelle dinamicamente
+    create_dynamic_tables(conn, table_definitions)
+    
     cursor = conn.cursor()
     memory_monitor = MemoryMonitor(USABLE_MEMORY_BYTES)
     start_time = time.time()
@@ -370,47 +332,62 @@ def import_all_json_files(base_path, conn):
     
     try:
         for idx, json_file in enumerate(json_files, 1):
-            file_start_time = time.time()
             file_name = os.path.basename(json_file)
-            source_type = file_name.split('_')[0]
+            
+            # Salta i file già processati con successo
+            if is_file_processed(conn, file_name):
+                print(f"\n⏭️  File già processato: {file_name}")
+                continue
+            
+            file_start_time = time.time()
             file_records = 0
             batch = []
+            batch_id = f"{int(time.time())}_{idx}"
             
             print("\n" + "="*80)
             print(f"📂 Processando file {idx}/{total_files}: {file_name}")
             print("="*80)
             
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        batch.append((record, file_name))
-                        file_records += 1
-                        total_records += 1
-                        
-                        # Mostra progresso ogni 1000 record
-                        if file_records % 1000 == 0:
-                            elapsed = time.time() - file_start_time
-                            speed = file_records / elapsed if elapsed > 0 else 0
-                            print(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
-                        
-                        current_chunk_size = memory_monitor.get_chunk_size()
-                        if len(batch) >= current_chunk_size:
-                            process_batch(cursor, batch, source_type)
-                            conn.commit()
-                            batch = []
-                            gc.collect()
-                    except Exception as e:
-                        print(f"\n❌ Errore nel parsing o inserimento: {e}")
-                        continue
-            
-            # Processa l'ultimo batch
-            if batch:
-                process_batch(cursor, batch, source_type)
-                conn.commit()
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            batch.append((record, file_name))
+                            file_records += 1
+                            total_records += 1
+                            
+                            if file_records % 1000 == 0:
+                                elapsed = time.time() - file_start_time
+                                speed = file_records / elapsed if elapsed > 0 else 0
+                                print(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                            
+                            current_chunk_size = memory_monitor.get_chunk_size()
+                            if len(batch) >= current_chunk_size:
+                                process_batch(cursor, batch, table_definitions, batch_id)
+                                conn.commit()
+                                batch = []
+                                gc.collect()
+                        except Exception as e:
+                            print(f"\n❌ Errore nel parsing del record: {e}")
+                            continue
+                
+                # Processa l'ultimo batch
+                if batch:
+                    process_batch(cursor, batch, table_definitions, batch_id)
+                    conn.commit()
+                
+                # Marca il file come processato con successo
+                mark_file_processed(conn, file_name, file_records)
+                
+            except Exception as e:
+                error_message = str(e)
+                print(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
+                mark_file_processed(conn, file_name, file_records, 'failed', error_message)
+                continue
             
             file_time = time.time() - file_start_time
             total_time_so_far += file_time
@@ -455,7 +432,6 @@ def main():
     print(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
     print(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
     conn = connect_mysql()
-    create_tables(conn)
     import_all_json_files(JSON_BASE_PATH, conn)
     conn.close()
     print("Tutte le connessioni chiuse.")
