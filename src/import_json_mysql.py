@@ -15,8 +15,8 @@ load_dotenv()
 
 # Parametri di connessione da variabili d'ambiente
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
-MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
-MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
+MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
+MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
