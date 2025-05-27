@@ -107,11 +107,17 @@ def connect_mysql():
     max_retries = 3
     retry_delay = 5  # secondi
     
+    # Imposta la directory temporanea per il processo
+    tmp_dir = '/database/tmp'
+    os.makedirs(tmp_dir, exist_ok=True)
+    os.environ['TMPDIR'] = tmp_dir
+    
     logger.info("\n🔍 Verifica configurazione MySQL:")
     logger.info(f"   • Host: {MYSQL_HOST}")
     logger.info(f"   • User: {MYSQL_USER}")
     logger.info(f"   • Database: {MYSQL_DATABASE}")
     logger.info(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
+    logger.info(f"   • Directory temporanea: {tmp_dir}")
     
     for attempt in range(max_retries):
         try:
@@ -129,15 +135,10 @@ def connect_mysql():
                 pool_name="mypool"
             )
             
-            # Imposta max_allowed_packet e tmpdir dopo la connessione
+            # Imposta max_allowed_packet dopo la connessione
             cursor = conn.cursor()
             cursor.execute("SET GLOBAL max_allowed_packet=1073741824")
-            # Imposta la directory temporanea su /database/tmp che ha più spazio
-            cursor.execute("SET GLOBAL tmpdir='/database/tmp'")
             cursor.close()
-            
-            # Crea la directory temporanea se non esiste
-            os.makedirs('/database/tmp', exist_ok=True)
             
             logger.info("✅ Connessione riuscita!")
             return conn
@@ -164,6 +165,32 @@ def connect_mysql():
             else:
                 logger.error(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
                 raise
+
+def check_disk_space():
+    """Verifica lo spazio disponibile su disco."""
+    try:
+        # Verifica lo spazio su /database
+        database_stats = os.statvfs('/database')
+        database_free_gb = (database_stats.f_bavail * database_stats.f_frsize) / (1024**3)
+        
+        # Verifica lo spazio su /tmp
+        tmp_stats = os.statvfs('/tmp')
+        tmp_free_gb = (tmp_stats.f_bavail * tmp_stats.f_frsize) / (1024**3)
+        
+        logger.info("\n💾 Spazio disco disponibile:")
+        logger.info(f"   • /database: {database_free_gb:.1f}GB")
+        logger.info(f"   • /tmp: {tmp_free_gb:.1f}GB")
+        
+        # Avvisa se lo spazio è basso
+        if database_free_gb < 10:
+            logger.warning("⚠️ Spazio disponibile su /database è basso!")
+        if tmp_free_gb < 1:
+            logger.warning("⚠️ Spazio disponibile su /tmp è basso!")
+            
+        return database_free_gb, tmp_free_gb
+    except Exception as e:
+        logger.error(f"❌ Errore nel controllo dello spazio disco: {e}")
+        return None, None
 
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
@@ -692,6 +719,9 @@ def main():
         logger.info(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
         logger.info(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
         logger.info(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
+        
+        # Verifica lo spazio disco
+        check_disk_space()
         
         conn = connect_mysql()
         import_all_json_files(JSON_BASE_PATH, conn)
