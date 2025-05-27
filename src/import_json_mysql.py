@@ -165,6 +165,11 @@ def analyze_json_structure(json_files):
     field_lengths = defaultdict(int)
     
     logger.info("🔍 Analisi della struttura dei JSON...")
+    logger.info("Questa fase analizza la struttura dei JSON per determinare:")
+    logger.info("1. I tipi di dati per ogni campo")
+    logger.info("2. Le lunghezze massime dei campi stringa")
+    logger.info("3. I campi JSON annidati")
+    
     total_files = len(json_files)
     files_analyzed = 0
     records_analyzed = 0
@@ -172,19 +177,30 @@ def analyze_json_structure(json_files):
     last_progress_time = time.time()
     progress_interval = 1.0  # Aggiorna il progresso ogni secondo
     
+    # Ottimizzazione: campiona solo una parte dei record per l'analisi
+    SAMPLE_SIZE = 10000  # Numero di record da analizzare per file
+    current_sample = 0
+    
     for json_file in json_files:
         files_analyzed += 1
         file_records = 0
         file_start_time = time.time()
+        current_sample = 0
         
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     try:
+                        # Ottimizzazione: analizza solo un campione dei record
+                        if current_sample >= SAMPLE_SIZE:
+                            break
+                            
                         record = json.loads(line.strip())
                         file_records += 1
                         records_analyzed += 1
+                        current_sample += 1
                         
+                        # Analisi ottimizzata dei campi
                         for field, value in record.items():
                             if value is None:
                                 continue
@@ -192,7 +208,7 @@ def analyze_json_structure(json_files):
                             # Normalizza i nomi dei campi
                             field = field.lower().replace(' ', '_')
                             
-                            # Determina il tipo di campo
+                            # Determina il tipo di campo (versione ottimizzata)
                             if isinstance(value, bool):
                                 field_types[field]['BOOLEAN'] += 1
                             elif isinstance(value, int):
@@ -201,7 +217,10 @@ def analyze_json_structure(json_files):
                                 field_types[field]['DOUBLE'] += 1
                             elif isinstance(value, str):
                                 field_types[field]['VARCHAR'] += 1
-                                field_lengths[field] = max(field_lengths[field], len(value))
+                                # Ottimizzazione: aggiorna la lunghezza massima solo se necessario
+                                current_length = len(value)
+                                if current_length > field_lengths[field]:
+                                    field_lengths[field] = current_length
                             elif isinstance(value, (list, dict)):
                                 field_types[field]['JSON'] += 1
                         
@@ -267,6 +286,7 @@ def analyze_json_structure(json_files):
     logger.info(f"   • File analizzati: {files_analyzed}/{total_files}")
     logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
     logger.info(f"   • Campi trovati: {len(table_definitions)}")
+    logger.info("\nDettaglio campi:")
     for field, def_type in table_definitions.items():
         logger.info(f"   • {field}: {def_type}")
     
