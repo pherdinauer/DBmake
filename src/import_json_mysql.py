@@ -110,9 +110,6 @@ def connect_mysql():
     # Imposta la directory temporanea per il processo
     tmp_dir = '/database/tmp'
     os.makedirs(tmp_dir, exist_ok=True)
-    os.environ['TMPDIR'] = tmp_dir
-    os.environ['TMP'] = tmp_dir
-    os.environ['TEMP'] = tmp_dir
     
     # Pulisci la directory temporanea
     for file in os.listdir(tmp_dir):
@@ -121,12 +118,23 @@ def connect_mysql():
         except:
             pass
     
+    # Crea un file di configurazione MySQL temporaneo
+    mysql_config = f"""[client]
+tmpdir={tmp_dir}
+[mysqld]
+tmpdir={tmp_dir}
+"""
+    config_path = os.path.join(tmp_dir, 'mysql.cnf')
+    with open(config_path, 'w') as f:
+        f.write(mysql_config)
+    
     logger.info("\n🔍 Verifica configurazione MySQL:")
     logger.info(f"   • Host: {MYSQL_HOST}")
     logger.info(f"   • User: {MYSQL_USER}")
     logger.info(f"   • Database: {MYSQL_DATABASE}")
     logger.info(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
     logger.info(f"   • Directory temporanea: {tmp_dir}")
+    logger.info(f"   • File di configurazione: {config_path}")
     
     for attempt in range(max_retries):
         try:
@@ -143,7 +151,8 @@ def connect_mysql():
                 pool_size=5,
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
-                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES]  # Permetti file locali
+                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
+                option_files=[config_path]  # Usa il file di configurazione
             )
             
             # Imposta max_allowed_packet dopo la connessione
@@ -162,7 +171,8 @@ def connect_mysql():
                     user=MYSQL_USER,
                     password=MYSQL_PASSWORD,
                     charset='utf8mb4',
-                    autocommit=True
+                    autocommit=True,
+                    option_files=[config_path]  # Usa il file di configurazione
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
