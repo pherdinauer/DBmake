@@ -60,11 +60,11 @@ class MemoryMonitor:
         self.process = psutil.Process()
         self.lock = threading.Lock()
         self.running = True
+        self.last_memory_check = time.time()  # Inizializza last_memory_check
+        self.memory_check_interval = 0.5  # Controlla la memoria ogni 0.5 secondi
         self.monitor_thread = threading.Thread(target=self._monitor_memory)
         self.monitor_thread.daemon = True
         self.monitor_thread.start()
-        self.last_memory_check = time.time()
-        self.memory_check_interval = 0.5  # Controlla la memoria ogni 0.5 secondi
 
     def _monitor_memory(self):
         while self.running:
@@ -111,6 +111,15 @@ def connect_mysql():
     tmp_dir = '/database/tmp'
     os.makedirs(tmp_dir, exist_ok=True)
     os.environ['TMPDIR'] = tmp_dir
+    os.environ['TMP'] = tmp_dir
+    os.environ['TEMP'] = tmp_dir
+    
+    # Pulisci la directory temporanea
+    for file in os.listdir(tmp_dir):
+        try:
+            os.remove(os.path.join(tmp_dir, file))
+        except:
+            pass
     
     logger.info("\n🔍 Verifica configurazione MySQL:")
     logger.info(f"   • Host: {MYSQL_HOST}")
@@ -132,7 +141,9 @@ def connect_mysql():
                 connect_timeout=180,
                 connection_timeout=180,
                 pool_size=5,
-                pool_name="mypool"
+                pool_name="mypool",
+                use_pure=True,  # Usa l'implementazione Python pura
+                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES]  # Permetti file locali
             )
             
             # Imposta max_allowed_packet dopo la connessione
@@ -177,20 +188,31 @@ def check_disk_space():
         tmp_stats = os.statvfs('/tmp')
         tmp_free_gb = (tmp_stats.f_bavail * tmp_stats.f_frsize) / (1024**3)
         
+        # Verifica lo spazio su /database/tmp
+        tmp_dir = '/database/tmp'
+        if os.path.exists(tmp_dir):
+            tmp_dir_stats = os.statvfs(tmp_dir)
+            tmp_dir_free_gb = (tmp_dir_stats.f_bavail * tmp_dir_stats.f_frsize) / (1024**3)
+        else:
+            tmp_dir_free_gb = 0
+        
         logger.info("\n💾 Spazio disco disponibile:")
         logger.info(f"   • /database: {database_free_gb:.1f}GB")
         logger.info(f"   • /tmp: {tmp_free_gb:.1f}GB")
+        logger.info(f"   • {tmp_dir}: {tmp_dir_free_gb:.1f}GB")
         
         # Avvisa se lo spazio è basso
         if database_free_gb < 10:
             logger.warning("⚠️ Spazio disponibile su /database è basso!")
         if tmp_free_gb < 1:
             logger.warning("⚠️ Spazio disponibile su /tmp è basso!")
+        if tmp_dir_free_gb < 1:
+            logger.warning(f"⚠️ Spazio disponibile su {tmp_dir} è basso!")
             
-        return database_free_gb, tmp_free_gb
+        return database_free_gb, tmp_free_gb, tmp_dir_free_gb
     except Exception as e:
         logger.error(f"❌ Errore nel controllo dello spazio disco: {e}")
-        return None, None
+        return None, None, None
 
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
