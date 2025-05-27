@@ -110,12 +110,17 @@ def connect_mysql():
                 database=MYSQL_DATABASE,
                 charset='utf8mb4',
                 autocommit=True,
-                max_allowed_packet=1073741824,
                 connect_timeout=180,
                 connection_timeout=180,
                 pool_size=5,
                 pool_name="mypool"
             )
+            
+            # Imposta max_allowed_packet dopo la connessione
+            cursor = conn.cursor()
+            cursor.execute("SET GLOBAL max_allowed_packet=1073741824")
+            cursor.close()
+            
             print("✅ Connessione riuscita!")
             return conn
         except mysql.connector.Error as err:
@@ -127,8 +132,7 @@ def connect_mysql():
                     user=MYSQL_USER,
                     password=MYSQL_PASSWORD,
                     charset='utf8mb4',
-                    autocommit=True,
-                    max_allowed_packet=1073741824
+                    autocommit=True
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
