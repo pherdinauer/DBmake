@@ -129,10 +129,15 @@ def connect_mysql():
                 pool_name="mypool"
             )
             
-            # Imposta max_allowed_packet dopo la connessione
+            # Imposta max_allowed_packet e tmpdir dopo la connessione
             cursor = conn.cursor()
             cursor.execute("SET GLOBAL max_allowed_packet=1073741824")
+            # Imposta la directory temporanea su /database/tmp che ha più spazio
+            cursor.execute("SET GLOBAL tmpdir='/database/tmp'")
             cursor.close()
+            
+            # Crea la directory temporanea se non esiste
+            os.makedirs('/database/tmp', exist_ok=True)
             
             logger.info("✅ Connessione riuscita!")
             return conn
