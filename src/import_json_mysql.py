@@ -430,7 +430,7 @@ def create_dynamic_tables(conn, table_definitions):
     # Crea la tabella principale con tutti i campi
     create_main_table = f"""
     CREATE TABLE IF NOT EXISTS main_data (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        cig VARCHAR(64) PRIMARY KEY,
         {', '.join(f"{field_mapping[field]} {column_types[field]}" for field in table_definitions.keys())},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source_file VARCHAR(255),
@@ -449,13 +449,11 @@ def create_dynamic_tables(conn, table_definitions):
             sanitized_field = field_mapping[field]
             create_json_table = f"""
             CREATE TABLE IF NOT EXISTS {sanitized_field}_data (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                main_id INT,
+                cig VARCHAR(64) PRIMARY KEY,
                 {sanitized_field}_json JSON,
                 source_file VARCHAR(255),
                 batch_id VARCHAR(64),
-                FOREIGN KEY (main_id) REFERENCES main_data(id),
-                INDEX idx_main_id (main_id),
+                FOREIGN KEY (cig) REFERENCES main_data(cig),
                 INDEX idx_source_file (source_file),
                 INDEX idx_batch_id (batch_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
@@ -542,6 +540,10 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         for record, _ in batch:
             # Prepara i dati per la tabella principale
             main_values = []
+            cig = record.get('cig', '')  # Estrai il CIG dal record
+            if not cig:  # Salta i record senza CIG
+                continue
+                
             for field, def_type in table_definitions.items():
                 # Normalizza il nome del campo nel record
                 field_lower = field.lower().replace(' ', '_')
@@ -552,7 +554,7 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                     value = str(value)[:1000]  # Tronca a 1000 caratteri per i campi VARCHAR
                 
                 if def_type == 'JSON' and value is not None:
-                    json_data[field_mapping[field]].append((len(main_data) + 1, json.dumps(value)))
+                    json_data[field_mapping[field]].append((cig, json.dumps(value)))
                     value = None
                 main_values.append(value)
             
@@ -565,18 +567,24 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             fields = [field_mapping[field] for field in table_definitions.keys()] + ['source_file', 'batch_id']
             placeholders = ', '.join(['%s'] * len(fields))
             insert_main = f"""
-            INSERT INTO main_data ({', '.join(fields)})
-            VALUES ({placeholders})
+            INSERT INTO main_data (cig, {', '.join(fields)})
+            VALUES (%s, {placeholders})
+            ON DUPLICATE KEY UPDATE
+                {', '.join(f"{field} = VALUES({field})" for field in fields)}
             """
             cursor.executemany(insert_main, main_data)
         
         # Inserisci i dati JSON nelle tabelle separate
         for field, data in json_data.items():
             if data:
-                json_data_with_metadata = [(main_id, json_str, file_name, batch_id) for main_id, json_str in data]
+                json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
                 insert_json = f"""
-                INSERT INTO {field}_data (main_id, {field}_json, source_file, batch_id)
+                INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
                 VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    {field}_json = VALUES({field}_json),
+                    source_file = VALUES(source_file),
+                    batch_id = VALUES(batch_id)
                 """
                 cursor.executemany(insert_json, json_data_with_metadata)
         
