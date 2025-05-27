@@ -169,6 +169,8 @@ def analyze_json_structure(json_files):
     files_analyzed = 0
     records_analyzed = 0
     start_time = time.time()
+    last_progress_time = time.time()
+    progress_interval = 1.0  # Aggiorna il progresso ogni secondo
     
     for json_file in json_files:
         files_analyzed += 1
@@ -203,11 +205,20 @@ def analyze_json_structure(json_files):
                             elif isinstance(value, (list, dict)):
                                 field_types[field]['JSON'] += 1
                         
-                        # Aggiorna il progresso ogni 1000 record
-                        if file_records % 1000 == 0:
-                            elapsed = time.time() - file_start_time
+                        # Aggiorna il progresso ogni secondo
+                        current_time = time.time()
+                        if current_time - last_progress_time >= progress_interval:
+                            elapsed = current_time - file_start_time
                             speed = file_records / elapsed if elapsed > 0 else 0
-                            logger.info(f"\r📊 File {files_analyzed}/{total_files} | Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                            total_elapsed = current_time - start_time
+                            avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
+                            
+                            logger.info(f"📊 Progresso: File {files_analyzed}/{total_files} | "
+                                      f"Record nel file: {file_records:,} | "
+                                      f"Velocità: {speed:.1f} record/s | "
+                                      f"Totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
+                            
+                            last_progress_time = current_time
                             
                     except Exception as e:
                         logger.error(f"⚠️ Errore nell'analisi del record nel file {json_file}: {e}")
@@ -217,7 +228,8 @@ def analyze_json_structure(json_files):
             file_time = time.time() - file_start_time
             total_time = time.time() - start_time
             avg_speed = records_analyzed / total_time if total_time > 0 else 0
-            logger.info(f"\n✅ File {files_analyzed}/{total_files} completato:")
+            
+            logger.info(f"✅ File {files_analyzed}/{total_files} completato:")
             logger.info(f"   • Record analizzati: {file_records:,}")
             logger.info(f"   • Tempo file: {file_time:.1f}s")
             logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
