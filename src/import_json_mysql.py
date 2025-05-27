@@ -550,6 +550,8 @@ def import_all_json_files(base_path, conn):
     total_records = 0
     files_processed = 0
     total_time_so_far = 0
+    last_progress_time = time.time()
+    progress_interval = 1.0  # Aggiorna il progresso ogni secondo
     
     try:
         for idx, json_file in enumerate(json_files, 1):
@@ -581,10 +583,20 @@ def import_all_json_files(base_path, conn):
                             file_records += 1
                             total_records += 1
                             
-                            if file_records % 1000 == 0:
+                            # Aggiorna il progresso ogni secondo
+                            current_time = time.time()
+                            if current_time - last_progress_time >= progress_interval:
                                 elapsed = time.time() - file_start_time
                                 speed = file_records / elapsed if elapsed > 0 else 0
-                                logger.info(f"\r📊 Record nel file: {file_records:,} | Velocità: {speed:.1f} record/s", end="")
+                                total_elapsed = current_time - start_time
+                                avg_speed = total_records / total_elapsed if total_elapsed > 0 else 0
+                                
+                                logger.info(f"📊 Progresso: File {idx}/{total_files} | "
+                                          f"Record nel file: {file_records:,} | "
+                                          f"Velocità: {speed:.1f} record/s | "
+                                          f"Totale: {total_records:,} record ({avg_speed:.1f} record/s)")
+                                
+                                last_progress_time = current_time
                             
                             current_chunk_size = memory_monitor.get_chunk_size()
                             if len(batch) >= current_chunk_size:
