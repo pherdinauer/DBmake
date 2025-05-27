@@ -292,19 +292,56 @@ def analyze_json_structure(json_files):
     
     return table_definitions
 
-def sanitize_field_name(field_name):
+def generate_short_alias(field_name, existing_aliases):
+    """Genera un alias corto per un campo lungo."""
+    # Rimuovi caratteri speciali e spazi
+    base = ''.join(c for c in field_name if c.isalnum())
+    # Prendi le prime lettere di ogni parola
+    words = base.split('_')
+    if len(words) > 1:
+        # Se ci sono più parole, usa le iniziali
+        alias = ''.join(word[0] for word in words if word)
+    else:
+        # Altrimenti usa i primi caratteri
+        alias = base[:8]
+    
+    # Aggiungi un numero se l'alias esiste già
+    counter = 1
+    original_alias = alias
+    while alias in existing_aliases:
+        alias = f"{original_alias}{counter}"
+        counter += 1
+    
+    return alias
+
+def sanitize_field_name(field_name, existing_aliases=None):
     """Sanitizza il nome del campo per MySQL."""
+    if existing_aliases is None:
+        existing_aliases = set()
+    
     # Sostituisce i caratteri non validi con underscore
     sanitized = field_name.replace('-', '_')
     # Rimuove altri caratteri non validi
     sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '_')
+    
+    # Se il nome è troppo lungo, genera un alias
+    if len(sanitized) > 64:
+        short_alias = generate_short_alias(sanitized, existing_aliases)
+        existing_aliases.add(short_alias)
+        return short_alias
+    
     return sanitized
 
 def create_dynamic_tables(conn, table_definitions):
     cursor = conn.cursor()
     
     # Crea un mapping tra nomi originali e nomi sanitizzati
-    field_mapping = {field: sanitize_field_name(field) for field in table_definitions.keys()}
+    existing_aliases = set()
+    field_mapping = {}
+    for field in table_definitions.keys():
+        sanitized = sanitize_field_name(field, existing_aliases)
+        field_mapping[field] = sanitized
+        existing_aliases.add(sanitized)
     
     # Crea la tabella principale con tutti i campi
     create_main_table = f"""
@@ -360,7 +397,7 @@ def create_dynamic_tables(conn, table_definitions):
     create_field_mapping = """
     CREATE TABLE IF NOT EXISTS field_mapping (
         original_name VARCHAR(255) PRIMARY KEY,
-        sanitized_name VARCHAR(255),
+        sanitized_name VARCHAR(64),
         field_type VARCHAR(50),
         INDEX idx_sanitized_name (sanitized_name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
