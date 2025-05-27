@@ -17,7 +17,7 @@ load_dotenv()
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'root')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', '')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import2')
+MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
 
@@ -91,35 +91,48 @@ class MemoryMonitor:
 
 # Funzione per connettersi a MySQL
 def connect_mysql():
-    try:
-        conn = mysql.connector.connect(
-            host=MYSQL_HOST,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DATABASE,
-            charset='utf8mb4',
-            autocommit=True,
-            # Aumenta il max_allowed_packet a 1GB
-            max_allowed_packet=1073741824
-        )
-        return conn
-    except mysql.connector.Error as err:
-        if err.errno == errorcode.ER_BAD_DB_ERROR:
-            # Crea il database se non esiste
-            tmp_conn = mysql.connector.connect(
+    max_retries = 3
+    retry_delay = 5  # secondi
+    
+    for attempt in range(max_retries):
+        try:
+            conn = mysql.connector.connect(
                 host=MYSQL_HOST,
                 user=MYSQL_USER,
                 password=MYSQL_PASSWORD,
+                database=MYSQL_DATABASE,
                 charset='utf8mb4',
                 autocommit=True,
-                max_allowed_packet=1073741824
+                # Aumenta il max_allowed_packet a 1GB
+                max_allowed_packet=1073741824,
+                # Aggiungi timeout e retry
+                connect_timeout=180,
+                connection_timeout=180,
+                pool_size=5,
+                pool_name="mypool"
             )
-            cursor = tmp_conn.cursor()
-            cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-            tmp_conn.close()
-            return connect_mysql()
-        else:
-            raise
+            return conn
+        except mysql.connector.Error as err:
+            if err.errno == errorcode.ER_BAD_DB_ERROR:
+                # Crea il database se non esiste
+                tmp_conn = mysql.connector.connect(
+                    host=MYSQL_HOST,
+                    user=MYSQL_USER,
+                    password=MYSQL_PASSWORD,
+                    charset='utf8mb4',
+                    autocommit=True,
+                    max_allowed_packet=1073741824
+                )
+                cursor = tmp_conn.cursor()
+                cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
+                tmp_conn.close()
+                return connect_mysql()
+            elif attempt < max_retries - 1:
+                print(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
+                print(f"🔄 Riprovo tra {retry_delay} secondi...")
+                time.sleep(retry_delay)
+            else:
+                raise
 
 # Funzione per analizzare la struttura del JSON e creare le definizioni delle tabelle
 def analyze_json_structure(json_files):
@@ -135,6 +148,9 @@ def analyze_json_structure(json_files):
                     for field, value in record.items():
                         if value is None:
                             continue
+                        
+                        # Normalizza i nomi dei campi
+                        field = field.lower().replace(' ', '_')
                         
                         # Determina il tipo di campo
                         if isinstance(value, bool):
@@ -270,7 +286,9 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             # Prepara i dati per la tabella principale
             main_values = []
             for field, def_type in table_definitions.items():
-                value = record.get(field)
+                # Normalizza il nome del campo nel record
+                field_lower = field.lower().replace(' ', '_')
+                value = record.get(field_lower)
                 if def_type == 'JSON' and value is not None:
                     json_data[field].append((len(main_data) + 1, json.dumps(value)))
                     value = None
@@ -300,6 +318,11 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 """
                 cursor.executemany(insert_json, json_data_with_metadata)
         
+    except mysql.connector.Error as e:
+        if e.errno == 1153:  # Packet too large
+            print("\n⚠️ Batch troppo grande, riduco la dimensione...")
+            raise ValueError("BATCH_TOO_LARGE")
+        raise
     except Exception as e:
         print(f"\n❌ Errore durante il processing del batch: {e}")
         raise
@@ -367,18 +390,37 @@ def import_all_json_files(base_path, conn):
                             
                             current_chunk_size = memory_monitor.get_chunk_size()
                             if len(batch) >= current_chunk_size:
-                                process_batch(cursor, batch, table_definitions, batch_id)
-                                conn.commit()
-                                batch = []
-                                gc.collect()
+                                try:
+                                    process_batch(cursor, batch, table_definitions, batch_id)
+                                    conn.commit()
+                                    batch = []
+                                    gc.collect()
+                                except ValueError as e:
+                                    if str(e) == "BATCH_TOO_LARGE":
+                                        # Riduci la dimensione del batch e riprova
+                                        memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
+                                            int(memory_monitor.current_chunk_size * 0.5))
+                                        print(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
+                                        continue
+                                    raise
                         except Exception as e:
                             print(f"\n❌ Errore nel parsing del record: {e}")
                             continue
                 
                 # Processa l'ultimo batch
                 if batch:
-                    process_batch(cursor, batch, table_definitions, batch_id)
-                    conn.commit()
+                    try:
+                        process_batch(cursor, batch, table_definitions, batch_id)
+                        conn.commit()
+                    except ValueError as e:
+                        if str(e) == "BATCH_TOO_LARGE":
+                            # Riduci la dimensione del batch e riprova
+                            memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
+                                int(memory_monitor.current_chunk_size * 0.5))
+                            print(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
+                            # Riprova con il batch ridotto
+                            process_batch(cursor, batch, table_definitions, batch_id)
+                            conn.commit()
                 
                 # Marca il file come processato con successo
                 mark_file_processed(conn, file_name, file_records)
