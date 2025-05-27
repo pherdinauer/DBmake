@@ -94,8 +94,15 @@ def connect_mysql():
     max_retries = 3
     retry_delay = 5  # secondi
     
+    print("\n🔍 Verifica configurazione MySQL:")
+    print(f"   • Host: {MYSQL_HOST}")
+    print(f"   • User: {MYSQL_USER}")
+    print(f"   • Database: {MYSQL_DATABASE}")
+    print(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
+    
     for attempt in range(max_retries):
         try:
+            print(f"\n🔄 Tentativo di connessione {attempt + 1}/{max_retries}...")
             conn = mysql.connector.connect(
                 host=MYSQL_HOST,
                 user=MYSQL_USER,
@@ -103,17 +110,17 @@ def connect_mysql():
                 database=MYSQL_DATABASE,
                 charset='utf8mb4',
                 autocommit=True,
-                # Aumenta il max_allowed_packet a 1GB
                 max_allowed_packet=1073741824,
-                # Aggiungi timeout e retry
                 connect_timeout=180,
                 connection_timeout=180,
                 pool_size=5,
                 pool_name="mypool"
             )
+            print("✅ Connessione riuscita!")
             return conn
         except mysql.connector.Error as err:
             if err.errno == errorcode.ER_BAD_DB_ERROR:
+                print(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
                 # Crea il database se non esiste
                 tmp_conn = mysql.connector.connect(
                     host=MYSQL_HOST,
@@ -126,12 +133,14 @@ def connect_mysql():
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
                 tmp_conn.close()
+                print(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
                 return connect_mysql()
             elif attempt < max_retries - 1:
                 print(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
                 print(f"🔄 Riprovo tra {retry_delay} secondi...")
                 time.sleep(retry_delay)
             else:
+                print(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
                 raise
 
 # Funzione per analizzare la struttura del JSON e creare le definizioni delle tabelle
