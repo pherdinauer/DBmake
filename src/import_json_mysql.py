@@ -147,7 +147,6 @@ tmpdir={tmp_dir}
                 charset='utf8mb4',
                 autocommit=True,
                 connect_timeout=180,
-                connection_timeout=180,
                 pool_size=5,
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
@@ -161,8 +160,6 @@ tmpdir={tmp_dir}
                 raw=False,
                 allow_local_infile=True,
                 use_unicode=True,
-                get_warnings=True,
-                connection_timeout=180,
                 auth_plugin='mysql_native_password'
             )
             
