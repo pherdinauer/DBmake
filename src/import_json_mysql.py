@@ -428,10 +428,15 @@ def create_dynamic_tables(conn, table_definitions):
             column_types[field] = def_type
     
     # Crea la tabella principale con tutti i campi
+    # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
+    main_fields = [f"{field_mapping[field]} {column_types[field]}" 
+                  for field in table_definitions.keys() 
+                  if field.lower() != 'cig']
+    
     create_main_table = f"""
     CREATE TABLE IF NOT EXISTS main_data (
         cig VARCHAR(64) PRIMARY KEY,
-        {', '.join(f"{field_mapping[field]} {column_types[field]}" for field in table_definitions.keys())},
+        {', '.join(main_fields)},
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         source_file VARCHAR(255),
         batch_id VARCHAR(64),
