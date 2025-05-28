@@ -549,7 +549,14 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             if not cig:  # Salta i record senza CIG
                 continue
                 
+            # Aggiungi il CIG come primo valore
+            main_values.append(cig)
+            
+            # Aggiungi gli altri campi, escludendo 'cig'
             for field, def_type in table_definitions.items():
+                if field.lower() == 'cig':  # Salta il campo 'cig' poiché è già aggiunto
+                    continue
+                    
                 # Normalizza il nome del campo nel record
                 field_lower = field.lower().replace(' ', '_')
                 value = record.get(field_lower)
@@ -569,13 +576,14 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
         # Inserisci i dati nella tabella principale
         if main_data:
-            fields = [field_mapping[field] for field in table_definitions.keys()] + ['source_file', 'batch_id']
+            # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
+            fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
             placeholders = ', '.join(['%s'] * len(fields))
             insert_main = f"""
-            INSERT INTO main_data (cig, {', '.join(fields)})
-            VALUES (%s, {placeholders})
+            INSERT INTO main_data ({', '.join(fields)})
+            VALUES ({placeholders})
             ON DUPLICATE KEY UPDATE
-                {', '.join(f"{field} = VALUES({field})" for field in fields)}
+                {', '.join(f"{field} = VALUES({field})" for field in fields if field != 'cig')}
             """
             cursor.executemany(insert_main, main_data)
         
