@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 from collections import defaultdict
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+import multiprocessing
 
 # Configurazione logging
 logging.basicConfig(
@@ -34,6 +37,10 @@ MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
+
+# Numero di thread per l'elaborazione parallela
+NUM_THREADS = multiprocessing.cpu_count()  # Usa il numero di core disponibili
+logger.info(f"🖥️  CPU cores disponibili: {NUM_THREADS}")
 
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -102,6 +109,146 @@ class MemoryMonitor:
     def stop(self):
         self.running = False
         self.monitor_thread.join()
+
+class RecordProcessor:
+    def __init__(self, table_definitions, field_mapping, file_name, batch_id):
+        self.table_definitions = table_definitions
+        self.field_mapping = field_mapping
+        self.file_name = file_name
+        self.batch_id = batch_id
+        self.main_data = []
+        self.json_data = defaultdict(list)
+        self.lock = threading.Lock()
+
+    def process_record(self, record):
+        main_values = []
+        cig = record.get('cig', '')
+        if not cig:
+            return None, None
+
+        main_values.append(cig)
+        
+        for field, def_type in self.table_definitions.items():
+            if field.lower() == 'cig':
+                continue
+                
+            field_lower = field.lower().replace(' ', '_')
+            value = record.get(field_lower)
+            
+            if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
+                value = str(value)[:1000]
+            
+            if def_type == 'JSON' and value is not None:
+                with self.lock:
+                    self.json_data[self.field_mapping[field]].append((cig, json.dumps(value)))
+                value = None
+            main_values.append(value)
+        
+        main_values.extend([self.file_name, self.batch_id])
+        return tuple(main_values), None
+
+def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
+    processor = RecordProcessor(table_definitions, field_mapping, file_name, batch_id)
+    
+    # Dividi il batch in sub-batch per ogni thread
+    sub_batch_size = len(batch) // NUM_THREADS
+    sub_batches = [batch[i:i + sub_batch_size] for i in range(0, len(batch), sub_batch_size)]
+    
+    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
+        futures = []
+        for sub_batch in sub_batches:
+            futures.append(executor.submit(process_sub_batch, sub_batch, processor))
+        
+        # Attendi il completamento di tutti i thread
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"❌ Errore nell'elaborazione parallela: {e}")
+                raise
+    
+    return processor.main_data, processor.json_data
+
+def process_sub_batch(sub_batch, processor):
+    for record, _ in sub_batch:
+        main_values, _ = processor.process_record(record)
+        if main_values:
+            processor.main_data.append(main_values)
+
+def process_batch(cursor, batch, table_definitions, batch_id):
+    if not batch:
+        return
+
+    try:
+        file_name = batch[0][1]
+        
+        # Ottieni il mapping dei campi
+        try:
+            cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
+            field_mapping = dict(cursor.fetchall())
+        except mysql.connector.Error as e:
+            if e.errno == 2006:  # MySQL server has gone away
+                logger.warning("⚠️ Connessione persa, riprovo...")
+                raise ValueError("CONNECTION_LOST")
+            raise
+        
+        logger.info(f"🔄 Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
+        start_time = time.time()
+        
+        # Elabora il batch in parallelo
+        main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
+        
+        # Inserisci i dati nella tabella principale
+        if main_data:
+            try:
+                fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+                placeholders = ', '.join(['%s'] * len(fields))
+                insert_main = f"""
+                INSERT INTO main_data ({', '.join(fields)})
+                VALUES ({placeholders}) AS new_data
+                ON DUPLICATE KEY UPDATE
+                    {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
+                """
+                cursor.executemany(insert_main, main_data)
+            except mysql.connector.Error as e:
+                if e.errno == 2006:  # MySQL server has gone away
+                    logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
+                    raise ValueError("CONNECTION_LOST")
+                raise
+        
+        # Inserisci i dati JSON nelle tabelle separate
+        for field, data in json_data.items():
+            if data:
+                logger.info(f"🔄 Inserimento dati JSON per il campo {field}...")
+                try:
+                    json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                    insert_json = f"""
+                    INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                    VALUES (%s, %s, %s, %s) AS new_data
+                    ON DUPLICATE KEY UPDATE
+                        {field}_json = new_data.{field}_json,
+                        source_file = new_data.source_file,
+                        batch_id = new_data.batch_id
+                    """
+                    cursor.executemany(insert_json, json_data_with_metadata)
+                except mysql.connector.Error as e:
+                    if e.errno == 2006:  # MySQL server has gone away
+                        logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
+                        raise ValueError("CONNECTION_LOST")
+                    raise
+        
+        elapsed_time = time.time() - start_time
+        speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
+        logger.info(f"✅ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
+        
+    except mysql.connector.Error as e:
+        if e.errno == 1153:  # Packet too large
+            logger.warning("\n⚠️ Batch troppo grande, riduco la dimensione...")
+            raise ValueError("BATCH_TOO_LARGE")
+        raise
+    except Exception as e:
+        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
+        raise
 
 def connect_mysql():
     max_retries = 3
@@ -546,131 +693,6 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         conn.rollback()
     finally:
         cursor.close()
-
-def process_batch(cursor, batch, table_definitions, batch_id):
-    if not batch:
-        return
-
-    try:
-        main_data = []
-        json_data = defaultdict(list)
-        file_name = batch[0][1]  # Prendi il nome del file dal primo record
-        
-        # Ottieni il mapping dei campi
-        try:
-            cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
-            field_mapping = dict(cursor.fetchall())
-        except mysql.connector.Error as e:
-            if e.errno == 2006:  # MySQL server has gone away
-                logger.warning("⚠️ Connessione persa, riprovo...")
-                raise ValueError("CONNECTION_LOST")
-            raise
-        
-        # Prepara i dati in batch più piccoli per evitare problemi di memoria
-        BATCH_SIZE = 5000  # Aumentato a 5000 per ridurre il numero di operazioni
-        total_records = len(batch)
-        processed_records = 0
-        
-        logger.info(f"🔄 Inizio processing batch di {total_records} record...")
-        
-        for i in range(0, len(batch), BATCH_SIZE):
-            sub_batch = batch[i:i + BATCH_SIZE]
-            sub_batch_start_time = time.time()
-            
-            for record, _ in sub_batch:
-                # Prepara i dati per la tabella principale
-                main_values = []
-                cig = record.get('cig', '')  # Estrai il CIG dal record
-                if not cig:  # Salta i record senza CIG
-                    continue
-                    
-                # Aggiungi il CIG come primo valore
-                main_values.append(cig)
-                
-                # Aggiungi gli altri campi, escludendo 'cig'
-                for field, def_type in table_definitions.items():
-                    if field.lower() == 'cig':  # Salta il campo 'cig' poiché è già aggiunto
-                        continue
-                        
-                    # Normalizza il nome del campo nel record
-                    field_lower = field.lower().replace(' ', '_')
-                    value = record.get(field_lower)
-                    
-                    # Gestisci i campi TEXT
-                    if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
-                        value = str(value)[:1000]  # Tronca a 1000 caratteri per i campi VARCHAR
-                    
-                    if def_type == 'JSON' and value is not None:
-                        json_data[field_mapping[field]].append((cig, json.dumps(value)))
-                        value = None
-                    main_values.append(value)
-                
-                # Aggiungi file_name e batch_id
-                main_values.extend([file_name, batch_id])
-                main_data.append(tuple(main_values))
-            
-            # Inserisci i dati nella tabella principale
-            if main_data:
-                try:
-                    # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
-                    fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-                    placeholders = ', '.join(['%s'] * len(fields))
-                    insert_main = f"""
-                    INSERT INTO main_data ({', '.join(fields)})
-                    VALUES ({placeholders}) AS new_data
-                    ON DUPLICATE KEY UPDATE
-                        {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
-                    """
-                    cursor.executemany(insert_main, main_data)
-                    main_data = []  # Pulisci la lista dopo l'inserimento
-                except mysql.connector.Error as e:
-                    if e.errno == 2006:  # MySQL server has gone away
-                        logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
-                        raise ValueError("CONNECTION_LOST")
-                    raise
-            
-            processed_records += len(sub_batch)
-            sub_batch_time = time.time() - sub_batch_start_time
-            speed = len(sub_batch) / sub_batch_time if sub_batch_time > 0 else 0
-            
-            logger.info(f"📊 Progresso sub-batch: {processed_records}/{total_records} record "
-                      f"({(processed_records/total_records*100):.1f}%) | "
-                      f"Velocità: {speed:.1f} record/s")
-        
-        # Inserisci i dati JSON nelle tabelle separate
-        for field, data in json_data.items():
-            if data:
-                logger.info(f"🔄 Inserimento dati JSON per il campo {field}...")
-                # Processa i dati JSON in batch più piccoli
-                for i in range(0, len(data), BATCH_SIZE):
-                    sub_data = data[i:i + BATCH_SIZE]
-                    try:
-                        json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in sub_data]
-                        insert_json = f"""
-                        INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                        VALUES (%s, %s, %s, %s) AS new_data
-                        ON DUPLICATE KEY UPDATE
-                            {field}_json = new_data.{field}_json,
-                            source_file = new_data.source_file,
-                            batch_id = new_data.batch_id
-                        """
-                        cursor.executemany(insert_json, json_data_with_metadata)
-                    except mysql.connector.Error as e:
-                        if e.errno == 2006:  # MySQL server has gone away
-                            logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
-                            raise ValueError("CONNECTION_LOST")
-                        raise
-        
-        logger.info("✅ Batch completato con successo!")
-        
-    except mysql.connector.Error as e:
-        if e.errno == 1153:  # Packet too large
-            logger.warning("\n⚠️ Batch troppo grande, riduco la dimensione...")
-            raise ValueError("BATCH_TOO_LARGE")
-        raise
-    except Exception as e:
-        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
-        raise
 
 def find_json_files(base_path):
     json_files = []
