@@ -406,10 +406,7 @@ local_infile=1
                 pool_size=5,
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
-                client_flags=[
-                    mysql.connector.ClientFlag.LOCAL_FILES,
-                    mysql.connector.ClientFlag.ENABLE_LOCAL_INFILE
-                ],  # Permetti file locali e local_infile
+                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
                 option_files=[config_path],  # Usa il file di configurazione
                 ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
                 get_warnings=True,
@@ -446,10 +443,7 @@ local_infile=1
                     autocommit=True,
                     option_files=[config_path],  # Usa il file di configurazione
                     ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
-                    client_flags=[
-                        mysql.connector.ClientFlag.LOCAL_FILES,
-                        mysql.connector.ClientFlag.ENABLE_LOCAL_INFILE
-                    ]
+                    client_flags=[mysql.connector.ClientFlag.LOCAL_FILES]
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
