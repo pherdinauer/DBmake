@@ -206,28 +206,42 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
     
     return processor.main_data, processor.json_data
 
-def write_batch_to_csv(batch_data, fields, batch_id):
+def write_batch_to_csv(batch_data, fields, batch_id, is_first_batch=False):
     """Scrive un batch di dati in un file CSV temporaneo."""
-    csv_file = os.path.join(TEMP_DIR, f'main_data_batch_{batch_id}.csv')
+    csv_file = os.path.join(TEMP_DIR, 'main_data.csv')
+    mode = 'w' if is_first_batch else 'a'
     
     try:
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+        with open(csv_file, mode, newline='', encoding='utf-8') as f:
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-            # Scrivi l'header
-            writer.writerow(fields)
+            # Scrivi l'header solo se è il primo batch
+            if is_first_batch:
+                writer.writerow(fields)
             # Scrivi i dati
             writer.writerows(batch_data)
         return csv_file
     except Exception as e:
         logger.error(f"❌ Errore nella scrittura del file CSV: {e}")
-        if os.path.exists(csv_file):
+        if os.path.exists(csv_file) and is_first_batch:
             os.remove(csv_file)
         raise
 
 def load_data_from_csv(cursor, csv_file, table_name, fields):
     """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE."""
     try:
-        # Costruisci la query LOAD DATA
+        # Verifica che il file esista e sia leggibile
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"File CSV non trovato: {csv_file}")
+        
+        if not os.access(csv_file, os.R_OK):
+            raise PermissionError(f"Permessi di lettura mancanti per il file: {csv_file}")
+        
+        # Verifica che il file non sia vuoto
+        if os.path.getsize(csv_file) == 0:
+            logger.warning(f"⚠️ File CSV vuoto: {csv_file}")
+            return
+        
+        # Costruisci la query LOAD DATA con gestione degli errori
         load_data_query = f"""
         LOAD DATA LOCAL INFILE '{csv_file}'
         INTO TABLE {table_name}
@@ -237,21 +251,31 @@ def load_data_from_csv(cursor, csv_file, table_name, fields):
         ({', '.join(fields)})
         """
         
-        # Esegui la query
-        cursor.execute(load_data_query)
+        # Esegui la query con gestione degli errori
+        try:
+            cursor.execute(load_data_query)
+            cursor.execute("SELECT ROW_COUNT()")
+            rows_affected = cursor.fetchone()[0]
+            logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file}")
+        except mysql.connector.Error as e:
+            if e.errno == 1148:  # The used command is not allowed with this MySQL version
+                logger.error("❌ LOAD DATA LOCAL INFILE non è abilitato nel server MySQL")
+                logger.info("⚠️ Verifica che il server MySQL sia configurato con --local-infile=1")
+                raise
+            elif e.errno == 1261:  # Row doesn't contain data for all columns
+                logger.error("❌ Errore nel formato dei dati: alcune righe non contengono tutti i campi richiesti")
+                raise
+            else:
+                raise
         
-        # Verifica il numero di righe inserite
-        cursor.execute("SELECT ROW_COUNT()")
-        rows_affected = cursor.fetchone()[0]
-        logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file}")
-        
-    except mysql.connector.Error as e:
+    except Exception as e:
         logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
         raise
     finally:
         # Pulisci il file temporaneo
         try:
-            os.remove(csv_file)
+            if os.path.exists(csv_file):
+                os.remove(csv_file)
         except Exception as e:
             logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
 
@@ -351,8 +375,10 @@ def connect_mysql():
     # Crea un file di configurazione MySQL temporaneo
     mysql_config = f"""[client]
 tmpdir={tmp_dir}
+local_infile=1
 [mysqld]
 tmpdir={tmp_dir}
+local_infile=1
 """
     config_path = os.path.join(tmp_dir, 'mysql.cnf')
     with open(config_path, 'w') as f:
@@ -380,7 +406,10 @@ tmpdir={tmp_dir}
                 pool_size=5,
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
-                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
+                client_flags=[
+                    mysql.connector.ClientFlag.LOCAL_FILES,
+                    mysql.connector.ClientFlag.ENABLE_LOCAL_INFILE
+                ],  # Permetti file locali e local_infile
                 option_files=[config_path],  # Usa il file di configurazione
                 ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
                 get_warnings=True,
@@ -393,13 +422,14 @@ tmpdir={tmp_dir}
                 auth_plugin='mysql_native_password'
             )
             
-            # Imposta max_allowed_packet dopo la connessione
+            # Imposta max_allowed_packet e altre variabili dopo la connessione
             cursor = conn.cursor()
             cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
             cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
             cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
             cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
             cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
+            cursor.execute("SET GLOBAL local_infile=1")         # Abilita local_infile
             cursor.close()
             
             logger.info("✅ Connessione riuscita!")
@@ -415,7 +445,11 @@ tmpdir={tmp_dir}
                     charset='utf8mb4',
                     autocommit=True,
                     option_files=[config_path],  # Usa il file di configurazione
-                    ssl_disabled=True  # Disabilita SSL per evitare problemi di connessione
+                    ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
+                    client_flags=[
+                        mysql.connector.ClientFlag.LOCAL_FILES,
+                        mysql.connector.ClientFlag.ENABLE_LOCAL_INFILE
+                    ]
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
@@ -750,6 +784,7 @@ def create_dynamic_tables(conn, table_definitions):
         """, (field, field_mapping[field], column_types[field]))
     
     cursor.close()
+    return field_mapping, column_types
 
 def is_file_processed(conn, file_name):
     cursor = conn.cursor()
@@ -793,8 +828,8 @@ def import_all_json_files(base_path, conn):
     # Analizza la struttura dei JSON
     table_definitions = analyze_json_structure(json_files)
     
-    # Crea le tabelle dinamicamente
-    create_dynamic_tables(conn, table_definitions)
+    # Crea le tabelle dinamicamente e ottieni il mapping dei campi
+    field_mapping, column_types = create_dynamic_tables(conn, table_definitions)
     
     cursor = conn.cursor()
     memory_monitor = MemoryMonitor(USABLE_MEMORY_BYTES)
@@ -804,6 +839,10 @@ def import_all_json_files(base_path, conn):
     total_time_so_far = 0
     last_progress_time = time.time()
     progress_interval = 1.0  # Aggiorna il progresso ogni secondo
+    
+    # Prepara i campi per il CSV
+    fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+    is_first_batch = True
     
     try:
         for idx, json_file in enumerate(json_files, 1):
@@ -853,13 +892,32 @@ def import_all_json_files(base_path, conn):
                             current_chunk_size = memory_monitor.get_chunk_size()
                             if len(batch) >= current_chunk_size:
                                 try:
-                                    process_batch(cursor, batch, table_definitions, batch_id)
-                                    conn.commit()
+                                    # Elabora il batch in parallelo
+                                    main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
+                                    
+                                    if main_data:
+                                        # Scrivi i dati nel CSV
+                                        csv_file = write_batch_to_csv(main_data, fields, batch_id, is_first_batch)
+                                        is_first_batch = False
+                                    
+                                    # Gestisci i dati JSON
+                                    if json_data:
+                                        for field, data in json_data.items():
+                                            json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                                            insert_json = f"""
+                                            INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                                            VALUES (%s, %s, %s, %s) AS new_data
+                                            ON DUPLICATE KEY UPDATE
+                                                {field}_json = new_data.{field}_json,
+                                                source_file = new_data.source_file,
+                                                batch_id = new_data.batch_id
+                                            """
+                                            cursor.executemany(insert_json, json_data_with_metadata)
+                                    
                                     batch = []
                                     gc.collect()
                                 except ValueError as e:
                                     if str(e) == "BATCH_TOO_LARGE":
-                                        # Riduci la dimensione del batch e riprova
                                         memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
                                             int(memory_monitor.current_chunk_size * 0.5))
                                         logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
@@ -872,17 +930,48 @@ def import_all_json_files(base_path, conn):
                 # Processa l'ultimo batch
                 if batch:
                     try:
-                        process_batch(cursor, batch, table_definitions, batch_id)
-                        conn.commit()
+                        main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
+                        
+                        if main_data:
+                            csv_file = write_batch_to_csv(main_data, fields, batch_id, is_first_batch)
+                            is_first_batch = False
+                        
+                        if json_data:
+                            for field, data in json_data.items():
+                                json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                                insert_json = f"""
+                                INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                                VALUES (%s, %s, %s, %s) AS new_data
+                                ON DUPLICATE KEY UPDATE
+                                    {field}_json = new_data.{field}_json,
+                                    source_file = new_data.source_file,
+                                    batch_id = new_data.batch_id
+                                """
+                                cursor.executemany(insert_json, json_data_with_metadata)
                     except ValueError as e:
                         if str(e) == "BATCH_TOO_LARGE":
-                            # Riduci la dimensione del batch e riprova
                             memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
                                 int(memory_monitor.current_chunk_size * 0.5))
                             logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
                             # Riprova con il batch ridotto
-                            process_batch(cursor, batch, table_definitions, batch_id)
-                            conn.commit()
+                            main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
+                            
+                            if main_data:
+                                csv_file = write_batch_to_csv(main_data, fields, batch_id, is_first_batch)
+                                is_first_batch = False
+                            
+                            if json_data:
+                                for field, data in json_data.items():
+                                    json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                                    insert_json = f"""
+                                    INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                                    VALUES (%s, %s, %s, %s) AS new_data
+                                    ON DUPLICATE KEY UPDATE
+                                        {field}_json = new_data.{field}_json,
+                                        source_file = new_data.source_file,
+                                        batch_id = new_data.batch_id
+                                    """
+                                    cursor.executemany(insert_json, json_data_with_metadata)
                 
                 # Marca il file come processato con successo
                 mark_file_processed(conn, file_name, file_records)
@@ -913,6 +1002,12 @@ def import_all_json_files(base_path, conn):
             logger.info(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
             
             gc.collect()
+        
+        # Carica tutti i dati nel database alla fine
+        if os.path.exists(os.path.join(TEMP_DIR, 'main_data.csv')):
+            csv_file = os.path.join(TEMP_DIR, 'main_data.csv')
+            load_data_from_csv(cursor, csv_file, 'main_data', fields)
+            os.remove(csv_file)
         
         total_time = time.time() - start_time
         logger.info("\n" + "="*80)
