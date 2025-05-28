@@ -606,9 +606,9 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 placeholders = ', '.join(['%s'] * len(fields))
                 insert_main = f"""
                 INSERT INTO main_data ({', '.join(fields)})
-                VALUES ({placeholders})
+                VALUES ({placeholders}) AS new_data
                 ON DUPLICATE KEY UPDATE
-                    {', '.join(f"{field} = VALUES({field})" for field in fields if field != 'cig')}
+                    {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
                 """
                 cursor.executemany(insert_main, main_data)
             except mysql.connector.Error as e:
@@ -624,11 +624,11 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                     json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
                     insert_json = f"""
                     INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                    VALUES (%s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s) AS new_data
                     ON DUPLICATE KEY UPDATE
-                        {field}_json = VALUES({field}_json),
-                        source_file = VALUES(source_file),
-                        batch_id = VALUES(batch_id)
+                        {field}_json = new_data.{field}_json,
+                        source_file = new_data.source_file,
+                        batch_id = new_data.batch_id
                     """
                     cursor.executemany(insert_json, json_data_with_metadata)
                 except mysql.connector.Error as e:
