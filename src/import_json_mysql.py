@@ -15,6 +15,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 import multiprocessing
+import csv
+import tempfile
 
 # Configurazione logging
 logging.basicConfig(
@@ -41,6 +43,10 @@ BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
 # Numero di thread per l'elaborazione parallela
 NUM_THREADS = multiprocessing.cpu_count()  # Usa il numero di core disponibili
 logger.info(f"🖥️  CPU cores disponibili: {NUM_THREADS}")
+
+# Directory temporanea per i file CSV
+TEMP_DIR = '/database/tmp'
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -200,6 +206,55 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
     
     return processor.main_data, processor.json_data
 
+def write_batch_to_csv(batch_data, fields, batch_id):
+    """Scrive un batch di dati in un file CSV temporaneo."""
+    csv_file = os.path.join(TEMP_DIR, f'main_data_batch_{batch_id}.csv')
+    
+    try:
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+            # Scrivi l'header
+            writer.writerow(fields)
+            # Scrivi i dati
+            writer.writerows(batch_data)
+        return csv_file
+    except Exception as e:
+        logger.error(f"❌ Errore nella scrittura del file CSV: {e}")
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+        raise
+
+def load_data_from_csv(cursor, csv_file, table_name, fields):
+    """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE."""
+    try:
+        # Costruisci la query LOAD DATA
+        load_data_query = f"""
+        LOAD DATA LOCAL INFILE '{csv_file}'
+        INTO TABLE {table_name}
+        FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+        LINES TERMINATED BY '\\n'
+        IGNORE 1 LINES
+        ({', '.join(fields)})
+        """
+        
+        # Esegui la query
+        cursor.execute(load_data_query)
+        
+        # Verifica il numero di righe inserite
+        cursor.execute("SELECT ROW_COUNT()")
+        rows_affected = cursor.fetchone()[0]
+        logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file}")
+        
+    except mysql.connector.Error as e:
+        logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
+        raise
+    finally:
+        # Pulisci il file temporaneo
+        try:
+            os.remove(csv_file)
+        except Exception as e:
+            logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
+
 def process_batch(cursor, batch, table_definitions, batch_id):
     if not batch:
         return
@@ -223,29 +278,17 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         # Elabora il batch in parallelo
         main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
         
-        # Prepara le query di inserimento
-        fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-        placeholders = ', '.join(['%s'] * len(fields))
-        insert_main = f"""
-        INSERT INTO main_data ({', '.join(fields)})
-        VALUES ({placeholders}) AS new_data
-        ON DUPLICATE KEY UPDATE
-            {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
-        """
+        if main_data:
+            # Prepara i campi per il CSV
+            fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+            
+            # Scrivi i dati in un file CSV
+            csv_file = write_batch_to_csv(main_data, fields, batch_id)
+            
+            # Carica i dati nel database
+            load_data_from_csv(cursor, csv_file, 'main_data', fields)
         
-        # Inserisci i dati in batch più grandi
-        BATCH_SIZE = 10000  # Aumentato per ridurre il numero di operazioni di I/O
-        for i in range(0, len(main_data), BATCH_SIZE):
-            sub_batch = main_data[i:i + BATCH_SIZE]
-            try:
-                cursor.executemany(insert_main, sub_batch)
-            except mysql.connector.Error as e:
-                if e.errno == 2006:  # MySQL server has gone away
-                    logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
-                    raise ValueError("CONNECTION_LOST")
-                raise
-        
-        # Inserisci i dati JSON in parallelo
+        # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
         if json_data:
             def insert_json_data(field, data):
                 try:
@@ -258,26 +301,24 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                         source_file = new_data.source_file,
                         batch_id = new_data.batch_id
                     """
-                    for i in range(0, len(json_data_with_metadata), BATCH_SIZE):
-                        sub_batch = json_data_with_metadata[i:i + BATCH_SIZE]
-                        cursor.executemany(insert_json, sub_batch)
+                    cursor.executemany(insert_json, json_data_with_metadata)
                 except mysql.connector.Error as e:
                     if e.errno == 2006:  # MySQL server has gone away
                         logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
                         raise ValueError("CONNECTION_LOST")
                     raise
         
-        # Crea e avvia i thread per l'inserimento JSON
-        json_threads = []
-        for field, data in json_data.items():
-            if data:
-                thread = threading.Thread(target=insert_json_data, args=(field, data))
-                thread.start()
-                json_threads.append(thread)
-        
-        # Attendi il completamento di tutti i thread JSON
-        for thread in json_threads:
-            thread.join()
+            # Crea e avvia i thread per l'inserimento JSON
+            json_threads = []
+            for field, data in json_data.items():
+                if data:
+                    thread = threading.Thread(target=insert_json_data, args=(field, data))
+                    thread.start()
+                    json_threads.append(thread)
+            
+            # Attendi il completamento di tutti i thread JSON
+            for thread in json_threads:
+                thread.join()
         
         elapsed_time = time.time() - start_time
         speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
