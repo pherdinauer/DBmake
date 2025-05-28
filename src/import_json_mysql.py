@@ -376,9 +376,11 @@ def connect_mysql():
     mysql_config = f"""[client]
 tmpdir={tmp_dir}
 local_infile=1
+default_auth=mysql_native_password
 [mysqld]
 tmpdir={tmp_dir}
 local_infile=1
+default_authentication_plugin=mysql_native_password
 """
     config_path = os.path.join(tmp_dir, 'mysql.cnf')
     with open(config_path, 'w') as f:
@@ -395,6 +397,29 @@ local_infile=1
     for attempt in range(max_retries):
         try:
             logger.info(f"\n🔄 Tentativo di connessione {attempt + 1}/{max_retries}...")
+            
+            # Prima prova a connetterti senza database per verificare le credenziali
+            try:
+                test_conn = mysql.connector.connect(
+                    host=MYSQL_HOST,
+                    user=MYSQL_USER,
+                    password=MYSQL_PASSWORD,
+                    charset='utf8mb4',
+                    auth_plugin='mysql_native_password',
+                    use_pure=True,
+                    ssl_disabled=True
+                )
+                test_conn.close()
+                logger.info("✅ Test di autenticazione riuscito!")
+            except mysql.connector.Error as e:
+                logger.error(f"❌ Errore di autenticazione: {e}")
+                logger.info("⚠️ Verifica che:")
+                logger.info("   1. L'utente esista nel server MySQL")
+                logger.info("   2. La password sia corretta")
+                logger.info("   3. L'utente abbia i permessi necessari")
+                raise
+            
+            # Se l'autenticazione funziona, prova a connetterti al database
             conn = mysql.connector.connect(
                 host=MYSQL_HOST,
                 user=MYSQL_USER,
@@ -405,10 +430,10 @@ local_infile=1
                 connect_timeout=180,
                 pool_size=5,
                 pool_name="mypool",
-                use_pure=True,  # Usa l'implementazione Python pura
-                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
-                option_files=[config_path],  # Usa il file di configurazione
-                ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
+                use_pure=True,
+                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],
+                option_files=[config_path],
+                ssl_disabled=True,
                 get_warnings=True,
                 raise_on_warnings=True,
                 consume_results=True,
@@ -431,6 +456,7 @@ local_infile=1
             
             logger.info("✅ Connessione riuscita!")
             return conn
+            
         except mysql.connector.Error as err:
             if err.errno == errorcode.ER_BAD_DB_ERROR:
                 logger.warning(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
@@ -441,9 +467,8 @@ local_infile=1
                     password=MYSQL_PASSWORD,
                     charset='utf8mb4',
                     autocommit=True,
-                    option_files=[config_path],  # Usa il file di configurazione
-                    ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
-                    client_flags=[mysql.connector.ClientFlag.LOCAL_FILES]
+                    auth_plugin='mysql_native_password',
+                    ssl_disabled=True
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
