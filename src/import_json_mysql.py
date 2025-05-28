@@ -119,6 +119,8 @@ class RecordProcessor:
         self.main_data = []
         self.json_data = defaultdict(list)
         self.lock = threading.Lock()
+        self.processed_count = 0
+        self.total_count = 0
 
     def process_record(self, record):
         main_values = []
@@ -147,33 +149,56 @@ class RecordProcessor:
         main_values.extend([self.file_name, self.batch_id])
         return tuple(main_values), None
 
+    def add_processed(self, count):
+        with self.lock:
+            self.processed_count += count
+            if self.processed_count % 10000 == 0:  # Log ogni 10000 record
+                logger.info(f"📊 Progresso: {self.processed_count}/{self.total_count} record "
+                          f"({(self.processed_count/self.total_count*100):.1f}%)")
+
 def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
     processor = RecordProcessor(table_definitions, field_mapping, file_name, batch_id)
+    processor.total_count = len(batch)
     
-    # Dividi il batch in sub-batch per ogni thread
-    sub_batch_size = len(batch) // NUM_THREADS
+    # Dividi il batch in sub-batch più piccoli per ogni thread
+    sub_batch_size = max(1000, len(batch) // (NUM_THREADS * 2))  # Più sub-batch per thread
     sub_batches = [batch[i:i + sub_batch_size] for i in range(0, len(batch), sub_batch_size)]
     
-    with ThreadPoolExecutor(max_workers=NUM_THREADS) as executor:
-        futures = []
-        for sub_batch in sub_batches:
-            futures.append(executor.submit(process_sub_batch, sub_batch, processor))
+    # Crea una coda per i risultati
+    result_queue = Queue()
+    
+    def worker(sub_batch):
+        local_main_data = []
+        local_json_data = defaultdict(list)
         
-        # Attendi il completamento di tutti i thread
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                logger.error(f"❌ Errore nell'elaborazione parallela: {e}")
-                raise
+        for record, _ in sub_batch:
+            main_values, _ = processor.process_record(record)
+            if main_values:
+                local_main_data.append(main_values)
+        
+        # Aggiungi i dati processati alla coda
+        result_queue.put((local_main_data, local_json_data))
+        processor.add_processed(len(sub_batch))
+    
+    # Crea e avvia i thread
+    threads = []
+    for sub_batch in sub_batches:
+        thread = threading.Thread(target=worker, args=(sub_batch,))
+        thread.start()
+        threads.append(thread)
+    
+    # Attendi il completamento di tutti i thread
+    for thread in threads:
+        thread.join()
+    
+    # Raccogli i risultati
+    while not result_queue.empty():
+        local_main_data, local_json_data = result_queue.get()
+        processor.main_data.extend(local_main_data)
+        for field, data in local_json_data.items():
+            processor.json_data[field].extend(data)
     
     return processor.main_data, processor.json_data
-
-def process_sub_batch(sub_batch, processor):
-    for record, _ in sub_batch:
-        main_values, _ = processor.process_record(record)
-        if main_values:
-            processor.main_data.append(main_values)
 
 def process_batch(cursor, batch, table_definitions, batch_id):
     if not batch:
@@ -198,28 +223,31 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         # Elabora il batch in parallelo
         main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
         
-        # Inserisci i dati nella tabella principale
-        if main_data:
+        # Prepara le query di inserimento
+        fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+        placeholders = ', '.join(['%s'] * len(fields))
+        insert_main = f"""
+        INSERT INTO main_data ({', '.join(fields)})
+        VALUES ({placeholders}) AS new_data
+        ON DUPLICATE KEY UPDATE
+            {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
+        """
+        
+        # Inserisci i dati in batch più grandi
+        BATCH_SIZE = 10000  # Aumentato per ridurre il numero di operazioni di I/O
+        for i in range(0, len(main_data), BATCH_SIZE):
+            sub_batch = main_data[i:i + BATCH_SIZE]
             try:
-                fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-                placeholders = ', '.join(['%s'] * len(fields))
-                insert_main = f"""
-                INSERT INTO main_data ({', '.join(fields)})
-                VALUES ({placeholders}) AS new_data
-                ON DUPLICATE KEY UPDATE
-                    {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
-                """
-                cursor.executemany(insert_main, main_data)
+                cursor.executemany(insert_main, sub_batch)
             except mysql.connector.Error as e:
                 if e.errno == 2006:  # MySQL server has gone away
                     logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
                     raise ValueError("CONNECTION_LOST")
                 raise
         
-        # Inserisci i dati JSON nelle tabelle separate
-        for field, data in json_data.items():
-            if data:
-                logger.info(f"🔄 Inserimento dati JSON per il campo {field}...")
+        # Inserisci i dati JSON in parallelo
+        if json_data:
+            def insert_json_data(field, data):
                 try:
                     json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
                     insert_json = f"""
@@ -230,12 +258,26 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                         source_file = new_data.source_file,
                         batch_id = new_data.batch_id
                     """
-                    cursor.executemany(insert_json, json_data_with_metadata)
+                    for i in range(0, len(json_data_with_metadata), BATCH_SIZE):
+                        sub_batch = json_data_with_metadata[i:i + BATCH_SIZE]
+                        cursor.executemany(insert_json, sub_batch)
                 except mysql.connector.Error as e:
                     if e.errno == 2006:  # MySQL server has gone away
                         logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
                         raise ValueError("CONNECTION_LOST")
                     raise
+        
+        # Crea e avvia i thread per l'inserimento JSON
+        json_threads = []
+        for field, data in json_data.items():
+            if data:
+                thread = threading.Thread(target=insert_json_data, args=(field, data))
+                thread.start()
+                json_threads.append(thread)
+        
+        # Attendi il completamento di tutti i thread JSON
+        for thread in json_threads:
+            thread.join()
         
         elapsed_time = time.time() - start_time
         speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
