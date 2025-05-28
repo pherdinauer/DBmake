@@ -291,6 +291,30 @@ def load_data_from_csv(cursor, csv_file, table_name, fields):
             elif e.errno == 1261:  # Row doesn't contain data for all columns
                 logger.error("❌ Errore nel formato dei dati: alcune righe non contengono tutti i campi richiesti")
                 raise
+            elif e.errno == 1265:  # Data truncated
+                logger.warning("⚠️ Errore di troncamento dati, provo con modalità permissiva...")
+                # Salva la modalità SQL corrente
+                cursor.execute("SELECT @@sql_mode")
+                original_sql_mode = cursor.fetchone()[0]
+                
+                try:
+                    # Imposta una modalità SQL più permissiva
+                    cursor.execute("SET sql_mode = 'ALLOW_INVALID_DATES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION'")
+                    
+                    # Riprova il caricamento
+                    cursor.execute(load_data_query)
+                    cursor.execute("SELECT ROW_COUNT()")
+                    rows_affected = cursor.fetchone()[0]
+                    logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file} (modalità permissiva)")
+                    
+                    # Ripristina la modalità SQL originale
+                    cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
+                    
+                except Exception as retry_error:
+                    # Ripristina la modalità SQL originale anche in caso di errore
+                    cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
+                    logger.error(f"❌ Errore anche con modalità permissiva: {retry_error}")
+                    raise
             else:
                 raise
         
