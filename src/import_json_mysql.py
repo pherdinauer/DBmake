@@ -420,68 +420,83 @@ default_authentication_plugin=mysql_native_password
                 raise
             
             # Se l'autenticazione funziona, prova a connetterti al database
-            conn = mysql.connector.connect(
-                host=MYSQL_HOST,
-                user=MYSQL_USER,
-                password=MYSQL_PASSWORD,
-                database=MYSQL_DATABASE,
-                charset='utf8mb4',
-                autocommit=True,
-                connect_timeout=180,
-                pool_size=5,
-                pool_name="mypool",
-                use_pure=True,
-                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],
-                option_files=[config_path],
-                ssl_disabled=True,
-                get_warnings=True,
-                raise_on_warnings=True,
-                consume_results=True,
-                buffered=True,
-                raw=False,
-                allow_local_infile=True,
-                use_unicode=True,
-                auth_plugin='mysql_native_password'
-            )
-            
-            # Imposta max_allowed_packet e altre variabili dopo la connessione
-            cursor = conn.cursor()
-            cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
-            cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
-            cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
-            cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
-            cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
-            cursor.execute("SET GLOBAL local_infile=1")         # Abilita local_infile
-            cursor.close()
-            
-            logger.info("✅ Connessione riuscita!")
-            return conn
-            
-        except mysql.connector.Error as err:
-            if err.errno == errorcode.ER_BAD_DB_ERROR:
-                logger.warning(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
-                # Crea il database se non esiste
-                tmp_conn = mysql.connector.connect(
+            try:
+                conn = mysql.connector.connect(
                     host=MYSQL_HOST,
                     user=MYSQL_USER,
                     password=MYSQL_PASSWORD,
+                    database=MYSQL_DATABASE,
                     charset='utf8mb4',
                     autocommit=True,
-                    auth_plugin='mysql_native_password',
-                    ssl_disabled=True
+                    connect_timeout=180,
+                    pool_size=5,
+                    pool_name="mypool",
+                    use_pure=True,
+                    client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],
+                    option_files=[config_path],
+                    ssl_disabled=True,
+                    get_warnings=True,
+                    raise_on_warnings=True,
+                    consume_results=True,
+                    buffered=True,
+                    raw=False,
+                    allow_local_infile=True,
+                    use_unicode=True,
+                    auth_plugin='mysql_native_password'
                 )
-                cursor = tmp_conn.cursor()
-                cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                tmp_conn.close()
-                logger.info(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
-                return connect_mysql()
-            elif attempt < max_retries - 1:
+                
+                # Imposta max_allowed_packet e altre variabili dopo la connessione
+                cursor = conn.cursor()
+                cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
+                cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
+                cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
+                cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
+                cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
+                cursor.execute("SET GLOBAL local_infile=1")         # Abilita local_infile
+                cursor.close()
+                
+                logger.info("✅ Connessione riuscita!")
+                return conn
+                
+            except mysql.connector.Error as err:
+                if err.errno == errorcode.ER_BAD_DB_ERROR:
+                    logger.warning(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
+                    # Crea il database se non esiste
+                    try:
+                        tmp_conn = mysql.connector.connect(
+                            host=MYSQL_HOST,
+                            user=MYSQL_USER,
+                            password=MYSQL_PASSWORD,
+                            charset='utf8mb4',
+                            autocommit=True,
+                            auth_plugin='mysql_native_password',
+                            ssl_disabled=True
+                        )
+                        cursor = tmp_conn.cursor()
+                        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
+                        tmp_conn.commit()
+                        cursor.close()
+                        tmp_conn.close()
+                        logger.info(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
+                        # Riprova la connessione al database appena creato
+                        return connect_mysql()
+                    except Exception as e:
+                        logger.error(f"❌ Errore durante la creazione del database: {e}")
+                        raise
+                else:
+                    raise
+                
+        except mysql.connector.Error as err:
+            if attempt < max_retries - 1:
                 logger.warning(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
                 logger.info(f"🔄 Riprovo tra {retry_delay} secondi...")
                 time.sleep(retry_delay)
             else:
                 logger.error(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
                 raise
+        except Exception as e:
+            logger.error(f"\n❌ Errore imprevisto durante la connessione: {e}")
+            raise
 
 def check_disk_space():
     """Verifica lo spazio disponibile su disco."""
