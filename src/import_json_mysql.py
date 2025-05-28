@@ -1125,12 +1125,38 @@ def import_all_json_files(base_path, conn):
         memory_monitor.stop()
         cursor.close()
 
+def cleanup_temp_files():
+    """Rimuove tutti i file CSV temporanei dalla directory temporanea."""
+    try:
+        temp_dir = TEMP_DIR
+        if not os.path.exists(temp_dir):
+            return
+        
+        csv_files = glob.glob(os.path.join(temp_dir, '*.csv'))
+        if csv_files:
+            logger.info(f"🧹 Pulizia file CSV temporanei trovati: {len(csv_files)} file")
+            for csv_file in csv_files:
+                try:
+                    os.remove(csv_file)
+                    logger.info(f"   ✅ Rimosso: {os.path.basename(csv_file)}")
+                except Exception as e:
+                    logger.warning(f"   ⚠️ Impossibile rimuovere {os.path.basename(csv_file)}: {e}")
+            logger.info("🧹 Pulizia completata!")
+        else:
+            logger.info("🧹 Nessun file CSV temporaneo da rimuovere")
+    except Exception as e:
+        logger.warning(f"⚠️ Errore durante la pulizia dei file temporanei: {e}")
+
 def main():
     try:
         # Crea la directory dei log se non esiste
         os.makedirs('logs', exist_ok=True)
         
         logger.info(f"🕒 Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Pulizia automatica dei file CSV temporanei
+        cleanup_temp_files()
+        
         logger.info(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
         logger.info(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
         logger.info(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
