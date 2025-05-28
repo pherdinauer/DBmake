@@ -38,20 +38,20 @@ BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.2  # Ridotto a 20% per permettere più memoria per l'importazione
+MEMORY_BUFFER_RATIO = 0.3  # Aumentato a 30% per evitare swap
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.2     # Aumentato al 20% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.02   # Ridotto al 2% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.1     # Ridotto al 10% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
-INITIAL_CHUNK_SIZE = max(5000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
-MIN_CHUNK_SIZE = 1000  # Aumentato il minimo a 1000
+MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Limita il chunk size massimo a 50000 record per evitare problemi con max_allowed_packet
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
+# Limita il chunk size massimo a 10000 record per evitare problemi con max_allowed_packet
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 10000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -533,12 +533,12 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
     try:
         cursor.execute("""
             INSERT INTO processed_files (file_name, record_count, status, error_message)
-            VALUES (%s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s) AS new_data
             ON DUPLICATE KEY UPDATE
                 processed_at = CURRENT_TIMESTAMP,
-                record_count = VALUES(record_count),
-                status = VALUES(status),
-                error_message = VALUES(error_message)
+                record_count = new_data.record_count,
+                status = new_data.status,
+                error_message = new_data.error_message
         """, (file_name, record_count, status, error_message))
         conn.commit()
     except Exception as e:
@@ -566,76 +566,84 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 raise ValueError("CONNECTION_LOST")
             raise
         
-        for record, _ in batch:
-            # Prepara i dati per la tabella principale
-            main_values = []
-            cig = record.get('cig', '')  # Estrai il CIG dal record
-            if not cig:  # Salta i record senza CIG
-                continue
-                
-            # Aggiungi il CIG come primo valore
-            main_values.append(cig)
-            
-            # Aggiungi gli altri campi, escludendo 'cig'
-            for field, def_type in table_definitions.items():
-                if field.lower() == 'cig':  # Salta il campo 'cig' poiché è già aggiunto
+        # Prepara i dati in batch più piccoli per evitare problemi di memoria
+        BATCH_SIZE = 1000
+        for i in range(0, len(batch), BATCH_SIZE):
+            sub_batch = batch[i:i + BATCH_SIZE]
+            for record, _ in sub_batch:
+                # Prepara i dati per la tabella principale
+                main_values = []
+                cig = record.get('cig', '')  # Estrai il CIG dal record
+                if not cig:  # Salta i record senza CIG
                     continue
                     
-                # Normalizza il nome del campo nel record
-                field_lower = field.lower().replace(' ', '_')
-                value = record.get(field_lower)
+                # Aggiungi il CIG come primo valore
+                main_values.append(cig)
                 
-                # Gestisci i campi TEXT
-                if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
-                    value = str(value)[:1000]  # Tronca a 1000 caratteri per i campi VARCHAR
+                # Aggiungi gli altri campi, escludendo 'cig'
+                for field, def_type in table_definitions.items():
+                    if field.lower() == 'cig':  # Salta il campo 'cig' poiché è già aggiunto
+                        continue
+                        
+                    # Normalizza il nome del campo nel record
+                    field_lower = field.lower().replace(' ', '_')
+                    value = record.get(field_lower)
+                    
+                    # Gestisci i campi TEXT
+                    if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
+                        value = str(value)[:1000]  # Tronca a 1000 caratteri per i campi VARCHAR
+                    
+                    if def_type == 'JSON' and value is not None:
+                        json_data[field_mapping[field]].append((cig, json.dumps(value)))
+                        value = None
+                    main_values.append(value)
                 
-                if def_type == 'JSON' and value is not None:
-                    json_data[field_mapping[field]].append((cig, json.dumps(value)))
-                    value = None
-                main_values.append(value)
+                # Aggiungi file_name e batch_id
+                main_values.extend([file_name, batch_id])
+                main_data.append(tuple(main_values))
             
-            # Aggiungi file_name e batch_id
-            main_values.extend([file_name, batch_id])
-            main_data.append(tuple(main_values))
-        
-        # Inserisci i dati nella tabella principale
-        if main_data:
-            try:
-                # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
-                fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-                placeholders = ', '.join(['%s'] * len(fields))
-                insert_main = f"""
-                INSERT INTO main_data ({', '.join(fields)})
-                VALUES ({placeholders}) AS new_data
-                ON DUPLICATE KEY UPDATE
-                    {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
-                """
-                cursor.executemany(insert_main, main_data)
-            except mysql.connector.Error as e:
-                if e.errno == 2006:  # MySQL server has gone away
-                    logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
-                    raise ValueError("CONNECTION_LOST")
-                raise
+            # Inserisci i dati nella tabella principale
+            if main_data:
+                try:
+                    # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
+                    fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+                    placeholders = ', '.join(['%s'] * len(fields))
+                    insert_main = f"""
+                    INSERT INTO main_data ({', '.join(fields)})
+                    VALUES ({placeholders}) AS new_data
+                    ON DUPLICATE KEY UPDATE
+                        {', '.join(f"{field} = new_data.{field}" for field in fields if field != 'cig')}
+                    """
+                    cursor.executemany(insert_main, main_data)
+                    main_data = []  # Pulisci la lista dopo l'inserimento
+                except mysql.connector.Error as e:
+                    if e.errno == 2006:  # MySQL server has gone away
+                        logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
+                        raise ValueError("CONNECTION_LOST")
+                    raise
         
         # Inserisci i dati JSON nelle tabelle separate
         for field, data in json_data.items():
             if data:
-                try:
-                    json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
-                    insert_json = f"""
-                    INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                    VALUES (%s, %s, %s, %s) AS new_data
-                    ON DUPLICATE KEY UPDATE
-                        {field}_json = new_data.{field}_json,
-                        source_file = new_data.source_file,
-                        batch_id = new_data.batch_id
-                    """
-                    cursor.executemany(insert_json, json_data_with_metadata)
-                except mysql.connector.Error as e:
-                    if e.errno == 2006:  # MySQL server has gone away
-                        logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
-                        raise ValueError("CONNECTION_LOST")
-                    raise
+                # Processa i dati JSON in batch più piccoli
+                for i in range(0, len(data), BATCH_SIZE):
+                    sub_data = data[i:i + BATCH_SIZE]
+                    try:
+                        json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in sub_data]
+                        insert_json = f"""
+                        INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                        VALUES (%s, %s, %s, %s) AS new_data
+                        ON DUPLICATE KEY UPDATE
+                            {field}_json = new_data.{field}_json,
+                            source_file = new_data.source_file,
+                            batch_id = new_data.batch_id
+                        """
+                        cursor.executemany(insert_json, json_data_with_metadata)
+                    except mysql.connector.Error as e:
+                        if e.errno == 2006:  # MySQL server has gone away
+                            logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
+                            raise ValueError("CONNECTION_LOST")
+                        raise
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
