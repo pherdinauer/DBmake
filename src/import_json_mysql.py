@@ -152,12 +152,27 @@ tmpdir={tmp_dir}
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
                 client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
-                option_files=[config_path]  # Usa il file di configurazione
+                option_files=[config_path],  # Usa il file di configurazione
+                ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
+                get_warnings=True,
+                raise_on_warnings=True,
+                consume_results=True,
+                buffered=True,
+                raw=False,
+                allow_local_infile=True,
+                use_unicode=True,
+                get_warnings=True,
+                connection_timeout=180,
+                auth_plugin='mysql_native_password'
             )
             
             # Imposta max_allowed_packet dopo la connessione
             cursor = conn.cursor()
-            cursor.execute("SET GLOBAL max_allowed_packet=1073741824")
+            cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
+            cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
+            cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
+            cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
+            cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
             cursor.close()
             
             logger.info("✅ Connessione riuscita!")
@@ -172,7 +187,8 @@ tmpdir={tmp_dir}
                     password=MYSQL_PASSWORD,
                     charset='utf8mb4',
                     autocommit=True,
-                    option_files=[config_path]  # Usa il file di configurazione
+                    option_files=[config_path],  # Usa il file di configurazione
+                    ssl_disabled=True  # Disabilita SSL per evitare problemi di connessione
                 )
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
@@ -544,8 +560,14 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         file_name = batch[0][1]  # Prendi il nome del file dal primo record
         
         # Ottieni il mapping dei campi
-        cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
-        field_mapping = dict(cursor.fetchall())
+        try:
+            cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
+            field_mapping = dict(cursor.fetchall())
+        except mysql.connector.Error as e:
+            if e.errno == 2006:  # MySQL server has gone away
+                logger.warning("⚠️ Connessione persa, riprovo...")
+                raise ValueError("CONNECTION_LOST")
+            raise
         
         for record, _ in batch:
             # Prepara i dati per la tabella principale
@@ -581,30 +603,42 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
         # Inserisci i dati nella tabella principale
         if main_data:
-            # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
-            fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-            placeholders = ', '.join(['%s'] * len(fields))
-            insert_main = f"""
-            INSERT INTO main_data ({', '.join(fields)})
-            VALUES ({placeholders})
-            ON DUPLICATE KEY UPDATE
-                {', '.join(f"{field} = VALUES({field})" for field in fields if field != 'cig')}
-            """
-            cursor.executemany(insert_main, main_data)
+            try:
+                # Ottieni la lista dei campi, escludendo 'cig' che è già la chiave primaria
+                fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+                placeholders = ', '.join(['%s'] * len(fields))
+                insert_main = f"""
+                INSERT INTO main_data ({', '.join(fields)})
+                VALUES ({placeholders})
+                ON DUPLICATE KEY UPDATE
+                    {', '.join(f"{field} = VALUES({field})" for field in fields if field != 'cig')}
+                """
+                cursor.executemany(insert_main, main_data)
+            except mysql.connector.Error as e:
+                if e.errno == 2006:  # MySQL server has gone away
+                    logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
+                    raise ValueError("CONNECTION_LOST")
+                raise
         
         # Inserisci i dati JSON nelle tabelle separate
         for field, data in json_data.items():
             if data:
-                json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
-                insert_json = f"""
-                INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    {field}_json = VALUES({field}_json),
-                    source_file = VALUES(source_file),
-                    batch_id = VALUES(batch_id)
-                """
-                cursor.executemany(insert_json, json_data_with_metadata)
+                try:
+                    json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                    insert_json = f"""
+                    INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        {field}_json = VALUES({field}_json),
+                        source_file = VALUES(source_file),
+                        batch_id = VALUES(batch_id)
+                    """
+                    cursor.executemany(insert_json, json_data_with_metadata)
+                except mysql.connector.Error as e:
+                    if e.errno == 2006:  # MySQL server has gone away
+                        logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
+                        raise ValueError("CONNECTION_LOST")
+                    raise
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
