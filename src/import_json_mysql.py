@@ -142,14 +142,40 @@ class RecordProcessor:
                 
             field_lower = field.lower().replace(' ', '_')
             value = record.get(field_lower)
-            
-            if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
-                value = str(value)[:1000]
-            
-            if def_type == 'JSON' and value is not None:
-                with self.lock:
-                    self.json_data[self.field_mapping[field]].append((cig, json.dumps(value)))
+            original_value = value
+
+            # --- Pulizia e validazione valori ---
+            try:
+                if value is None or value == '' or (isinstance(value, str) and value.strip().lower() in ('null', 'n/a', 'nan', 'none', '')):
+                    value = None
+                elif def_type in ('DOUBLE', 'FLOAT'):
+                    value = float(value)
+                elif def_type == 'INT':
+                    value = int(float(value))  # gestisce anche "12.0" -> 12
+                elif def_type.startswith('VARCHAR'):
+                    value = str(value)
+                    if len(value) > 1000:
+                        value = value[:1000]
+                elif def_type == 'BOOLEAN':
+                    if isinstance(value, bool):
+                        pass
+                    elif str(value).strip().lower() in ('1', 'true', 'yes', 'y', 't'):
+                        value = True
+                    elif str(value).strip().lower() in ('0', 'false', 'no', 'n', 'f'):
+                        value = False
+                    else:
+                        value = None
+                elif def_type == 'JSON':
+                    if value is not None:
+                        with self.lock:
+                            self.json_data[self.field_mapping[field]].append((cig, json.dumps(value)))
+                        value = None
+                # Altri tipi: lascia il valore così com'è
+            except Exception as e:
+                logger.warning(f"⚠️ Valore scartato per il campo '{field}' (tipo {def_type}): '{original_value}' - Errore: {e}")
                 value = None
+            # --- Fine pulizia e validazione ---
+
             main_values.append(value)
         
         main_values.extend([self.file_name, self.batch_id])
@@ -1045,7 +1071,9 @@ def import_all_json_files(base_path, conn):
             if files_since_last_commit >= BATCH_FILE_COUNT:
                 csv_path = os.path.join(TEMP_DIR, 'main_data.csv')
                 if os.path.exists(csv_path):
+                    logger.info(f"🚚 Inizio caricamento su MySQL del file CSV: {csv_path}")
                     load_data_from_csv(cursor, csv_path, 'main_data', fields)
+                    logger.info(f"✅ Completato caricamento su MySQL e rimozione file CSV: {csv_path}")
                     os.remove(csv_path)
                     is_first_batch = True  # Così la prossima volta riscrive l'header
                 files_since_last_commit = 0
@@ -1053,7 +1081,9 @@ def import_all_json_files(base_path, conn):
         # Carica tutti i dati rimasti nel database alla fine
         csv_file = os.path.join(TEMP_DIR, 'main_data.csv')
         if os.path.exists(csv_file):
+            logger.info(f"🚚 Inizio caricamento su MySQL del file CSV finale: {csv_file}")
             load_data_from_csv(cursor, csv_file, 'main_data', fields)
+            logger.info(f"✅ Completato caricamento su MySQL e rimozione file CSV finale: {csv_file}")
             os.remove(csv_file)
         
         total_time = time.time() - start_time
