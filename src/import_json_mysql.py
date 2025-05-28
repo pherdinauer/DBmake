@@ -878,6 +878,9 @@ def import_all_json_files(base_path, conn):
     fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
     is_first_batch = True
     
+    BATCH_FILE_COUNT = 5  # Ogni quanti file fare il commit
+    files_since_last_commit = 0
+    
     try:
         for idx, json_file in enumerate(json_files, 1):
             file_name = os.path.basename(json_file)
@@ -1036,10 +1039,20 @@ def import_all_json_files(base_path, conn):
             logger.info(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
             
             gc.collect()
+            
+            # --- COMMIT PERIODICO OGNI 5 FILE ---
+            files_since_last_commit += 1
+            if files_since_last_commit >= BATCH_FILE_COUNT:
+                csv_path = os.path.join(TEMP_DIR, 'main_data.csv')
+                if os.path.exists(csv_path):
+                    load_data_from_csv(cursor, csv_path, 'main_data', fields)
+                    os.remove(csv_path)
+                    is_first_batch = True  # Così la prossima volta riscrive l'header
+                files_since_last_commit = 0
         
-        # Carica tutti i dati nel database alla fine
-        if os.path.exists(os.path.join(TEMP_DIR, 'main_data.csv')):
-            csv_file = os.path.join(TEMP_DIR, 'main_data.csv')
+        # Carica tutti i dati rimasti nel database alla fine
+        csv_file = os.path.join(TEMP_DIR, 'main_data.csv')
+        if os.path.exists(csv_file):
             load_data_from_csv(cursor, csv_file, 'main_data', fields)
             os.remove(csv_file)
         
