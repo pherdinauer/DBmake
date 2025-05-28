@@ -513,10 +513,10 @@ def create_dynamic_tables(conn, table_definitions):
     for field, def_type in table_definitions.items():
         cursor.execute("""
             INSERT INTO field_mapping (original_name, sanitized_name, field_type)
-            VALUES (%s, %s, %s)
+            VALUES (%s, %s, %s) AS new_data
             ON DUPLICATE KEY UPDATE
-                sanitized_name = VALUES(sanitized_name),
-                field_type = VALUES(field_type)
+                sanitized_name = new_data.sanitized_name,
+                field_type = new_data.field_type
         """, (field, field_mapping[field], column_types[field]))
     
     cursor.close()
