@@ -567,9 +567,16 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             raise
         
         # Prepara i dati in batch più piccoli per evitare problemi di memoria
-        BATCH_SIZE = 1000
+        BATCH_SIZE = 5000  # Aumentato a 5000 per ridurre il numero di operazioni
+        total_records = len(batch)
+        processed_records = 0
+        
+        logger.info(f"🔄 Inizio processing batch di {total_records} record...")
+        
         for i in range(0, len(batch), BATCH_SIZE):
             sub_batch = batch[i:i + BATCH_SIZE]
+            sub_batch_start_time = time.time()
+            
             for record, _ in sub_batch:
                 # Prepara i dati per la tabella principale
                 main_values = []
@@ -621,10 +628,19 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                         logger.warning("⚠️ Connessione persa durante l'inserimento, riprovo...")
                         raise ValueError("CONNECTION_LOST")
                     raise
+            
+            processed_records += len(sub_batch)
+            sub_batch_time = time.time() - sub_batch_start_time
+            speed = len(sub_batch) / sub_batch_time if sub_batch_time > 0 else 0
+            
+            logger.info(f"📊 Progresso sub-batch: {processed_records}/{total_records} record "
+                      f"({(processed_records/total_records*100):.1f}%) | "
+                      f"Velocità: {speed:.1f} record/s")
         
         # Inserisci i dati JSON nelle tabelle separate
         for field, data in json_data.items():
             if data:
+                logger.info(f"🔄 Inserimento dati JSON per il campo {field}...")
                 # Processa i dati JSON in batch più piccoli
                 for i in range(0, len(data), BATCH_SIZE):
                     sub_data = data[i:i + BATCH_SIZE]
@@ -644,6 +660,8 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                             logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
                             raise ValueError("CONNECTION_LOST")
                         raise
+        
+        logger.info("✅ Batch completato con successo!")
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
