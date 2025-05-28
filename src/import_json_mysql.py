@@ -38,20 +38,20 @@ BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.3  # 30% di buffer di sicurezza per il sistema
+MEMORY_BUFFER_RATIO = 0.2  # Ridotto a 20% per permettere più memoria per l'importazione
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.01   # 1% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.1     # 10% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.2     # Aumentato al 20% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
-INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+INITIAL_CHUNK_SIZE = max(5000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
-MIN_CHUNK_SIZE = 100
+MIN_CHUNK_SIZE = 1000  # Aumentato il minimo a 1000
 
-# Limita il chunk size massimo a 10000 record per evitare problemi con max_allowed_packet
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 10000)
+# Limita il chunk size massimo a 50000 record per evitare problemi con max_allowed_packet
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -60,8 +60,8 @@ class MemoryMonitor:
         self.process = psutil.Process()
         self.lock = threading.Lock()
         self.running = True
-        self.last_memory_check = time.time()  # Inizializza last_memory_check
-        self.memory_check_interval = 0.5  # Controlla la memoria ogni 0.5 secondi
+        self.last_memory_check = time.time()
+        self.memory_check_interval = 0.2  # Controlla la memoria più frequentemente
         self.monitor_thread = threading.Thread(target=self._monitor_memory)
         self.monitor_thread.daemon = True
         self.monitor_thread.start()
@@ -84,8 +84,8 @@ class MemoryMonitor:
                             self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
                             logger.warning(f"Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
                         elif percent_used < 0.70 and self.current_chunk_size < MAX_CHUNK_SIZE:  # 70% di memoria utilizzata
-                            # Aumenta gradualmente il chunk size
-                            new_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.2))
+                            # Aumenta più aggressivamente il chunk size
+                            new_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.5))
                             if new_size > self.current_chunk_size:
                                 self.current_chunk_size = new_size
                                 logger.info(f"Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
@@ -442,7 +442,9 @@ def create_dynamic_tables(conn, table_definitions):
         batch_id VARCHAR(64),
         INDEX idx_created_at (created_at),
         INDEX idx_source_file (source_file),
-        INDEX idx_batch_id (batch_id)
+        INDEX idx_batch_id (batch_id),
+        INDEX idx_cig_source (cig, source_file),
+        INDEX idx_cig_batch (cig, batch_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     
@@ -460,7 +462,9 @@ def create_dynamic_tables(conn, table_definitions):
                 batch_id VARCHAR(64),
                 FOREIGN KEY (cig) REFERENCES main_data(cig),
                 INDEX idx_source_file (source_file),
-                INDEX idx_batch_id (batch_id)
+                INDEX idx_batch_id (batch_id),
+                INDEX idx_cig_source (cig, source_file),
+                INDEX idx_cig_batch (cig, batch_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
             """
             cursor.execute(create_json_table)
@@ -475,7 +479,8 @@ def create_dynamic_tables(conn, table_definitions):
         status ENUM('completed', 'failed') DEFAULT 'completed',
         error_message TEXT,
         INDEX idx_file_name (file_name),
-        INDEX idx_status (status)
+        INDEX idx_status (status),
+        INDEX idx_processed_at (processed_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     cursor.execute(create_processed_files)
