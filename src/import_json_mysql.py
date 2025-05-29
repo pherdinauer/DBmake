@@ -41,11 +41,11 @@ JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato a 75k con più RAM
 
 # Ottimizzazione più conservativa per stabilità MySQL
-NUM_THREADS = 8  # Thread per elaborazione interna
-NUM_WORKERS = 4   # Ridotto da 7 a 4 per evitare sovraccarico MySQL
+NUM_THREADS = 6  # Ridotto da 8 a 6 thread per elaborazione interna
+NUM_WORKERS = 2   # Ridotto drasticamente da 4 a 2 per evitare sovraccarico MySQL
 logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS} (ridotto per stabilità MySQL)")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS} (ULTRA-conservativo per stabilità MySQL)")
 
 # Directory temporanea per i file CSV
 TEMP_DIR = '/database/tmp'
@@ -146,8 +146,68 @@ class RecordProcessor:
             field_lower = field.lower().replace(' ', '_')
             value = record.get(field_lower)
             
+            # Handle DATE/DATETIME fields
+            if def_type in ['DATE', 'DATETIME'] and value is not None:
+                try:
+                    # Converte vari formati di data a formato MySQL
+                    if isinstance(value, str):
+                        # Rimuovi eventuali caratteri extra
+                        value = value.strip()
+                        
+                        # Se è vuoto dopo il trim, imposta a NULL
+                        if not value:
+                            value = None
+                        # Se contiene solo 0 o valori placeholder, imposta a NULL
+                        elif value in ['0', '0000-00-00', '0000-00-00 00:00:00', 'NULL', 'null']:
+                            value = None
+                        # Se è un timestamp unix (10-13 cifre)
+                        elif value.isdigit() and len(value) in [10, 13]:
+                            from datetime import datetime
+                            timestamp = int(value)
+                            if len(value) == 13:  # Timestamp in millisecondi
+                                timestamp = timestamp / 1000
+                            try:
+                                dt = datetime.fromtimestamp(timestamp)
+                                value = dt.strftime('%Y-%m-%d %H:%M:%S') if def_type == 'DATETIME' else dt.strftime('%Y-%m-%d')
+                            except (ValueError, OSError):
+                                value = None
+                        # Se è un formato data riconoscibile, mantienilo
+                        elif any(pattern in value for pattern in ['-', '/', ':']):
+                            # Tentativi di normalizzazione
+                            import re
+                            # Formato ISO: YYYY-MM-DD o YYYY-MM-DD HH:MM:SS
+                            if re.match(r'^\d{4}-\d{2}-\d{2}', value):
+                                if def_type == 'DATE' and len(value) > 10:
+                                    value = value[:10]  # Tronca la parte oraria per DATE
+                            # Formato europeo: DD/MM/YYYY
+                            elif re.match(r'^\d{2}/\d{2}/\d{4}', value):
+                                parts = value.split('/')
+                                if len(parts) >= 3:
+                                    try:
+                                        day, month, year = parts[0], parts[1], parts[2]
+                                        value = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                                        if def_type == 'DATETIME' and len(parts) > 3:
+                                            time_part = ' '.join(parts[3:])
+                                            value += f" {time_part}"
+                                    except:
+                                        value = None
+                            # Se non riconosciuto, prova a parsare con datetime
+                            else:
+                                try:
+                                    from dateutil import parser
+                                    dt = parser.parse(value)
+                                    value = dt.strftime('%Y-%m-%d %H:%M:%S') if def_type == 'DATETIME' else dt.strftime('%Y-%m-%d')
+                                except:
+                                    value = None
+                        else:
+                            # Formato non riconosciuto, imposta a NULL
+                            value = None
+                except Exception as e:
+                    logger.warning(f"⚠️ Errore nella conversione del campo data {field}: {value} - {str(e)}")
+                    value = None
+            
             # Handle numeric fields
-            if def_type in ['DOUBLE', 'DECIMAL'] and value is not None:
+            elif def_type in ['DOUBLE', 'DECIMAL'] and value is not None:
                 try:
                     # Remove any non-numeric characters except decimal point and minus sign
                     if isinstance(value, str):
@@ -535,12 +595,23 @@ def analyze_json_structure(json_files):
         'codice_fiscale', 'partita_iva', 'numero_verde', 'numero_telefono'
     }
     
+    # Campi che devono SEMPRE essere DATE/DATETIME (whitelist)
+    ALWAYS_DATE_FIELDS = {
+        'data_creazione', 'data_pubblicazione', 'data_scadenza', 'data_aggiornamento',
+        'data_inizio', 'data_fine', 'data_inserimento', 'data_modifica',
+        'created_at', 'updated_at', 'published_at', 'expired_at'
+    }
+    
     # Pattern migliorati per identificare meglio i tipi di campi
     patterns = {
         'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
         'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
-        'date': r'^\d{4}-\d{2}-\d{2}$',           # Date ISO
-        'datetime': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # Date e orari
+        'date_iso': r'^\d{4}-\d{2}-\d{2}$',       # Date ISO (YYYY-MM-DD)
+        'date_european': r'^\d{2}/\d{2}/\d{4}$',  # Date europee (DD/MM/YYYY)
+        'date_american': r'^\d{2}/\d{2}/\d{4}$',  # Date americane (MM/DD/YYYY)
+        'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # DateTime ISO
+        'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',  # DateTime europeo
+        'timestamp': r'^\d{10,13}$',               # Timestamp Unix
         'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
         'pure_integer': r'^\d+$',                  # SOLO numeri interi puri
         'pure_decimal': r'^\d+[.,]\d+$',          # SOLO decimali puri
@@ -592,6 +663,10 @@ def analyze_json_structure(json_files):
     def determine_field_type(field, patterns, field_has_mixed_values, values_count):
         """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
         field_lower = field.lower()
+        
+        # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorità massima)
+        if field_lower in ALWAYS_DATE_FIELDS:
+            return 'DATETIME'
         
         # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
         if field_lower in ALWAYS_VARCHAR_FIELDS:
@@ -662,12 +737,12 @@ def analyze_json_structure(json_files):
         if patterns == {'pure_decimal'} or patterns == {'monetary'}:
             return 'DECIMAL(20,2)'
             
-        # Se il campo contiene date, usa DATE
-        if patterns == {'date'}:
+        # Se il campo contiene date, usa DATE o DATETIME
+        if any(p in patterns for p in ['date_iso', 'date_european', 'date_american']):
             return 'DATE'
             
-        # Se il campo contiene datetime, usa DATETIME
-        if patterns == {'datetime'}:
+        # Se il campo contiene datetime o timestamp, usa DATETIME
+        if any(p in patterns for p in ['datetime_iso', 'datetime_european', 'timestamp']):
             return 'DATETIME'
             
         # Se il campo contiene percentuali, usa DECIMAL
@@ -1164,7 +1239,7 @@ def import_all_json_files(base_path, conn):
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
-        pool_size=NUM_WORKERS + 2,  # Ridotto per evitare sovraccarico
+        pool_size=NUM_WORKERS + 1,  # Ridotto drasticamente a 3 connessioni totali
         host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
@@ -1185,12 +1260,12 @@ def import_all_json_files(base_path, conn):
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("📊 Configurazione risorse STABILE:")
+    logger.info("📊 Configurazione risorse ULTRA-CONSERVATIVA:")
     logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
     logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (ridotto per stabilità)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (ULTRA-conservativo)")
     logger.info(f"   • Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 2}")
+    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 1} (MINIMAL)")
     logger.info(f"   • Chunk size max: {MAX_CHUNK_SIZE:,}")
     
     # Processa file per file per evitare OOM
