@@ -186,6 +186,7 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
     
     column_name = None
     error_type = None
+    problematic_value = None
     
     # Identifica il tipo di errore e la colonna
     for error_type_name, pattern in patterns.items():
@@ -193,7 +194,9 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
         if match:
             if error_type_name == 'out_of_range':
                 column_name = match.group(1)
+                problematic_value = "out_of_range"
             else:
+                problematic_value = match.group(1)
                 column_name = match.group(2)
             error_type = error_type_name
             break
@@ -201,14 +204,37 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
     if not column_name or not error_type:
         return False
     
-    logger.warning(f"[ADAPT] Errore di tipo '{error_type}' per colonna '{column_name}'")
+    logger.warning(f"[ADAPT] Errore di tipo '{error_type}' per colonna '{column_name}' con valore '{problematic_value}'")
     
     try:
-        # Strategia di adattamento basata sul tipo di errore
+        # Strategia di adattamento intelligente basata sul valore problematico
         if error_type in ['incorrect_integer', 'out_of_range']:
-            # Da INT/SMALLINT/BIGINT a VARCHAR più flessibile
-            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(255)"
-            logger.info(f"[ADAPT] Converto colonna numerica '{column_name}' a VARCHAR(255)")
+            # Analizza il valore per determinare il tipo più appropriato
+            if problematic_value and problematic_value != "out_of_range":
+                # Controlla se è un codice fiscale
+                if re.match(r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$', problematic_value):
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(16)"
+                    logger.info(f"[ADAPT] Rilevato codice fiscale in '{column_name}' -> VARCHAR(16)")
+                # Controlla se è un CIG
+                elif re.match(r'^[A-Z0-9]{10}$', problematic_value):
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(10)"
+                    logger.info(f"[ADAPT] Rilevato CIG in '{column_name}' -> VARCHAR(10)")
+                # Controlla se è una partita IVA
+                elif re.match(r'^\d{11}$', problematic_value):
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(11)"
+                    logger.info(f"[ADAPT] Rilevata P.IVA in '{column_name}' -> VARCHAR(11)")
+                # Controlla se è un codice alfanumerico
+                elif re.match(r'^[A-Z0-9-_]+$', problematic_value, re.IGNORECASE):
+                    max_len = max(50, len(problematic_value) + 10)  # Margine di sicurezza
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR({max_len})"
+                    logger.info(f"[ADAPT] Rilevato codice alfanumerico in '{column_name}' -> VARCHAR({max_len})")
+                else:
+                    # Fallback generico per valori numerici non standard
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(255)"
+                    logger.info(f"[ADAPT] Converto colonna numerica '{column_name}' a VARCHAR(255)")
+            else:
+                alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(255)"
+                logger.info(f"[ADAPT] Converto colonna numerica '{column_name}' a VARCHAR(255)")
             
         elif error_type == 'incorrect_decimal':
             # Da DECIMAL a VARCHAR per gestire formati diversi
@@ -238,6 +264,12 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
         logger.error(f"[ERROR] Errore nell'adattamento della colonna '{column_name}': {e}")
         return False
 
+def handle_duplicate_key_error(cursor, error_message, table_name):
+    """Gestisce errori di chiave duplicata con strategia IGNORE."""
+    logger.warning(f"[DUPLICATE] Rilevata chiave duplicata in {table_name}: {error_message}")
+    logger.info(f"[STRATEGY] Userò INSERT IGNORE per saltare i duplicati")
+    return True  # Indica che l'errore può essere gestito
+
 def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
     """
     Inserisce dati con retry automatico e adattamento della struttura in caso di errori.
@@ -265,6 +297,24 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
             # Errore 1406: Data too long
             if e.errno == 1406:
                 adapted = handle_data_too_long_error(cursor, str(e), table_name)
+            
+            # Errore 1062: Duplicate entry (chiave duplicata)
+            elif e.errno == 1062:
+                adapted = handle_duplicate_key_error(cursor, str(e), table_name)
+                if adapted:
+                    # Converti la query da INSERT a INSERT IGNORE
+                    if query.startswith("INSERT INTO"):
+                        ignore_query = query.replace("INSERT INTO", "INSERT IGNORE INTO", 1)
+                        logger.info(f"[RETRY] Uso INSERT IGNORE per saltare duplicati")
+                        try:
+                            if isinstance(data, list) and len(data) > 0:
+                                cursor.executemany(ignore_query, data)
+                            else:
+                                cursor.execute(ignore_query, data)
+                            return True
+                        except Exception as ignore_error:
+                            logger.error(f"[ERROR] Anche INSERT IGNORE ha fallito: {ignore_error}")
+                            adapted = False
             
             # Errore 1264: Out of range value
             elif e.errno == 1264:
@@ -618,6 +668,44 @@ def check_disk_space():
         logger.error(f"? Errore nel controllo dello spazio disco: {e}")
         return None, None, None
 
+def debug_field_analysis(field_name, sample_values, final_type):
+    """Debug helper per analizzare perché un campo ha ricevuto un certo tipo."""
+    logger.debug(f"[DEBUG] Campo '{field_name}' -> {final_type}")
+    logger.debug(f"[DEBUG] Campioni di valori:")
+    
+    # Analizza i primi 5 valori per debug
+    for i, value in enumerate(sample_values[:5]):
+        if value is not None:
+            value_str = str(value)
+            
+            # Testa pattern specifici
+            patterns_matched = []
+            
+            # Codice fiscale
+            if re.match(r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$', value_str):
+                patterns_matched.append("fiscal_code")
+            
+            # CIG
+            if re.match(r'^[A-Z0-9]{10}$', value_str):
+                patterns_matched.append("cig_code")
+                
+            # Partita IVA
+            if re.match(r'^\d{11}$', value_str):
+                patterns_matched.append("partita_iva")
+                
+            # Numerico
+            if re.match(r'^\d+$', value_str):
+                patterns_matched.append("pure_integer")
+                
+            logger.debug(f"[DEBUG]   {i+1}. '{value_str}' -> pattern: {patterns_matched}")
+    
+    # Avviso se sembra un problema
+    if final_type in ['INT', 'SMALLINT', 'BIGINT'] and any(
+        isinstance(val, str) and not str(val).isdigit() 
+        for val in sample_values[:10] if val is not None
+    ):
+        logger.warning(f"[WARN] Campo '{field_name}' classificato come {final_type} ma contiene valori non numerici!")
+
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
     field_lengths = defaultdict(int)
@@ -720,10 +808,24 @@ def analyze_json_structure(json_files):
             if not value_str:
                 return 'empty'
             
-            # Testa tutti i pattern in ordine di specificità
+            # PRIORITÀ ALTA: Pattern specifici prima dei generici
+            # Codici fiscali, CIG, P.IVA hanno precedenza sui pattern numerici
+            high_priority_patterns = [
+                'fiscal_code', 'cig_code', 'cup_code', 'partita_iva', 
+                'email', 'url', 'phone_it', 'postal_code_it'
+            ]
+            
+            # Testa prima i pattern ad alta priorità
+            for pattern_name in high_priority_patterns:
+                if pattern_name in patterns:
+                    if re.match(patterns[pattern_name], value_str, re.IGNORECASE):
+                        return pattern_name
+            
+            # Poi testa tutti gli altri pattern in ordine di specificità
             for pattern_name, pattern in patterns.items():
-                if re.match(pattern, value_str, re.IGNORECASE):
-                    return pattern_name
+                if pattern_name not in high_priority_patterns:
+                    if re.match(pattern, value_str, re.IGNORECASE):
+                        return pattern_name
             
             # Se nessun pattern specifico, classifica come testo
             length = len(value_str)
@@ -748,6 +850,9 @@ def analyze_json_structure(json_files):
             
             analysis_logger.debug(f"Campo '{field}': tipo primario '{primary_type}' ({primary_percentage:.1f}%)")
             
+            # Debug dei tipi rilevati
+            analysis_logger.debug(f"Campo '{field}' - distribuzione tipi: {dict(sorted_types[:3])}")
+            
             # Logica per determinare il tipo MySQL
             
             # 1. Se > 90% dei valori sono dello stesso tipo, usa quello
@@ -761,12 +866,17 @@ def analyze_json_structure(json_files):
                         max_val = max(sample_numbers)
                         min_val = min(sample_numbers)
                         if min_val >= -32768 and max_val <= 32767:
-                            return 'SMALLINT'
+                            mysql_type = 'SMALLINT'
                         elif min_val >= -2147483648 and max_val <= 2147483647:
-                            return 'INT'
+                            mysql_type = 'INT'
                         else:
-                            return 'BIGINT'
-                    return 'INT'
+                            mysql_type = 'BIGINT'
+                    else:
+                        mysql_type = 'INT'
+                    
+                    # Debug per campi numerici
+                    debug_field_analysis(field, sample_values, mysql_type)
+                    return mysql_type
                 
                 elif primary_type in ['decimal_native', 'pure_decimal', 'negative_decimal', 'scientific']:
                     return 'DECIMAL(20,6)'  # Precisione alta per decimali
@@ -793,12 +903,16 @@ def analyze_json_structure(json_files):
                 
                 # Codici specifici con lunghezza fissa
                 elif primary_type == 'fiscal_code':
+                    analysis_logger.info(f"[DETECT] Campo '{field}' riconosciuto come codice fiscale -> VARCHAR(16)")
                     return 'VARCHAR(16)'
                 elif primary_type == 'partita_iva':
+                    analysis_logger.info(f"[DETECT] Campo '{field}' riconosciuto come P.IVA -> VARCHAR(11)")
                     return 'VARCHAR(11)'
                 elif primary_type == 'cup_code':
+                    analysis_logger.info(f"[DETECT] Campo '{field}' riconosciuto come CUP -> VARCHAR(15)")
                     return 'VARCHAR(15)'
                 elif primary_type == 'cig_code':
+                    analysis_logger.info(f"[DETECT] Campo '{field}' riconosciuto come CIG -> VARCHAR(10)")
                     return 'VARCHAR(10)'
                 elif primary_type == 'postal_code_it':
                     return 'VARCHAR(5)'
@@ -2062,9 +2176,24 @@ def analyze_single_category(category, json_files):
         if not value_str:
             return 'empty'
         
+        # PRIORITÀ ALTA: Pattern specifici prima dei generici
+        # Codici fiscali, CIG, P.IVA hanno precedenza sui pattern numerici
+        high_priority_patterns = [
+            'fiscal_code', 'cig_code', 'cup_code', 'partita_iva', 
+            'email', 'url', 'phone_it', 'postal_code_it'
+        ]
+        
+        # Testa prima i pattern ad alta priorità
+        for pattern_name in high_priority_patterns:
+            if pattern_name in patterns:
+                if re.match(patterns[pattern_name], value_str, re.IGNORECASE):
+                    return pattern_name
+        
+        # Poi testa tutti gli altri pattern in ordine di specificità
         for pattern_name, pattern in patterns.items():
-            if re.match(pattern, value_str, re.IGNORECASE):
-                return pattern_name
+            if pattern_name not in high_priority_patterns:
+                if re.match(pattern, value_str, re.IGNORECASE):
+                    return pattern_name
         
         length = len(value_str)
         if length <= 50:
