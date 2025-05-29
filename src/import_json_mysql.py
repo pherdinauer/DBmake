@@ -148,9 +148,18 @@ class RecordProcessor:
                 try:
                     # Remove any non-numeric characters except decimal point and minus sign
                     if isinstance(value, str):
+                        # Remove any currency symbols, spaces, and other non-numeric characters
                         value = ''.join(c for c in value if c.isdigit() or c in '.-')
-                    value = float(value) if value else None
-                except (ValueError, TypeError):
+                        # Handle empty string after cleaning
+                        if not value:
+                            value = None
+                        else:
+                            # Convert to float and handle potential scientific notation
+                            value = float(value)
+                            # Round to 2 decimal places to avoid precision issues
+                            value = round(value, 2)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Errore nella conversione del campo numerico {field}: {value} - {str(e)}")
                     value = None
             
             # Handle VARCHAR fields
@@ -506,6 +515,9 @@ def analyze_json_structure(json_files):
     SAMPLE_SIZE = 10000  # Numero di record da analizzare per file
     current_sample = 0
     
+    # Lista di campi che dovrebbero essere numerici
+    numeric_fields = ['importo', 'prezzo', 'costo', 'valore', 'somma', 'totale', 'quantita', 'numero']
+    
     for json_file in json_files:
         files_analyzed += 1
         file_records = 0
@@ -541,7 +553,16 @@ def analyze_json_structure(json_files):
                             elif isinstance(value, float):
                                 field_types[field]['DOUBLE'] += 1
                             elif isinstance(value, str):
-                                field_types[field]['VARCHAR'] += 1
+                                # Check if the field name suggests it should be numeric
+                                if any(numeric_term in field for numeric_term in numeric_fields):
+                                    try:
+                                        # Try to convert to float
+                                        float(''.join(c for c in value if c.isdigit() or c in '.-'))
+                                        field_types[field]['DOUBLE'] += 1
+                                    except (ValueError, TypeError):
+                                        field_types[field]['VARCHAR'] += 1
+                                else:
+                                    field_types[field]['VARCHAR'] += 1
                                 # Ottimizzazione: aggiorna la lunghezza massima solo se necessario
                                 current_length = len(value)
                                 if current_length > field_lengths[field]:
@@ -596,7 +617,11 @@ def analyze_json_structure(json_files):
         elif most_common_type == 'INT':
             column_def = "INT"
         elif most_common_type == 'DOUBLE':
-            column_def = "DOUBLE"
+            # Use DECIMAL for monetary values to avoid floating-point precision issues
+            if any(numeric_term in field for numeric_term in numeric_fields):
+                column_def = "DECIMAL(20,2)"
+            else:
+                column_def = "DOUBLE"
         elif most_common_type == 'BOOLEAN':
             column_def = "BOOLEAN"
         elif most_common_type == 'JSON':
