@@ -467,7 +467,6 @@ def connect_mysql():
                     password=MYSQL_PASSWORD,
                     charset='utf8mb4',
                     autocommit=True,
-                    option_files=[config_path],  # Usa il file di configurazione
                     ssl_disabled=True  # Disabilita SSL per evitare problemi di connessione
                 )
                 cursor = tmp_conn.cursor()
