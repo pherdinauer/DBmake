@@ -11,7 +11,7 @@ import math
 from dotenv import load_dotenv
 from collections import defaultdict
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 import multiprocessing
@@ -40,13 +40,14 @@ MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 25000))  # Ridotto da 75k a 25k
 
-# Ottimizzazione ULTRA-conservativa per stabilità MySQL
-NUM_THREADS = 4  # Ridotto da 6 a 4 thread per elaborazione interna
-NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti
-logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
-logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
+# Ottimizzazione DINAMICA basata sulle risorse del sistema
+CPU_CORES = multiprocessing.cpu_count()
+NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
+NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti MySQL, ma thread aggressivi
+logger.info(f"🖥️  CPU cores disponibili: {CPU_CORES}")
+logger.info(f"🚀  Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
 logger.info(f"🖥️  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilità)")
-logger.info(f"🖥️  Batch size: {BATCH_SIZE:,} (ridotto per stabilità MySQL)")
+logger.info(f"🚀  Batch size: {BATCH_SIZE:,} (ridotto per stabilità MySQL)")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -312,23 +313,45 @@ def handle_data_too_long_error(cursor, error_message, table_name):
         logger.error(f"❌ Errore nella modifica della colonna '{column_name}': {e}")
         return False
 
+def calculate_dynamic_insert_batch_size():
+    """Calcola dinamicamente il batch size per INSERT basato su risorse disponibili."""
+    # RAM disponibile in GB
+    available_memory = psutil.virtual_memory().available / (1024**3)
+    
+    # Batch size basato su RAM (più RAM = batch più grandi)
+    if available_memory > 20:      # > 20GB disponibili
+        return 5000
+    elif available_memory > 10:    # > 10GB disponibili  
+        return 3000
+    elif available_memory > 5:     # > 5GB disponibili
+        return 2000
+    else:                          # < 5GB disponibili
+        return 1000
+
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV."""
     if not main_data:
         return 0
         
+    # Calcola batch size dinamico basato su risorse disponibili
+    insert_batch_size = calculate_dynamic_insert_batch_size()
+    available_ram = psutil.virtual_memory().available / (1024**3)
+    
     logger.info(f"📥 Inserimento diretto di {len(main_data):,} record in {table_name}")
+    logger.info(f"🚀 Batch size dinamico: {insert_batch_size:,} (RAM disponibile: {available_ram:.1f}GB)")
     
     rows_inserted = 0
-    insert_batch_size = 1000  # Insert 1000 righe alla volta
     
     # Prepara la query INSERT
     placeholders = ', '.join(['%s'] * len(fields))
     insert_query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
     
+    insert_start_time = time.time()
+    
     try:
         # Processa i dati in batch
         for i in range(0, len(main_data), insert_batch_size):
+            batch_start_time = time.time()
             batch = main_data[i:i + insert_batch_size]
             
             try:
@@ -336,9 +359,15 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                 cursor.executemany(insert_query, batch)
                 rows_inserted += len(batch)
                 
-                # Log progresso ogni 10k righe
+                batch_time = time.time() - batch_start_time
+                batch_speed = len(batch) / batch_time if batch_time > 0 else 0
+                
+                # Log progresso ogni 10k righe con statistiche performance
                 if rows_inserted % 10000 == 0:
-                    logger.info(f"📥 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe inserite")
+                    elapsed_total = time.time() - insert_start_time
+                    avg_speed = rows_inserted / elapsed_total if elapsed_total > 0 else 0
+                    logger.info(f"🚀 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe | "
+                              f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s")
             
             except mysql.connector.Error as e:
                 if e.errno == 1406:  # Data too long error
@@ -358,14 +387,20 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                     # Altri errori MySQL
                     raise
         
-        logger.info(f"📥 INSERT diretto completato: {rows_inserted:,} righe totali")
+        total_time = time.time() - insert_start_time
+        avg_speed = rows_inserted / total_time if total_time > 0 else 0
+        final_ram = psutil.virtual_memory().available / (1024**3)
+        
+        logger.info(f"🎯 INSERT diretto completato: {rows_inserted:,} righe totali")
+        logger.info(f"📊 Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
+                   f"Batch size: {insert_batch_size:,} | RAM finale: {final_ram:.1f}GB")
         return rows_inserted
         
     except Exception as e:
         logger.error(f"📥 Errore in INSERT diretto: {e}")
         raise
 
-def process_batch(cursor, batch, table_definitions, batch_id):
+def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None):
     if not batch:
         return
 
@@ -382,7 +417,7 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                 raise ValueError("CONNECTION_LOST")
             raise
         
-        logger.info(f"🖥️ Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
+        logger.info(f"⚙️  Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
         start_time = time.time()
         
         # Elabora il batch in parallelo
@@ -393,13 +428,13 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
             
             # Debug: mostra alcuni esempi di dati
-            logger.info(f"🖥️ Debug dati per INSERT diretto:")
-            logger.info(f"   🖥️ Campi totali: {len(fields)}")
-            logger.info(f"   🖥️ Record totali: {len(main_data):,}")
+            logger.info(f"📊 Debug dati per INSERT diretto:")
+            logger.info(f"   📊 Campi totali: {len(fields)}")
+            logger.info(f"   📊 Record totali: {len(main_data):,}")
             
             # Mostra i primi 2 record per debug
             for i, record in enumerate(main_data[:2]):
-                logger.info(f"   🖥️ Record {i+1}: {len(record)} valori")
+                logger.info(f"   📊 Record {i+1}: {len(record)} valori")
                 for j, (field, value) in enumerate(zip(fields, record)):
                     if 'data_' in field.lower() and j < 10:  # Solo primi 10 campi data
                         logger.info(f"     - {field}: {value} ({type(value).__name__})")
@@ -441,15 +476,15 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
         elapsed_time = time.time() - start_time
         speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
-        logger.info(f"🖥️ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
+        logger.info(f"✅ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
-            logger.warning("\n🖥️ Batch troppo grande, riduco la dimensione...")
+            logger.warning("\n⚠️  Batch troppo grande, riduco la dimensione...")
             raise ValueError("BATCH_TOO_LARGE")
         raise
     except Exception as e:
-        logger.error(f"\n🖥️ Errore durante il processing del batch: {e}")
+        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
         raise
 
 def connect_mysql():
@@ -1265,6 +1300,9 @@ def import_all_json_files(base_path, conn):
     total_files = len(json_files)
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
     
+    # Inizializza il tracker del progresso
+    progress_tracker = ProgressTracker(total_files)
+    
     global table_definitions
     table_definitions = analyze_json_structure(json_files)
     # Usa una connessione temporanea per la creazione delle tabelle
@@ -1301,13 +1339,18 @@ def import_all_json_files(base_path, conn):
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("🖥️ Configurazione risorse MONO-PROCESSO:")
+    logger.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
+    logger.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
     logger.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger.info(f"   🖥️ RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   🖥️ Worker process: {NUM_WORKERS}/8 core (MONO-PROCESSO)")
-    logger.info(f"   🖥️ Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   🖥️ Pool connessioni: 2 (MINIMAL)")
-    logger.info(f"   🖥️ Chunk size max: {MAX_CHUNK_SIZE:,}")
+    logger.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
+    
+    # Mostra il batch size INSERT dinamico attuale
+    current_insert_batch = calculate_dynamic_insert_batch_size()
+    current_ram = psutil.virtual_memory().available / (1024**3)
+    logger.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
     
     # Processa file per file SEQUENZIALMENTE
     total_processed_files = 0
@@ -1319,19 +1362,31 @@ def import_all_json_files(base_path, conn):
         # Salta i file già processati con successo
         conn_check = connection_pool.get_connection()
         if is_file_processed(conn_check, file_name):
-            logger.info(f"\n🖥️  File già processato: {file_name}")
+            logger.info(f"\n⏭️  File già processato: {file_name}")
+            progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
             conn_check.close()
             continue
         conn_check.close()
         
-        logger.info(f"\n🖥️ Processando file {idx}/{total_files}: {file_name}")
-        file_start_time = time.time()
+        # Conta i record nel file per il progresso
+        file_record_count = 0
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        file_record_count += 1
+        except Exception as e:
+            logger.error(f"❌ Errore nel conteggio record per {file_name}: {e}")
+            continue
+        
+        # Inizia il tracking del file
+        progress_tracker.start_file(file_name, file_record_count)
         
         batch_id = f"{int(time.time())}_{idx}"
         chunk_size = BATCH_SIZE
         file_chunks = []
         current_chunk = []
-        file_record_count = 0
+        processed_records_in_file = 0
         
         # Leggi il file e crea i chunk (solo per questo file)
         try:
@@ -1343,61 +1398,72 @@ def import_all_json_files(base_path, conn):
                     try:
                         record = json.loads(line)
                         current_chunk.append((record, file_name))
-                        file_record_count += 1
+                        processed_records_in_file += 1
                         
                         if len(current_chunk) >= chunk_size:
                             file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
                             current_chunk = []
                     except Exception as e:
-                        logger.error(f"\n🖥️ Errore nel parsing del record: {e}")
+                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
                         continue
                         
-                if current_chunk:
-                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+            if current_chunk:
+                file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
             
-            logger.info(f"🖥️ File: {file_name} - Chunk da processare: {len(file_chunks)} (record: {file_record_count:,})")
+            logger.info(f"📦 Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
             
-            # Processa i chunk di questo file SEQUENZIALMENTE (no multiprocessing)
+            # Processa i chunk di questo file SEQUENZIALMENTE
+            records_completed_in_file = 0
             if file_chunks:
-                for chunk_data in file_chunks:
+                for chunk_idx, chunk_data in enumerate(file_chunks, 1):
                     try:
+                        chunk_records = len(chunk_data[0])
+                        logger.info(f"⚙️  Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record)")
+                        
                         process_chunk_sequential(chunk_data)
+                        records_completed_in_file += chunk_records
+                        
+                        # Aggiorna progresso del file ogni chunk
+                        progress_tracker.update_file_progress(records_completed_in_file)
+                        
                     except Exception as e:
-                        logger.error(f"🖥️ Errore nel processing chunk: {e}")
+                        logger.error(f"❌ Errore nel processing chunk {chunk_idx}: {e}")
                         # Continua con il prossimo chunk invece di fallire tutto
                         continue
                 
                 # Marca il file come processato
                 conn_mark = connection_pool.get_connection()
-                mark_file_processed(conn_mark, file_name, file_record_count)
+                mark_file_processed(conn_mark, file_name, processed_records_in_file)
                 conn_mark.close()
                 
-                total_processed_files += 1
-                total_processed_records += file_record_count
+                # Completa il tracking del file
+                progress_tracker.finish_file(processed_records_in_file)
                 
-                file_time = time.time() - file_start_time
-                logger.info(f"🖥️ File completato: {file_name}")
-                logger.info(f"   🖥️ Record processati: {file_record_count:,}")
-                logger.info(f"   🖥️ Tempo elaborazione: {file_time:.1f}s")
-                logger.info(f"   🖥️ Velocità: {file_record_count/file_time:.1f} record/s")
-                logger.info(f"   🖥️ Progresso: {total_processed_files}/{total_files} file ({total_processed_files/total_files*100:.1f}%)")
+                total_processed_files += 1
+                total_processed_records += processed_records_in_file
             
             # Libera la memoria dei chunk di questo file
             del file_chunks
             del current_chunk
             gc.collect()
-            
+        
         except Exception as e:
             error_message = str(e)
-            logger.error(f"\n🖥️ Errore nel processing del file {file_name}: {error_message}")
+            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
             conn_mark = connection_pool.get_connection()
-            mark_file_processed(conn_mark, file_name, file_record_count, 'failed', error_message)
+            mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
             conn_mark.close()
     
+    # Statistiche finali
+    final_stats = progress_tracker.get_global_stats()
+    total_time = final_stats['elapsed_time']
+    
     logger.info("\n" + "="*80)
-    logger.info("🖥️ Importazione completata!")
-    logger.info(f"🖥️ File processati: {total_processed_files}/{total_files}")
-    logger.info(f"🖥️ Record totali: {total_processed_records:,}")
+    logger.info("🎉 IMPORTAZIONE COMPLETATA!")
+    logger.info(f"📁 File processati: {final_stats['processed_files']}/{final_stats['total_files']} ({final_stats['completion_pct']:.1f}%)")
+    logger.info(f"📈 Record totali: {final_stats['total_records']:,}")
+    logger.info(f"⚡ Velocità media: {final_stats['avg_speed']:.0f} record/s")
+    logger.info(f"⏱️  Tempo totale: {str(timedelta(seconds=int(total_time)))}")
     logger.info("="*80)
 
 def process_chunk_sequential(args):
@@ -1417,7 +1483,7 @@ def process_chunk_sequential(args):
                 conn.commit()
                 return  # Successo
             except Exception as e:
-                logger.error(f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"❌ Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Backoff exponenziale
@@ -1428,8 +1494,114 @@ def process_chunk_sequential(args):
                 conn.close()
         except Exception as e:
             if attempt == max_retries - 1:
-                logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
+                logger.error(f"❌ Errore nel processare chunk dopo {max_retries} tentativi: {e}")
                 raise
+
+class ProgressTracker:
+    """Traccia il progresso dell'importazione con ETA e statistiche dettagliate."""
+    
+    def __init__(self, total_files):
+        self.total_files = total_files
+        self.processed_files = 0
+        self.total_records_processed = 0
+        self.start_time = time.time()
+        self.current_file_start_time = None
+        self.current_file_name = None
+        self.current_file_records = 0
+        self.current_file_total_records = 0
+        self.file_speeds = []  # Per calcolare velocità media
+        self.lock = threading.Lock()
+    
+    def start_file(self, file_name, total_records):
+        """Inizia il tracking di un nuovo file."""
+        with self.lock:
+            self.current_file_name = file_name
+            self.current_file_total_records = total_records
+            self.current_file_records = 0
+            self.current_file_start_time = time.time()
+            
+            elapsed_total = time.time() - self.start_time
+            avg_speed = self.total_records_processed / elapsed_total if elapsed_total > 0 else 0
+            
+            logger.info(f"\n📁 File {self.processed_files + 1}/{self.total_files}: {file_name}")
+            logger.info(f"🎯 Record nel file: {total_records:,}")
+            logger.info(f"📊 Progresso globale: {self.processed_files}/{self.total_files} file ({self.processed_files/self.total_files*100:.1f}%)")
+            logger.info(f"⚡ Velocità media: {avg_speed:.0f} record/s")
+    
+    def update_file_progress(self, records_completed):
+        """Aggiorna il progresso del file corrente."""
+        with self.lock:
+            self.current_file_records = records_completed
+            
+            if self.current_file_start_time:
+                file_elapsed = time.time() - self.current_file_start_time
+                file_speed = records_completed / file_elapsed if file_elapsed > 0 else 0
+                file_progress = records_completed / self.current_file_total_records * 100 if self.current_file_total_records > 0 else 0
+                
+                # ETA per il file corrente
+                if file_speed > 0:
+                    remaining_records = self.current_file_total_records - records_completed
+                    file_eta_seconds = remaining_records / file_speed
+                    file_eta = str(timedelta(seconds=int(file_eta_seconds)))
+                else:
+                    file_eta = "N/A"
+                
+                logger.info(f"📈 File progresso: {records_completed:,}/{self.current_file_total_records:,} ({file_progress:.1f}%) | "
+                           f"Velocità: {file_speed:.0f} rec/s | ETA file: {file_eta}")
+    
+    def finish_file(self, records_processed):
+        """Completa il tracking del file corrente."""
+        with self.lock:
+            self.processed_files += 1
+            self.total_records_processed += records_processed
+            
+            if self.current_file_start_time:
+                file_time = time.time() - self.current_file_start_time
+                file_speed = records_processed / file_time if file_time > 0 else 0
+                self.file_speeds.append(file_speed)
+                
+                # Statistiche globali
+                total_elapsed = time.time() - self.start_time
+                global_avg_speed = self.total_records_processed / total_elapsed if total_elapsed > 0 else 0
+                
+                # ETA globale basato sui file rimanenti e velocità media
+                remaining_files = self.total_files - self.processed_files
+                if len(self.file_speeds) > 0 and remaining_files > 0:
+                    avg_file_speed = sum(self.file_speeds[-5:]) / len(self.file_speeds[-5:])  # Media ultime 5 velocità
+                    avg_records_per_file = self.total_records_processed / self.processed_files
+                    estimated_remaining_records = remaining_files * avg_records_per_file
+                    global_eta_seconds = estimated_remaining_records / avg_file_speed if avg_file_speed > 0 else 0
+                    global_eta = str(timedelta(seconds=int(global_eta_seconds)))
+                else:
+                    global_eta = "N/A"
+                
+                logger.info(f"✅ File completato: {self.current_file_name}")
+                logger.info(f"📊 Record processati: {records_processed:,} in {file_time:.1f}s ({file_speed:.0f} rec/s)")
+                logger.info(f"🎯 Progresso globale: {self.processed_files}/{self.total_files} file ({self.processed_files/self.total_files*100:.1f}%)")
+                logger.info(f"📈 Record totali: {self.total_records_processed:,} ({global_avg_speed:.0f} rec/s media)")
+                logger.info(f"⏱️  ETA completamento: {global_eta} ({remaining_files} file rimanenti)")
+                
+                # Reset file corrente
+                self.current_file_name = None
+                self.current_file_start_time = None
+                self.current_file_records = 0
+                self.current_file_total_records = 0
+    
+    def get_global_stats(self):
+        """Restituisce statistiche globali del progresso."""
+        with self.lock:
+            total_elapsed = time.time() - self.start_time
+            avg_speed = self.total_records_processed / total_elapsed if total_elapsed > 0 else 0
+            completion_pct = self.processed_files / self.total_files * 100 if self.total_files > 0 else 0
+            
+            return {
+                'processed_files': self.processed_files,
+                'total_files': self.total_files,
+                'completion_pct': completion_pct,
+                'total_records': self.total_records_processed,
+                'avg_speed': avg_speed,
+                'elapsed_time': total_elapsed
+            }
 
 def main():
     try:
