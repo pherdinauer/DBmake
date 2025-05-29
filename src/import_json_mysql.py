@@ -39,14 +39,15 @@ MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
-BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato a 75k con più RAM
+BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 25000))  # Ridotto da 75k a 25k
 
-# Ottimizzazione più conservativa per stabilità MySQL
-NUM_THREADS = 6  # Ridotto da 8 a 6 thread per elaborazione interna
-NUM_WORKERS = 2   # Ridotto drasticamente da 4 a 2 per evitare sovraccarico MySQL
+# Ottimizzazione ULTRA-conservativa per stabilità MySQL
+NUM_THREADS = 4  # Ridotto da 6 a 4 thread per elaborazione interna
+NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti
 logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS} (ULTRA-conservativo per stabilità MySQL)")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilità)")
+logger.info(f"🖥️  Batch size: {BATCH_SIZE:,} (ridotto per stabilità MySQL)")
 
 # Directory temporanea per i file CSV - Linux optimized
 TEMP_DIR_PREFERRED = '/database/tmp'
@@ -359,32 +360,50 @@ def write_batch_to_csv(batch_data, fields, batch_id):
         raise
 
 def load_data_from_csv(cursor, csv_file, table_name, fields):
-    """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE."""
+    """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE o INSERT batch."""
     try:
         # Normalizza il path per MySQL (usa sempre forward slash)
         normalized_path = csv_file.replace('\\', '/')
         
+        # Controlla la dimensione del file
+        file_size = os.path.getsize(csv_file)
+        file_size_mb = file_size / (1024 * 1024)
+        
         logger.info(f"📥 Caricamento dati da: {csv_file}")
-        logger.info(f"📥 Path normalizzato: {normalized_path}")
+        logger.info(f"📥 Dimensione file: {file_size_mb:.1f}MB")
         
-        # Costruisci la query LOAD DATA
-        load_data_query = f"""
-        LOAD DATA LOCAL INFILE '{normalized_path}'
-        INTO TABLE {table_name}
-        FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-        LINES TERMINATED BY '\\n'
-        IGNORE 1 LINES
-        ({', '.join(fields)})
-        """
+        # Threshold per decidere metodo di caricamento
+        MAX_FILE_SIZE_MB = 50  # Se > 50MB, usa INSERT batch
         
-        logger.info(f"📥 Query LOAD DATA: {load_data_query[:200]}...")
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            logger.warning(f"⚠️ File troppo grande ({file_size_mb:.1f}MB > {MAX_FILE_SIZE_MB}MB)")
+            logger.info(f"🔄 Fallback a INSERT batch...")
+            
+            # Usa INSERT batch invece di LOAD DATA
+            rows_affected = load_data_with_insert_batch(cursor, csv_file, table_name, fields)
+            
+        else:
+            logger.info(f"📥 Path normalizzato: {normalized_path}")
+            
+            # Costruisci la query LOAD DATA
+            load_data_query = f"""
+            LOAD DATA LOCAL INFILE '{normalized_path}'
+            INTO TABLE {table_name}
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+            LINES TERMINATED BY '\\n'
+            IGNORE 1 LINES
+            ({', '.join(fields)})
+            """
+            
+            logger.info(f"📥 Query LOAD DATA: {load_data_query[:200]}...")
+            
+            # Esegui la query
+            cursor.execute(load_data_query)
+            
+            # Verifica il numero di righe inserite
+            cursor.execute("SELECT ROW_COUNT()")
+            rows_affected = cursor.fetchone()[0]
         
-        # Esegui la query
-        cursor.execute(load_data_query)
-        
-        # Verifica il numero di righe inserite
-        cursor.execute("SELECT ROW_COUNT()")
-        rows_affected = cursor.fetchone()[0]
         logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file}")
         
     except mysql.connector.Error as e:
@@ -392,7 +411,18 @@ def load_data_from_csv(cursor, csv_file, table_name, fields):
         logger.error(f"❌ File: {csv_file}")
         logger.error(f"❌ Path normalizzato: {normalized_path}")
         logger.error(f"❌ File esiste: {os.path.exists(csv_file)}")
-        raise
+        
+        # Se LOAD DATA fallisce, prova INSERT batch come fallback
+        if "Got packets out of order" in str(e) or "Lost connection" in str(e):
+            logger.warning(f"🔄 LOAD DATA fallito, provo INSERT batch...")
+            try:
+                rows_affected = load_data_with_insert_batch(cursor, csv_file, table_name, fields)
+                logger.info(f"✅ Fallback riuscito: {rows_affected} righe inserite")
+            except Exception as fallback_error:
+                logger.error(f"❌ Anche INSERT batch fallito: {fallback_error}")
+                raise
+        else:
+            raise
     finally:
         # Pulisci il file temporaneo
         try:
@@ -401,6 +431,60 @@ def load_data_from_csv(cursor, csv_file, table_name, fields):
                 logger.info(f"🗑️ File temporaneo rimosso: {csv_file}")
         except Exception as e:
             logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
+
+def load_data_with_insert_batch(cursor, csv_file, table_name, fields):
+    """Carica dati usando INSERT batch invece di LOAD DATA LOCAL INFILE."""
+    import csv as csv_module
+    
+    logger.info(f"🔄 Caricamento con INSERT batch: {csv_file}")
+    
+    rows_inserted = 0
+    insert_batch_size = 1000  # Insert 1000 righe alla volta
+    
+    # Prepara la query INSERT
+    placeholders = ', '.join(['%s'] * len(fields))
+    insert_query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
+    
+    try:
+        with open(csv_file, 'r', encoding='utf-8') as f:
+            reader = csv_module.reader(f)
+            
+            # Salta l'header
+            next(reader)
+            
+            batch = []
+            for row in reader:
+                # Converti 'None' string a None reale per NULL MySQL
+                processed_row = []
+                for value in row:
+                    if value == 'None' or value == '':
+                        processed_row.append(None)
+                    else:
+                        processed_row.append(value)
+                
+                batch.append(processed_row)
+                
+                # Insert quando raggiungiamo la dimensione del batch
+                if len(batch) >= insert_batch_size:
+                    cursor.executemany(insert_query, batch)
+                    rows_inserted += len(batch)
+                    batch = []
+                    
+                    # Log progresso ogni 10k righe
+                    if rows_inserted % 10000 == 0:
+                        logger.info(f"📊 INSERT batch progresso: {rows_inserted:,} righe inserite")
+            
+            # Insert l'ultimo batch se non vuoto
+            if batch:
+                cursor.executemany(insert_query, batch)
+                rows_inserted += len(batch)
+        
+        logger.info(f"✅ INSERT batch completato: {rows_inserted:,} righe totali")
+        return rows_inserted
+        
+    except Exception as e:
+        logger.error(f"❌ Errore in INSERT batch: {e}")
+        raise
 
 def process_batch(cursor, batch, table_definitions, batch_id):
     if not batch:
@@ -1398,11 +1482,11 @@ def import_all_json_files(base_path, conn):
     )
     create_dynamic_tables(tmp_conn, table_definitions)
     tmp_conn.close()
-    # Pool di connessioni ridotto per stabilità
+    # Pool di connessioni ridotto per stabilità (MONO-PROCESSO)
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
-        pool_size=NUM_WORKERS + 1,  # Ridotto drasticamente a 3 connessioni totali
+        pool_size=2,  # Solo 2 connessioni per mono-processo
         host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
@@ -1423,15 +1507,15 @@ def import_all_json_files(base_path, conn):
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("📊 Configurazione risorse ULTRA-CONSERVATIVA:")
+    logger.info("📊 Configurazione risorse MONO-PROCESSO:")
     logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
     logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (ULTRA-conservativo)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (MONO-PROCESSO)")
     logger.info(f"   • Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 1} (MINIMAL)")
+    logger.info(f"   • Pool connessioni: 2 (MINIMAL)")
     logger.info(f"   • Chunk size max: {MAX_CHUNK_SIZE:,}")
     
-    # Processa file per file per evitare OOM
+    # Processa file per file SEQUENZIALMENTE
     total_processed_files = 0
     total_processed_records = 0
     
@@ -1479,10 +1563,15 @@ def import_all_json_files(base_path, conn):
             
             logger.info(f"🚀 File: {file_name} - Chunk da processare: {len(file_chunks)} (record: {file_record_count:,})")
             
-            # Processa i chunk di questo file con il pool
+            # Processa i chunk di questo file SEQUENZIALMENTE (no multiprocessing)
             if file_chunks:
-                with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
-                    pool.map(process_chunk, file_chunks)
+                for chunk_data in file_chunks:
+                    try:
+                        process_chunk_sequential(chunk_data)
+                    except Exception as e:
+                        logger.error(f"❌ Errore nel processing chunk: {e}")
+                        # Continua con il prossimo chunk invece di fallire tutto
+                        continue
                 
                 # Marca il file come processato
                 conn_mark = connection_pool.get_connection()
@@ -1516,6 +1605,37 @@ def import_all_json_files(base_path, conn):
     logger.info(f"📊 File processati: {total_processed_files}/{total_files}")
     logger.info(f"📊 Record totali: {total_processed_records:,}")
     logger.info("="*80)
+
+def process_chunk_sequential(args):
+    """Processa un chunk in modo sequenziale senza multiprocessing."""
+    chunk, file_name, batch_id, table_definitions = args
+    logger.info(f"[Sequential] Elabora chunk di {len(chunk)} record del file {file_name}")
+    
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            conn = connection_pool.get_connection()
+            cursor = conn.cursor()
+            try:
+                process_batch(cursor, chunk, table_definitions, batch_id)
+                conn.commit()
+                return  # Successo
+            except Exception as e:
+                logger.error(f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Backoff exponenziale
+                else:
+                    raise
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
+                raise
 
 def main():
     try:
