@@ -1035,7 +1035,9 @@ def estimate_mysql_field_size(mysql_type):
 
 def check_memory_limit():
     """Controlla se abbiamo raggiunto il limite di memoria."""
-    current_memory = psutil.virtual_memory().available
+    process = psutil.Process()
+    current_memory = process.memory_info().rss
+    max_memory_bytes = USABLE_MEMORY_BYTES * 0.9  # 90% del buffer disponibile per l'analisi
     return current_memory < max_memory_bytes
 
 def generate_short_alias(field_name, existing_aliases):
@@ -1321,7 +1323,7 @@ CATEGORIES = {
     "avvio_contratto":        [r"avvio-contratto"],
     "categorie_dpcm":         [r"categorie-dpcm-aggregazione"],
     "categorie_opera":        [r"categorie-opera"],
-    "cig":                    [r"^cig_json", r"^smartcig_json"],
+    "cig":                    [r"^cig[_-]json", r"^smartcig[_-]json", r"cig[_-]json", r"smartcig[_-]json"],
     "collaudo":               [r"collaudo"],
     "fine_contratto":         [r"fine-contratto"],
     "fonti_finanziamento":    [r"fonti-finanziamento"],
@@ -1361,8 +1363,8 @@ def group_files_by_category(json_files):
         file_stem = file_path.stem
         
         # RIMUOVI LE DATE dal nome file prima del pattern matching
-        # Pattern per date: YYYYMMDD_ all'inizio (es. 20240201_, 20240401_)
-        cleaned_name = re.sub(r'^\d{8}_', '', file_stem)
+        # Pattern per date: YYYYMMDD_ o YYYYMMDD- all'inizio (es. 20240201_, 20240401-, etc.)
+        cleaned_name = re.sub(r'^\d{8}[_-]', '', file_stem)
         
         # Log del cleaning per debug
         if cleaned_name != file_stem:
