@@ -38,14 +38,14 @@ MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
-BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 100000))  # Aumentato a 100k
+BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))  # Aumentato a 50k con più RAM disponibile
 
-# Ottimizzazione per 8 core
-NUM_THREADS = 16  # 2 thread per core per sfruttare meglio l'hyperthreading
-NUM_WORKERS = 8   # Numero di worker process per l'elaborazione parallela
+# Ottimizzazione bilanciata: 80% CPU, 70% RAM
+NUM_THREADS = 12  # Thread per elaborazione interna
+NUM_WORKERS = 6   # 6 worker process per usare ~80% della CPU (6/8 core)
 logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS}")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS} (~80% CPU)")
 
 # Directory temporanea per i file CSV
 TEMP_DIR = '/database/tmp'
@@ -54,19 +54,19 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.2  # Ridotto al 20% per sfruttare meglio la RAM
+MEMORY_BUFFER_RATIO = 0.3  # 30% libero, 70% usabile
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
-# Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.15    # Aumentato al 15% della RAM usabile
+# Chunk size ottimizzato per 70% RAM
+CHUNK_SIZE_INIT_RATIO = 0.04   # 4% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.12    # 12% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Limita il chunk size massimo a 50000 record per evitare problemi con max_allowed_packet
+# Chunk size massimo a 50k per bilanciare performance e stabilità
 MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
 
 class MemoryMonitor:
@@ -936,11 +936,11 @@ def import_all_json_files(base_path, conn):
     )
     create_dynamic_tables(tmp_conn, table_definitions)
     tmp_conn.close()
-    # Pool di connessioni per i worker
+    # Pool di connessioni ottimizzato per 6 worker
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
-        pool_size=NUM_WORKERS,
+        pool_size=NUM_WORKERS + 3,  # Pool leggermente più grande per gestire picchi
         host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
@@ -960,6 +960,14 @@ def import_all_json_files(base_path, conn):
         use_unicode=True,
         auth_plugin='mysql_native_password'
     )
+    
+    logger.info("📊 Configurazione risorse (80% CPU, 70% RAM):")
+    logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core ({NUM_WORKERS/8*100:.0f}% CPU)")
+    logger.info(f"   • Batch size: {BATCH_SIZE:,}")
+    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 3}")
+    
     all_chunks = []
     for idx, json_file in enumerate(json_files, 1):
         file_name = os.path.basename(json_file)
@@ -982,7 +990,10 @@ def import_all_json_files(base_path, conn):
                     continue
         if current_chunk:
             all_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+    
     logger.info(f"🚀 Numero totale di chunk da processare: {len(all_chunks)}")
+    logger.info(f"📈 Chunk per worker: {len(all_chunks) / NUM_WORKERS:.1f}")
+    
     with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
         pool.map(process_chunk, all_chunks)
     # Marca tutti i file come processati (conteggio record per file)
