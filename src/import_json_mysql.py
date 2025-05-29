@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 import multiprocessing
 import platform
+import re
 
 # Configurazione logging
 logging.basicConfig(
@@ -170,7 +171,6 @@ class RecordProcessor:
                         # Se è un formato data riconoscibile, mantienilo
                         elif any(pattern in value for pattern in ['-', '/', ':']):
                             # Tentativi di normalizzazione
-                            import re
                             # Formato ISO: YYYY-MM-DD o YYYY-MM-DD HH:MM:SS
                             if re.match(r'^\d{4}-\d{2}-\d{2}', value):
                                 if def_type == 'DATE' and len(value) > 10:
@@ -291,12 +291,33 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
             processor.json_data[field].extend(data)
     
     return processor.main_data, processor.json_data
+
+def handle_data_too_long_error(cursor, error_message, table_name):
+    """Gestisce errori di 'Data too long' modificando la colonna da VARCHAR a TEXT."""
+    # Estrai il nome della colonna dall'errore
+    match = re.search(r"Data too long for column '([^']+)'", error_message)
+    if not match:
+        return False
+        
+    column_name = match.group(1)
+    logger.warning(f"⚠️ Colonna '{column_name}' troppo piccola, converto a TEXT...")
+    
+    try:
+        # Modifica la colonna da VARCHAR a TEXT
+        alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
+        cursor.execute(alter_query)
+        logger.info(f"✅ Colonna '{column_name}' convertita a TEXT")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Errore nella modifica della colonna '{column_name}': {e}")
+        return False
+
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV."""
     if not main_data:
         return 0
         
-    logger.info(f"🖥️ Inserimento diretto di {len(main_data):,} record in {table_name}")
+    logger.info(f"📥 Inserimento diretto di {len(main_data):,} record in {table_name}")
     
     rows_inserted = 0
     insert_batch_size = 1000  # Insert 1000 righe alla volta
@@ -310,19 +331,38 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
         for i in range(0, len(main_data), insert_batch_size):
             batch = main_data[i:i + insert_batch_size]
             
-            # Esegui INSERT batch
-            cursor.executemany(insert_query, batch)
-            rows_inserted += len(batch)
+            try:
+                # Esegui INSERT batch
+                cursor.executemany(insert_query, batch)
+                rows_inserted += len(batch)
+                
+                # Log progresso ogni 10k righe
+                if rows_inserted % 10000 == 0:
+                    logger.info(f"📥 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe inserite")
             
-            # Log progresso ogni 10k righe
-            if rows_inserted % 10000 == 0:
-                logger.info(f"🖥️ INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe inserite")
+            except mysql.connector.Error as e:
+                if e.errno == 1406:  # Data too long error
+                    logger.warning(f"⚠️ Errore Data too long rilevato: {e}")
+                    
+                    # Tenta di risolvere modificando la colonna
+                    if handle_data_too_long_error(cursor, str(e), table_name):
+                        logger.info(f"🔄 Ritento l'inserimento del batch dopo la modifica...")
+                        # Riprova l'inserimento dello stesso batch
+                        cursor.executemany(insert_query, batch)
+                        rows_inserted += len(batch)
+                        logger.info(f"✅ Batch inserito con successo dopo la modifica")
+                    else:
+                        logger.error(f"❌ Impossibile risolvere l'errore Data too long")
+                        raise
+                else:
+                    # Altri errori MySQL
+                    raise
         
-        logger.info(f"🖥️ INSERT diretto completato: {rows_inserted:,} righe totali")
+        logger.info(f"📥 INSERT diretto completato: {rows_inserted:,} righe totali")
         return rows_inserted
         
     except Exception as e:
-        logger.error(f"🖥️ Errore in INSERT diretto: {e}")
+        logger.error(f"📥 Errore in INSERT diretto: {e}")
         raise
 
 def process_batch(cursor, batch, table_definitions, batch_id):
@@ -588,8 +628,6 @@ def analyze_json_structure(json_files):
         'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
     }
     
-    import re
-    
     def get_value_pattern_and_type(value):
         """Determina il pattern di un valore e se è misto."""
         if value is None:
@@ -629,6 +667,14 @@ def analyze_json_structure(json_files):
         # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorità massima)
         if field_lower in ALWAYS_DATE_FIELDS:
             return 'DATETIME'
+        
+        # REGOLA 0.5: Campi lunghi comuni sempre TEXT (denominazioni, descrizioni, etc.)
+        ALWAYS_TEXT_KEYWORDS = [
+            'denominazione', 'descrizione', 'amministrazione', 'ragione_sociale', 
+            'oggetto', 'dettaglio', 'motivazione', 'specifiche', 'note'
+        ]
+        if any(keyword in field_lower for keyword in ALWAYS_TEXT_KEYWORDS):
+            return 'TEXT'
         
         # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
         if field_lower in ALWAYS_VARCHAR_FIELDS:
