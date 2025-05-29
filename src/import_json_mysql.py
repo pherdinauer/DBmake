@@ -38,36 +38,36 @@ MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
-BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))  # Aumentato a 50k con più RAM disponibile
+BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato a 75k con più RAM
 
-# Ottimizzazione bilanciata: 80% CPU, 70% RAM
-NUM_THREADS = 12  # Thread per elaborazione interna
-NUM_WORKERS = 6   # 6 worker process per usare ~80% della CPU (6/8 core)
+# Ottimizzazione aggressiva: 90% CPU, 80% RAM
+NUM_THREADS = 14  # Thread per elaborazione interna
+NUM_WORKERS = 7   # 7 worker process per usare ~87.5% della CPU (7/8 core)
 logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS} (~80% CPU)")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS} (~87.5% CPU)")
 
 # Directory temporanea per i file CSV
 TEMP_DIR = '/database/tmp'
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Calcola la RAM totale del sistema
+# Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.3  # 30% libero, 70% usabile
+MEMORY_BUFFER_RATIO = 0.2  # Solo 20% libero, 80% usabile
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
-# Chunk size ottimizzato per 70% RAM
-CHUNK_SIZE_INIT_RATIO = 0.04   # 4% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.12    # 12% della RAM usabile
+# Chunk size più aggressivo con più RAM
+CHUNK_SIZE_INIT_RATIO = 0.05   # 5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.15    # 15% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Chunk size massimo a 50k per bilanciare performance e stabilità
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
+# Chunk size massimo aumentato per migliori performance
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 75000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -507,6 +507,7 @@ def analyze_json_structure(json_files):
     logger.info("1. I tipi di dati per ogni campo")
     logger.info("2. Le lunghezze massime dei campi stringa")
     logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
+    logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
     
     total_files = len(json_files)
     files_analyzed = 0
@@ -515,9 +516,15 @@ def analyze_json_structure(json_files):
     last_progress_time = time.time()
     progress_interval = 1.0
     
-    # Ottimizzazione: campiona solo una parte dei record per l'analisi
-    SAMPLE_SIZE = 10000  # Numero di record da analizzare per file
-    current_sample = 0
+    # Limite righe per file per analisi veloce
+    MAX_ROWS_PER_FILE = 2000
+    
+    # Monitoraggio memoria dinamico come failsafe
+    process = psutil.Process()
+    max_memory_bytes = USABLE_MEMORY_BYTES * 0.9  # 90% del buffer disponibile per l'analisi
+    
+    logger.info(f"📊 Limite righe per file: {MAX_ROWS_PER_FILE:,}")
+    logger.info(f"💾 Memoria massima per analisi: {max_memory_bytes/1024/1024/1024:.1f}GB")
     
     # Pattern per identificare i tipi di campi
     patterns = {
@@ -563,6 +570,11 @@ def analyze_json_structure(json_files):
             if re.match(pattern, value_str, re.IGNORECASE):
                 return pattern_name
         return 'text'
+    
+    def check_memory_limit():
+        """Controlla se abbiamo raggiunto il limite di memoria."""
+        current_memory = process.memory_info().rss
+        return current_memory < max_memory_bytes
     
     def determine_field_type(field, patterns, values_count):
         """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
@@ -641,19 +653,21 @@ def analyze_json_structure(json_files):
         files_analyzed += 1
         file_records = 0
         file_start_time = time.time()
-        current_sample = 0
+        memory_exceeded = False
+        limit_reached = False
         
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     try:
-                        if current_sample >= SAMPLE_SIZE:
+                        # Limite principale: 2k righe per file
+                        if file_records >= MAX_ROWS_PER_FILE:
+                            limit_reached = True
                             break
                             
                         record = json.loads(line.strip())
                         file_records += 1
                         records_analyzed += 1
-                        current_sample += 1
                         
                         for field, value in record.items():
                             if value is None:
@@ -668,17 +682,30 @@ def analyze_json_structure(json_files):
                                 if current_length > field_lengths[field]:
                                     field_lengths[field] = current_length
                         
+                        # Controllo memoria ogni 1000 record (failsafe)
+                        if file_records % 1000 == 0:
+                            if not check_memory_limit():
+                                current_memory_gb = process.memory_info().rss / (1024**3)
+                                logger.warning(f"⚠️ Limite memoria raggiunto ({current_memory_gb:.1f}GB), passo al prossimo file")
+                                memory_exceeded = True
+                                break
+                            
+                            # Garbage collection ogni 1000 record
+                            gc.collect()
+                        
                         current_time = time.time()
                         if current_time - last_progress_time >= progress_interval:
                             elapsed = current_time - file_start_time
                             speed = file_records / elapsed if elapsed > 0 else 0
                             total_elapsed = current_time - start_time
                             avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
+                            current_memory_gb = process.memory_info().rss / (1024**3)
                             
                             logger.info(f"📊 Progresso: File {files_analyzed}/{total_files} | "
-                                      f"Record nel file: {file_records:,} | "
+                                      f"Record nel file: {file_records:,}/{MAX_ROWS_PER_FILE:,} | "
                                       f"Velocità: {speed:.1f} record/s | "
-                                      f"Totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
+                                      f"Totale: {records_analyzed:,} record ({avg_speed:.1f} record/s) | "
+                                      f"RAM: {current_memory_gb:.1f}GB")
                             
                             last_progress_time = current_time
                             
@@ -689,12 +716,25 @@ def analyze_json_structure(json_files):
             file_time = time.time() - file_start_time
             total_time = time.time() - start_time
             avg_speed = records_analyzed / total_time if total_time > 0 else 0
+            current_memory_gb = process.memory_info().rss / (1024**3)
             
-            logger.info(f"✅ File {files_analyzed}/{total_files} completato:")
+            # Determina lo status del file
+            if memory_exceeded:
+                status = "💾 LIMITE RAM"
+            elif limit_reached:
+                status = "📊 LIMITE 2K"
+            else:
+                status = "✅"
+                
+            logger.info(f"{status} File {files_analyzed}/{total_files} completato:")
             logger.info(f"   • Record analizzati: {file_records:,}")
             logger.info(f"   • Tempo file: {file_time:.1f}s")
             logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
             logger.info(f"   • Progresso totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
+            logger.info(f"   • RAM utilizzata: {current_memory_gb:.1f}GB")
+            
+            # Garbage collection dopo ogni file
+            gc.collect()
             
         except Exception as e:
             logger.error(f"⚠️ Errore nell'analisi del file {json_file}: {e}")
@@ -706,11 +746,17 @@ def analyze_json_structure(json_files):
         column_def = determine_field_type(field, patterns, records_analyzed)
         table_definitions[field] = column_def
     
+    # Garbage collection finale
+    gc.collect()
+    
     # Stampa un riepilogo della struttura trovata
+    final_memory_gb = process.memory_info().rss / (1024**3)
     logger.info("\n📊 Struttura JSON analizzata:")
     logger.info(f"   • File analizzati: {files_analyzed}/{total_files}")
     logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
+    logger.info(f"   • Media record per file: {records_analyzed/files_analyzed:.0f}")
     logger.info(f"   • Campi trovati: {len(table_definitions)}")
+    logger.info(f"   • RAM finale: {final_memory_gb:.1f}GB")
     logger.info("\nDettaglio campi:")
     for field, def_type in table_definitions.items():
         logger.info(f"   • {field}: {def_type}")
@@ -936,11 +982,11 @@ def import_all_json_files(base_path, conn):
     )
     create_dynamic_tables(tmp_conn, table_definitions)
     tmp_conn.close()
-    # Pool di connessioni ottimizzato per 6 worker
+    # Pool di connessioni più grande per gestire 7 worker
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
-        pool_size=NUM_WORKERS + 3,  # Pool leggermente più grande per gestire picchi
+        pool_size=NUM_WORKERS + 4,  # Pool più grande per 7 worker + buffer
         host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
@@ -961,12 +1007,13 @@ def import_all_json_files(base_path, conn):
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("📊 Configurazione risorse (80% CPU, 70% RAM):")
+    logger.info("📊 Configurazione risorse AGGRESSIVA (90% CPU, 80% RAM):")
     logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
     logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core ({NUM_WORKERS/8*100:.0f}% CPU)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core ({NUM_WORKERS/8*100:.1f}% CPU)")
     logger.info(f"   • Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 3}")
+    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 4}")
+    logger.info(f"   • Chunk size max: {MAX_CHUNK_SIZE:,}")
     
     # Processa file per file per evitare OOM
     total_processed_files = 0
