@@ -908,7 +908,6 @@ def find_json_files(base_path):
 def process_chunk(args):
     chunk, file_name, batch_id, table_definitions = args
     print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
-    # Ogni chunk crea una connessione e un cursore
     conn = connection_pool.get_connection()
     cursor = conn.cursor()
     try:
@@ -920,51 +919,13 @@ def process_chunk(args):
         cursor.close()
         conn.close()
 
-def process_file(file_info):
-    idx, json_file = file_info
-    print(f"[Multiprocessing] Processo PID={os.getpid()} avviato per file {json_file}")
-    file_name = os.path.basename(json_file)
-    batch_id = f"{int(time.time())}_{idx}"
-    # Suddividi il file in chunk
-    chunk_size = BATCH_SIZE
-    chunks = []
-    current_chunk = []
-    with open(json_file, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                current_chunk.append((record, file_name))
-                if len(current_chunk) >= chunk_size:
-                    chunks.append((current_chunk, file_name, batch_id, table_definitions))
-                    current_chunk = []
-            except Exception as e:
-                logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                continue
-    if current_chunk:
-        chunks.append((current_chunk, file_name, batch_id, table_definitions))
-    # Pool di processi per i chunk
-    with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
-        pool.map(process_chunk, chunks)
-    # Marca il file come processato (conta i record totali)
-    total_records = sum(len(chunk[0]) for chunk in chunks)
-    conn = connection_pool.get_connection()
-    mark_file_processed(conn, file_name, total_records)
-    conn.close()
-    logger.info(f"\n✅ File completato: {file_name} (record: {total_records})")
-
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
-    # Analizza la struttura dei JSON
     global table_definitions
     table_definitions = analyze_json_structure(json_files)
-    # Crea le tabelle dinamicamente
     create_dynamic_tables(conn, table_definitions)
-    # Crea un pool di connessioni globale
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
@@ -988,9 +949,39 @@ def import_all_json_files(base_path, conn):
         use_unicode=True,
         auth_plugin='mysql_native_password'
     )
-    # Crea un pool di processi per l'elaborazione parallela
+    all_chunks = []
+    for idx, json_file in enumerate(json_files, 1):
+        file_name = os.path.basename(json_file)
+        batch_id = f"{int(time.time())}_{idx}"
+        chunk_size = BATCH_SIZE
+        current_chunk = []
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    current_chunk.append((record, file_name))
+                    if len(current_chunk) >= chunk_size:
+                        all_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+                        current_chunk = []
+                except Exception as e:
+                    logger.error(f"\n❌ Errore nel parsing del record: {e}")
+                    continue
+        if current_chunk:
+            all_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+    logger.info(f"🚀 Numero totale di chunk da processare: {len(all_chunks)}")
     with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
-        pool.map(process_file, enumerate(json_files, 1))
+        pool.map(process_chunk, all_chunks)
+    # Marca tutti i file come processati (conteggio record per file)
+    file_record_count = {}
+    for chunk, file_name, _, _ in all_chunks:
+        file_record_count[file_name] = file_record_count.get(file_name, 0) + len(chunk)
+    for file_name, total_records in file_record_count.items():
+        c = connection_pool.get_connection()
+        mark_file_processed(c, file_name, total_records)
+        c.close()
     logger.info("\n" + "="*80)
     logger.info("✨ Importazione completata!")
     logger.info("="*80)
