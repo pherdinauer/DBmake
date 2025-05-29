@@ -905,59 +905,55 @@ def find_json_files(base_path):
                 json_files.append(os.path.join(root, file))
     return json_files
 
+def process_chunk(args):
+    chunk, file_name, batch_id, table_definitions = args
+    print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
+    # Ogni chunk crea una connessione e un cursore
+    conn = connection_pool.get_connection()
+    cursor = conn.cursor()
+    try:
+        process_batch(cursor, chunk, table_definitions, batch_id)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Errore nel processare chunk: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
 def process_file(file_info):
     idx, json_file = file_info
     print(f"[Multiprocessing] Processo PID={os.getpid()} avviato per file {json_file}")
     file_name = os.path.basename(json_file)
-    # Ottieni una connessione dal pool
+    batch_id = f"{int(time.time())}_{idx}"
+    # Suddividi il file in chunk
+    chunk_size = BATCH_SIZE
+    chunks = []
+    current_chunk = []
+    with open(json_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                current_chunk.append((record, file_name))
+                if len(current_chunk) >= chunk_size:
+                    chunks.append((current_chunk, file_name, batch_id, table_definitions))
+                    current_chunk = []
+            except Exception as e:
+                logger.error(f"\n❌ Errore nel parsing del record: {e}")
+                continue
+    if current_chunk:
+        chunks.append((current_chunk, file_name, batch_id, table_definitions))
+    # Pool di processi per i chunk
+    with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
+        pool.map(process_chunk, chunks)
+    # Marca il file come processato (conta i record totali)
+    total_records = sum(len(chunk[0]) for chunk in chunks)
     conn = connection_pool.get_connection()
-    cursor = conn.cursor()
-    try:
-        # Salta i file già processati con successo
-        if is_file_processed(conn, file_name):
-            logger.info(f"\n⏭️  File già processato: {file_name}")
-            return
-        file_start_time = time.time()
-        file_records = 0
-        batch = []
-        batch_id = f"{int(time.time())}_{idx}"
-        logger.info("\n" + "="*80)
-        logger.info(f"📂 Processando file {idx}: {file_name}")
-        logger.info("="*80)
-        with open(json_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    batch.append((record, file_name))
-                    file_records += 1
-                    if len(batch) >= BATCH_SIZE:
-                        process_batch(cursor, batch, table_definitions, batch_id)
-                        conn.commit()
-                        batch = []
-                        gc.collect()
-                except Exception as e:
-                    logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                    continue
-        # Processa l'ultimo batch
-        if batch:
-            process_batch(cursor, batch, table_definitions, batch_id)
-            conn.commit()
-        mark_file_processed(conn, file_name, file_records)
-        file_time = time.time() - file_start_time
-        logger.info(f"\n✅ File completato: {file_name}")
-        logger.info(f"   • Record processati: {file_records:,}")
-        logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
-        logger.info(f"   • Velocità: {file_records/file_time:.1f} record/s")
-    except Exception as e:
-        error_message = str(e)
-        logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
-        mark_file_processed(conn, file_name, file_records, 'failed', error_message)
-    finally:
-        cursor.close()
-        conn.close()
+    mark_file_processed(conn, file_name, total_records)
+    conn.close()
+    logger.info(f"\n✅ File completato: {file_name} (record: {total_records})")
 
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
