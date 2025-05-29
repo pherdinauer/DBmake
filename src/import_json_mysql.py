@@ -21,12 +21,23 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, Union, Set, DefaultDict
 
 # Import dei moduli separati
-from .database import DatabaseManager
-from .utils import (
-    LogContext, log_memory_status, log_performance_stats, 
-    log_file_progress, log_batch_progress, log_error_with_context,
-    log_resource_optimization, check_disk_space
-)
+try:
+    # Prova import assolute (quando eseguito come script)
+    from src.database import DatabaseManager
+    from src.utils import (
+        LogContext, log_memory_status, log_performance_stats, 
+        log_file_progress, log_batch_progress, log_error_with_context,
+        log_resource_optimization, check_disk_space
+    )
+except ImportError:
+    # Fallback su import relative (quando eseguito come modulo)
+    from .database import DatabaseManager
+    from .utils import (
+        LogContext, log_memory_status, log_performance_stats, 
+        log_file_progress, log_batch_progress, log_error_with_context,
+        log_resource_optimization, check_disk_space
+    )
+    from .temp_additions import RecordProcessor, process_batch_parallel
 
 # Crea la directory dei log se non esiste prima della configurazione logging
 logs_dir = Path('logs')
@@ -1520,4 +1531,52 @@ def main():
         raise
 
 if __name__ == "__main__":
-    main()
+    main() 
+
+# Implementazione di fallback per process_batch_parallel
+def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
+    """Implementazione di fallback per process_batch_parallel."""
+    main_data = []
+    json_data = defaultdict(list)
+    
+    for record, _ in batch:
+        cig = record.get('cig', '')
+        if not cig:
+            continue
+            
+        # Processo base: aggiungi solo CIG e source info
+        main_values = [cig]
+        
+        # Aggiungi valori per tutti i campi della definizione tabella
+        for field, def_type in table_definitions.items():
+            if field.lower() == 'cig':
+                continue
+            
+            field_lower = field.lower().replace(' ', '_')
+            value = record.get(field_lower)
+            
+            # Processo semplificato per i tipi base
+            if def_type == 'JSON' and value is not None:
+                json_data[field_mapping[field]].append((cig, json.dumps(value)))
+                value = None
+            elif value is not None:
+                if def_type.startswith('VARCHAR'):
+                    value = str(value)[:1000]  # Tronca se troppo lungo
+                elif def_type in ['DATE', 'DATETIME']:
+                    # Processo date semplificato
+                    if isinstance(value, str) and value.strip():
+                        # Mantieni solo se sembra una data valida
+                        if any(c in value for c in ['-', '/', ':']):
+                            pass  # Mantieni il valore
+                        else:
+                            value = None
+                    else:
+                        value = None
+            
+            main_values.append(value)
+        
+        # Aggiungi metadata
+        main_values.extend([file_name, batch_id])
+        main_data.append(tuple(main_values))
+    
+    return main_data, json_data
