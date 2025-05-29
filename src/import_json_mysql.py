@@ -154,6 +154,213 @@ MIN_CHUNK_SIZE = 5000  # Aumentato da 1000 a 5000
 # Chunk size massimo MOLTO più aggressivo
 MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 150000)  # Aumentato da 75k a 150k
 
+class DatabaseManager:
+    """
+    Context Manager centralizzato per tutte le operazioni di database.
+    Gestisce connessioni singole, pool di connessioni e configurazione MySQL.
+    """
+    
+    _pool = None
+    _pool_config = None
+    _initialized = False
+    
+    def __init__(self, use_pool=False, pool_size=2):
+        self.use_pool = use_pool
+        self.pool_size = pool_size
+        self.connection = None
+        
+        # Configurazione MySQL standard
+        self.config = {
+            'host': MYSQL_HOST,
+            'user': MYSQL_USER,
+            'password': MYSQL_PASSWORD,
+            'database': MYSQL_DATABASE,
+            'charset': 'utf8mb4',
+            'autocommit': True,
+            'connect_timeout': 180,
+            'use_pure': True,
+            'ssl_disabled': True,
+            'get_warnings': True,
+            'raise_on_warnings': True,
+            'consume_results': True,
+            'buffered': True,
+            'raw': False,
+            'use_unicode': True,
+            'auth_plugin': 'mysql_native_password'
+        }
+    
+    @classmethod
+    def initialize_pool(cls, pool_size=2):
+        """Inizializza il pool di connessioni globale."""
+        if cls._pool is not None:
+            db_logger.warning("Pool già inizializzato, skip...")
+            return cls._pool
+            
+        try:
+            cls._pool_config = {
+                'pool_name': "anac_import_pool",
+                'pool_size': pool_size,
+                'host': MYSQL_HOST,
+                'user': MYSQL_USER,
+                'password': MYSQL_PASSWORD,
+                'database': MYSQL_DATABASE,
+                'charset': 'utf8mb4',
+                'autocommit': True,
+                'connect_timeout': 180,
+                'use_pure': True,
+                'ssl_disabled': True,
+                'get_warnings': True,
+                'raise_on_warnings': True,
+                'consume_results': True,
+                'buffered': True,
+                'raw': False,
+                'use_unicode': True,
+                'auth_plugin': 'mysql_native_password'
+            }
+            
+            # Crea il database se non esiste
+            cls._ensure_database_exists()
+            
+            cls._pool = mysql.connector.pooling.MySQLConnectionPool(**cls._pool_config)
+            cls._initialized = True
+            
+            db_logger.info(f"✅ Pool MySQL inizializzato: {pool_size} connessioni")
+            return cls._pool
+            
+        except Exception as e:
+            log_error_with_context(db_logger, e, "pool initialization")
+            raise
+    
+    @classmethod
+    def _ensure_database_exists(cls):
+        """Assicura che il database esista, creandolo se necessario."""
+        temp_config = cls._pool_config.copy() if cls._pool_config else {
+            'host': MYSQL_HOST,
+            'user': MYSQL_USER,
+            'password': MYSQL_PASSWORD,
+            'charset': 'utf8mb4',
+            'autocommit': True,
+            'ssl_disabled': True
+        }
+        
+        # Rimuovi il database dal config per la connessione iniziale
+        temp_config.pop('database', None)
+        temp_config.pop('pool_name', None)
+        temp_config.pop('pool_size', None)
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                db_logger.info(f"🔍 Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
+                
+                temp_conn = mysql.connector.connect(**temp_config)
+                cursor = temp_conn.cursor()
+                
+                # Controlla se il database esiste
+                cursor.execute("SHOW DATABASES LIKE %s", (MYSQL_DATABASE,))
+                if not cursor.fetchone():
+                    db_logger.info(f"🆕 Creazione database {MYSQL_DATABASE}...")
+                    cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
+                    db_logger.info(f"✅ Database {MYSQL_DATABASE} creato")
+                else:
+                    db_logger.info(f"✅ Database {MYSQL_DATABASE} già esistente")
+                
+                cursor.close()
+                temp_conn.close()
+                return
+                
+            except mysql.connector.Error as e:
+                if attempt < max_retries - 1:
+                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
+                    time.sleep(2)
+                else:
+                    log_error_with_context(db_logger, e, "database creation")
+                    raise
+    
+    @classmethod
+    def get_pool_connection(cls):
+        """Ottiene una connessione dal pool."""
+        if not cls._initialized:
+            cls.initialize_pool()
+        return cls._pool.get_connection()
+    
+    @classmethod
+    def close_pool(cls):
+        """Chiude il pool di connessioni."""
+        if cls._pool:
+            # Note: mysql.connector pools don't have explicit close method
+            cls._pool = None
+            cls._initialized = False
+            db_logger.info("🔒 Pool MySQL chiuso")
+    
+    def _create_single_connection(self):
+        """Crea una singola connessione con retry."""
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                db_logger.info(f"🔄 Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
+                
+                # Assicura che il database esista
+                self._ensure_database_exists()
+                
+                conn = mysql.connector.connect(**self.config)
+                
+                # Configura parametri MySQL per performance
+                cursor = conn.cursor()
+                cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
+                cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
+                cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
+                cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
+                cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
+                cursor.close()
+                
+                db_logger.info("✅ Connessione MySQL stabilita")
+                return conn
+                
+            except mysql.connector.Error as e:
+                if attempt < max_retries - 1:
+                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    log_error_with_context(db_logger, e, "single connection", f"fallito dopo {max_retries} tentativi")
+                    raise
+    
+    def __enter__(self):
+        """Context manager entry."""
+        if self.use_pool:
+            self.connection = self.get_pool_connection()
+        else:
+            self.connection = self._create_single_connection()
+        return self.connection
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        if self.connection:
+            try:
+                if exc_type is None:
+                    self.connection.commit()
+                else:
+                    self.connection.rollback()
+                    db_logger.warning(f"Rollback per errore: {exc_val}")
+            except Exception as e:
+                log_error_with_context(db_logger, e, "transaction finalization")
+            finally:
+                self.connection.close()
+                self.connection = None
+    
+    @staticmethod
+    def get_connection():
+        """Factory method per connessione singola."""
+        return DatabaseManager(use_pool=False)
+    
+    @staticmethod
+    def get_pooled_connection():
+        """Factory method per connessione dal pool."""
+        return DatabaseManager(use_pool=True)
+
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
         self.max_memory_bytes = max_memory_bytes
@@ -674,74 +881,13 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
             raise
 
 def connect_mysql():
-    max_retries = 3
-    retry_delay = 5  # secondi
-    
-    logger.info("\n🔍 Verifica configurazione MySQL:")
-    logger.info(f"   • Host: {MYSQL_HOST}")
-    logger.info(f"   • User: {MYSQL_USER}")
-    logger.info(f"   • Database: {MYSQL_DATABASE}")
-    logger.info(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"\n🔄 Tentativo di connessione {attempt + 1}/{max_retries}...")
-            conn = mysql.connector.connect(
-                host=MYSQL_HOST,
-                user=MYSQL_USER,
-                password=MYSQL_PASSWORD,
-                database=MYSQL_DATABASE,
-                charset='utf8mb4',
-                autocommit=True,
-                connect_timeout=180,
-                pool_size=5,
-                pool_name="mypool",
-                use_pure=True,  # Usa l'implementazione Python pura
-                ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
-                get_warnings=True,
-                raise_on_warnings=True,
-                consume_results=True,
-                buffered=True,
-                raw=False,
-                use_unicode=True,
-                auth_plugin='mysql_native_password'
-            )
-            
-            # Imposta max_allowed_packet dopo la connessione
-            cursor = conn.cursor()
-            cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
-            cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
-            cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
-            cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
-            cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
-            cursor.close()
-            
-            logger.info("🖥️ Connessione riuscita!")
-            return conn
-        except mysql.connector.Error as err:
-            if err.errno == errorcode.ER_BAD_DB_ERROR:
-                logger.warning(f"\n🖥️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
-                # Crea il database se non esiste
-                tmp_conn = mysql.connector.connect(
-                    host=MYSQL_HOST,
-                    user=MYSQL_USER,
-                    password=MYSQL_PASSWORD,
-                    charset='utf8mb4',
-                    autocommit=True,
-                    ssl_disabled=True  # Disabilita SSL per evitare problemi di connessione
-                )
-                cursor = tmp_conn.cursor()
-                cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                tmp_conn.close()
-                logger.info(f"🖥️ Database '{MYSQL_DATABASE}' creato con successo!")
-                return connect_mysql()
-            elif attempt < max_retries - 1:
-                logger.warning(f"\n🖥️ Tentativo di connessione {attempt + 1} fallito: {err}")
-                logger.info(f"🖥️ Riprovo tra {retry_delay} secondi...")
-                time.sleep(retry_delay)
-            else:
-                logger.error(f"\n🖥️ Errore di connessione dopo {max_retries} tentativi: {err}")
-                raise
+    """
+    DEPRECATO: Usa DatabaseManager.get_connection() al posto di questa funzione.
+    Wrapper per compatibilità con codice esistente.
+    """
+    db_logger.warning("connect_mysql() deprecato - usa DatabaseManager.get_connection()")
+    with DatabaseManager.get_connection() as conn:
+        return conn
 
 def check_disk_space():
     """Verifica lo spazio disponibile su disco usando pathlib."""
@@ -1524,27 +1670,27 @@ def process_chunk_unified(args, execution_mode="sequential"):
     
     for attempt in range(max_retries):
         try:
-            conn = connection_pool.get_connection()
-            cursor = conn.cursor()
-            try:
-                process_batch(cursor, chunk, table_definitions, batch_id)
-                conn.commit()
-                return  # Successo
-            except Exception as e:
-                error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
-                if execution_mode == "multiprocessing":
-                    print(f"❌ {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
-                else:
-                    log_error_with_context(batch_logger, e, "chunk processing", f"tentativo {attempt + 1}/{max_retries}")
-                
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Backoff exponenziale
-                else:
-                    raise
-            finally:
-                cursor.close()
-                conn.close()
+            # Usa DatabaseManager per ottenere connessione dal pool
+            with DatabaseManager.get_pooled_connection() as conn:
+                cursor = conn.cursor()
+                try:
+                    process_batch(cursor, chunk, table_definitions, batch_id)
+                    conn.commit()
+                    return  # Successo
+                except Exception as e:
+                    error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
+                    if execution_mode == "multiprocessing":
+                        print(f"❌ {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
+                    else:
+                        log_error_with_context(batch_logger, e, "chunk processing", f"tentativo {attempt + 1}/{max_retries}")
+                    
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Backoff exponenziale
+                    else:
+                        raise
+                finally:
+                    cursor.close()
         except Exception as e:
             if attempt == max_retries - 1:
                 final_error = f"Errore nel processare chunk dopo {max_retries} tentativi: {e}"
@@ -1574,40 +1720,12 @@ def import_all_json_files(base_path, conn):
         global table_definitions
         table_definitions = analyze_json_structure(json_files)
         
-        # Usa una connessione temporanea per la creazione delle tabelle
-        tmp_conn = mysql.connector.connect(
-            host=MYSQL_HOST,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DATABASE,
-            charset='utf8mb4',
-            autocommit=True
-        )
-        create_dynamic_tables(tmp_conn, table_definitions)
-        tmp_conn.close()
+        # Usa DatabaseManager per la creazione delle tabelle
+        with DatabaseManager.get_connection() as tmp_conn:
+            create_dynamic_tables(tmp_conn, table_definitions)
         
-        # Pool di connessioni ridotto per stabilità (MONO-PROCESSO)
-        global connection_pool
-        connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-            pool_name="mypool",
-            pool_size=2,  # Solo 2 connessioni per mono-processo
-            host=MYSQL_HOST,
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DATABASE,
-            charset='utf8mb4',
-            autocommit=True,
-            connect_timeout=180,
-            use_pure=True,
-            ssl_disabled=True,
-            get_warnings=True,
-            raise_on_warnings=True,
-            consume_results=True,
-            buffered=True,
-            raw=False,
-            use_unicode=True,
-            auth_plugin='mysql_native_password'
-        )
+        # Inizializza il pool di connessioni centralizzato
+        DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
         
         log_resource_optimization(import_logger)
         
@@ -1619,13 +1737,11 @@ def import_all_json_files(base_path, conn):
             file_name = Path(json_file).name
             
             # Salta i file già processati con successo
-            conn_check = connection_pool.get_connection()
-            if is_file_processed(conn_check, file_name):
-                import_logger.info(f"⏭️ File già processato: {file_name}")
-                progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
-                conn_check.close()
-                continue
-            conn_check.close()
+            with DatabaseManager.get_pooled_connection() as conn_check:
+                if is_file_processed(conn_check, file_name):
+                    import_logger.info(f"⏭️ File già processato: {file_name}")
+                    progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
+                    continue
             
             # Conta i record nel file per il progresso
             file_record_count = 0
@@ -1692,9 +1808,8 @@ def import_all_json_files(base_path, conn):
                             continue
                     
                     # Marca il file come processato
-                    conn_mark = connection_pool.get_connection()
-                    mark_file_processed(conn_mark, file_name, processed_records_in_file)
-                    conn_mark.close()
+                    with DatabaseManager.get_pooled_connection() as conn_mark:
+                        mark_file_processed(conn_mark, file_name, processed_records_in_file)
                     
                     # Completa il tracking del file
                     progress_tracker.finish_file(processed_records_in_file)
@@ -1710,9 +1825,8 @@ def import_all_json_files(base_path, conn):
             except Exception as e:
                 error_message = str(e)
                 log_error_with_context(import_logger, e, "processing file", file_name)
-                conn_mark = connection_pool.get_connection()
-                mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
-                conn_mark.close()
+                with DatabaseManager.get_pooled_connection() as conn_mark:
+                    mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
         
         # Statistiche finali
         final_stats = progress_tracker.get_global_stats()
@@ -1841,9 +1955,12 @@ def main():
             # Verifica lo spazio disco
             check_disk_space()
             
-            conn = connect_mysql()
-            import_all_json_files(JSON_BASE_PATH, conn)
-            conn.close()
+            # Usa DatabaseManager per la connessione principale
+            with DatabaseManager.get_connection() as conn:
+                import_all_json_files(JSON_BASE_PATH, conn)
+            
+            # Chiudi il pool alla fine
+            DatabaseManager.close_pool()
             logger.info("Tutte le connessioni chiuse.")
     except Exception as e:
         log_error_with_context(logger, e, "main", "importazione MySQL")
