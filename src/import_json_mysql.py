@@ -38,11 +38,14 @@ MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
-BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 50000))
+BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 100000))  # Aumentato a 100k
 
-# Numero di thread per l'elaborazione parallela
-NUM_THREADS = multiprocessing.cpu_count()  # Usa il numero di core disponibili
-logger.info(f"🖥️  CPU cores disponibili: {NUM_THREADS}")
+# Ottimizzazione per 8 core
+NUM_THREADS = 16  # 2 thread per core per sfruttare meglio l'hyperthreading
+NUM_WORKERS = 8   # Numero di worker process per l'elaborazione parallela
+logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
+logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS}")
 
 # Directory temporanea per i file CSV
 TEMP_DIR = '/database/tmp'
@@ -51,20 +54,20 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.3  # Aumentato a 30% per evitare swap
+MEMORY_BUFFER_RATIO = 0.2  # Ridotto al 20% per sfruttare meglio la RAM
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.02   # Ridotto al 2% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.1     # Ridotto al 10% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.15    # Aumentato al 15% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Limita il chunk size massimo a 10000 record per evitare problemi con max_allowed_packet
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 10000)
+# Limita il chunk size massimo a 50000 record per evitare problemi con max_allowed_packet
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -194,7 +197,7 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
     processor.total_count = len(batch)
     
     # Dividi il batch in sub-batch più piccoli per ogni thread
-    sub_batch_size = max(1000, len(batch) // (NUM_THREADS * 2))  # Più sub-batch per thread
+    sub_batch_size = max(1000, len(batch) // (NUM_THREADS * 2))
     sub_batches = [batch[i:i + sub_batch_size] for i in range(0, len(batch), sub_batch_size)]
     
     # Crea una coda per i risultati
@@ -913,23 +916,43 @@ def import_all_json_files(base_path, conn):
     # Crea le tabelle dinamicamente
     create_dynamic_tables(conn, table_definitions)
     
-    cursor = conn.cursor()
-    memory_monitor = MemoryMonitor(USABLE_MEMORY_BYTES)
-    start_time = time.time()
-    total_records = 0
-    files_processed = 0
-    total_time_so_far = 0
-    last_progress_time = time.time()
-    progress_interval = 1.0  # Aggiorna il progresso ogni secondo
+    # Crea un pool di connessioni
+    connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+        pool_name="mypool",
+        pool_size=NUM_WORKERS,
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset='utf8mb4',
+        autocommit=True,
+        connect_timeout=180,
+        use_pure=True,
+        client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],
+        ssl_disabled=True,
+        get_warnings=True,
+        raise_on_warnings=True,
+        consume_results=True,
+        buffered=True,
+        raw=False,
+        allow_local_infile=True,
+        use_unicode=True,
+        auth_plugin='mysql_native_password'
+    )
     
-    try:
-        for idx, json_file in enumerate(json_files, 1):
-            file_name = os.path.basename(json_file)
-            
+    def process_file(file_info):
+        idx, json_file = file_info
+        file_name = os.path.basename(json_file)
+        
+        # Ottieni una connessione dal pool
+        conn = connection_pool.get_connection()
+        cursor = conn.cursor()
+        
+        try:
             # Salta i file già processati con successo
             if is_file_processed(conn, file_name):
                 logger.info(f"\n⏭️  File già processato: {file_name}")
-                continue
+                return
             
             file_start_time = time.time()
             file_records = 0
@@ -940,111 +963,54 @@ def import_all_json_files(base_path, conn):
             logger.info(f"📂 Processando file {idx}/{total_files}: {file_name}")
             logger.info("="*80)
             
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                            batch.append((record, file_name))
-                            file_records += 1
-                            total_records += 1
-                            
-                            # Aggiorna il progresso ogni secondo
-                            current_time = time.time()
-                            if current_time - last_progress_time >= progress_interval:
-                                elapsed = time.time() - file_start_time
-                                speed = file_records / elapsed if elapsed > 0 else 0
-                                total_elapsed = current_time - start_time
-                                avg_speed = total_records / total_elapsed if total_elapsed > 0 else 0
-                                
-                                logger.info(f"📊 Progresso: File {idx}/{total_files} | "
-                                          f"Record nel file: {file_records:,} | "
-                                          f"Velocità: {speed:.1f} record/s | "
-                                          f"Totale: {total_records:,} record ({avg_speed:.1f} record/s)")
-                                
-                                last_progress_time = current_time
-                            
-                            current_chunk_size = memory_monitor.get_chunk_size()
-                            if len(batch) >= current_chunk_size:
-                                try:
-                                    process_batch(cursor, batch, table_definitions, batch_id)
-                                    conn.commit()
-                                    batch = []
-                                    gc.collect()
-                                except ValueError as e:
-                                    if str(e) == "BATCH_TOO_LARGE":
-                                        # Riduci la dimensione del batch e riprova
-                                        memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
-                                            int(memory_monitor.current_chunk_size * 0.5))
-                                        logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
-                                        continue
-                                    raise
-                        except Exception as e:
-                            logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                            continue
-                
-                # Processa l'ultimo batch
-                if batch:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
                     try:
-                        process_batch(cursor, batch, table_definitions, batch_id)
-                        conn.commit()
-                    except ValueError as e:
-                        if str(e) == "BATCH_TOO_LARGE":
-                            # Riduci la dimensione del batch e riprova
-                            memory_monitor.current_chunk_size = max(MIN_CHUNK_SIZE, 
-                                int(memory_monitor.current_chunk_size * 0.5))
-                            logger.warning(f"\n🔄 Ridotto chunk size a {memory_monitor.current_chunk_size}")
-                            # Riprova con il batch ridotto
+                        record = json.loads(line)
+                        batch.append((record, file_name))
+                        file_records += 1
+                        
+                        if len(batch) >= BATCH_SIZE:
                             process_batch(cursor, batch, table_definitions, batch_id)
                             conn.commit()
-                
-                # Marca il file come processato con successo
-                mark_file_processed(conn, file_name, file_records)
-                
-            except Exception as e:
-                error_message = str(e)
-                logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
-                mark_file_processed(conn, file_name, file_records, 'failed', error_message)
-                continue
+                            batch = []
+                            gc.collect()
+                    except Exception as e:
+                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
+                        continue
+            
+            # Processa l'ultimo batch
+            if batch:
+                process_batch(cursor, batch, table_definitions, batch_id)
+                conn.commit()
+            
+            # Marca il file come processato con successo
+            mark_file_processed(conn, file_name, file_records)
             
             file_time = time.time() - file_start_time
-            total_time_so_far += file_time
-            files_processed += 1
-            avg_time_per_file = total_time_so_far / files_processed
-            remaining_files = total_files - files_processed
-            eta_seconds = avg_time_per_file * remaining_files
-            
-            logger.info("\n\n📈 Statistiche file:")
+            logger.info(f"\n✅ File completato: {file_name}")
             logger.info(f"   • Record processati: {file_records:,}")
-            logger.info(f"   • Tempo elaborazione: {str(int(file_time//60))}:{int(file_time%60):02d}")
-            logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
+            logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
+            logger.info(f"   • Velocità: {file_records/file_time:.1f} record/s")
             
-            logger.info("\n📊 Statistiche totali:")
-            logger.info(f"   • Record totali: {total_records:,}")
-            logger.info(f"   • File completati: {files_processed}/{total_files}")
-            logger.info(f"   • Completamento: {(files_processed/total_files*100):.1f}%")
-            logger.info(f"   • ETA stimata: {str(int(eta_seconds//60))}:{int(eta_seconds%60):02d}")
-            logger.info(f"   • Chunk size attuale: {memory_monitor.get_chunk_size()}")
-            
-            gc.collect()
-        
-        total_time = time.time() - start_time
-        logger.info("\n" + "="*80)
-        logger.info("✨ Importazione completata!")
-        logger.info("="*80)
-        logger.info(f"📊 Statistiche finali:")
-        logger.info(f"   • Record totali: {total_records:,}")
-        logger.info(f"   • File processati: {total_files}")
-        logger.info(f"   • Chunk size finale: {memory_monitor.get_chunk_size()}")
-        logger.info(f"   • Tempo totale: {str(int(total_time//60))}:{int(total_time%60):02d}")
-        logger.info(f"   • Velocità media: {total_records/total_time:.1f} record/s")
-        logger.info("="*80)
-    finally:
-        memory_monitor.stop()
-        cursor.close()
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
+            mark_file_processed(conn, file_name, file_records, 'failed', error_message)
+        finally:
+            cursor.close()
+            conn.close()
+    
+    # Crea un pool di processi per l'elaborazione parallela
+    with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
+        pool.map(process_file, enumerate(json_files, 1))
+    
+    logger.info("\n" + "="*80)
+    logger.info("✨ Importazione completata!")
+    logger.info("="*80)
 
 def main():
     try:
