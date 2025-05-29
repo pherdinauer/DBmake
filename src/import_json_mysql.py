@@ -322,7 +322,7 @@ class AdaptiveBatchSizer:
         self.performance_history = []
         self.adjustment_factor = 2.0  # Moltiplicatore MOLTO AGGRESSIVO (era 1.5)
         self.min_batch = 10000  # Aumentato da 5000
-        self.max_batch = 300000  # MASSICCIAMENTE aumentato da 100000 per utilizzare 11GB RAM!
+        self.max_batch = 1000000  # 🚀🚀🚀 UN MILIONE! (era 300000)
         
     def adjust_batch_size(self, current_ram_usage, processing_speed):
         """Aggiusta il batch size basato su utilizzo RAM e performance."""
@@ -378,26 +378,26 @@ def calculate_dynamic_insert_batch_size():
     if available_for_batch > 0:
         max_batch_from_memory = int(available_for_batch / estimated_record_size_bytes)
         
-        # Limiti di sicurezza MASSICCIAMENTE AUMENTATI
+        # Limiti di sicurezza ESTREMI
         min_batch = 10000   # Aumentato da 5000
-        max_batch = 300000  # MASSICCIAMENTE aumentato da 100000 per utilizzare 11GB!
+        max_batch = 1000000  # 🚀🚀🚀 UN MILIONE! (era 300000)
         
-        # Batch size MASSIMO AGGRESSIVO basato su utilizzo attuale
-        if current_usage_pct < 0.3:      # < 30% RAM usata → batch GIGANTESCO
-            batch_size = min(max_batch, max(200000, max_batch_from_memory))
-        elif current_usage_pct < 0.5:   # 30-50% RAM usata → batch massiccio
-            batch_size = min(250000, max(150000, max_batch_from_memory // 2))
-        elif current_usage_pct < 0.65:  # 50-65% RAM usata → batch molto alto
-            batch_size = min(200000, max(100000, max_batch_from_memory // 3))
-        elif current_usage_pct < 0.75:  # 65-75% RAM usata → batch alto
-            batch_size = min(150000, max(75000, max_batch_from_memory // 4))
-        else:                            # > 75% RAM usata → batch medio-alto
-            batch_size = min(100000, max(min_batch, max_batch_from_memory // 6))
+        # Batch size ESTREMO basato su utilizzo attuale
+        if current_usage_pct < 0.3:      # < 30% RAM usata → batch MOSTRUOSO
+            batch_size = min(max_batch, max(500000, max_batch_from_memory))
+        elif current_usage_pct < 0.5:   # 30-50% RAM usata → batch gigantesco
+            batch_size = min(800000, max(400000, max_batch_from_memory // 2))
+        elif current_usage_pct < 0.65:  # 50-65% RAM usata → batch massiccio
+            batch_size = min(600000, max(300000, max_batch_from_memory // 3))
+        elif current_usage_pct < 0.75:  # 65-75% RAM usata → batch molto alto
+            batch_size = min(400000, max(200000, max_batch_from_memory // 4))
+        else:                            # > 75% RAM usata → batch alto
+            batch_size = min(200000, max(min_batch, max_batch_from_memory // 6))
             
         return max(min_batch, min(batch_size, max_batch))
     else:
         # Se già oltre il 90%, usa batch ridotto ma ancora alto
-        return 50000  # Era 10000, ora 50000
+        return 100000  # Era 50000, ora 100000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV."""
