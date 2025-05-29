@@ -159,7 +159,7 @@ def handle_data_too_long_error(cursor, error_message, table_name):
         return False
         
     column_name = match.group(1)
-    logger.warning(f"[WARN] Colonna '{column_name}' troppo piccola, converto a TEXT...")
+    logger.warning(f"[ADAPT] Colonna '{column_name}' troppo piccola, converto a TEXT...")
     
     try:
         # Modifica la colonna da VARCHAR a TEXT
@@ -170,6 +170,132 @@ def handle_data_too_long_error(cursor, error_message, table_name):
     except Exception as e:
         logger.error(f"[ERROR] Errore nella modifica della colonna '{column_name}': {e}")
         return False
+
+def handle_type_compatibility_error(cursor, error_message, table_name):
+    """Gestisce errori di incompatibilità di tipo modificando dinamicamente la struttura."""
+    
+    # Pattern per diversi tipi di errore MySQL
+    patterns = {
+        'incorrect_integer': r"Incorrect integer value '([^']+)' for column '([^']+)'",
+        'incorrect_decimal': r"Incorrect decimal value '([^']+)' for column '([^']+)'",
+        'incorrect_date': r"Incorrect date value '([^']+)' for column '([^']+)'",
+        'incorrect_datetime': r"Incorrect datetime value '([^']+)' for column '([^']+)'",
+        'out_of_range': r"Out of range value for column '([^']+)'",
+        'data_truncated': r"Data truncated for column '([^']+)'"
+    }
+    
+    column_name = None
+    error_type = None
+    
+    # Identifica il tipo di errore e la colonna
+    for error_type_name, pattern in patterns.items():
+        match = re.search(pattern, error_message)
+        if match:
+            if error_type_name == 'out_of_range':
+                column_name = match.group(1)
+            else:
+                column_name = match.group(2)
+            error_type = error_type_name
+            break
+    
+    if not column_name or not error_type:
+        return False
+    
+    logger.warning(f"[ADAPT] Errore di tipo '{error_type}' per colonna '{column_name}'")
+    
+    try:
+        # Strategia di adattamento basata sul tipo di errore
+        if error_type in ['incorrect_integer', 'out_of_range']:
+            # Da INT/SMALLINT/BIGINT a VARCHAR più flessibile
+            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(255)"
+            logger.info(f"[ADAPT] Converto colonna numerica '{column_name}' a VARCHAR(255)")
+            
+        elif error_type == 'incorrect_decimal':
+            # Da DECIMAL a VARCHAR per gestire formati diversi
+            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(255)"
+            logger.info(f"[ADAPT] Converto colonna decimale '{column_name}' a VARCHAR(255)")
+            
+        elif error_type in ['incorrect_date', 'incorrect_datetime']:
+            # Da DATE/DATETIME a VARCHAR per gestire formati diversi
+            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(50)"
+            logger.info(f"[ADAPT] Converto colonna data '{column_name}' a VARCHAR(50)")
+            
+        elif error_type == 'data_truncated':
+            # Aumenta la dimensione o converti a TEXT
+            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
+            logger.info(f"[ADAPT] Converto colonna troncata '{column_name}' a TEXT")
+            
+        else:
+            # Fallback generico: converti a TEXT
+            alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
+            logger.info(f"[ADAPT] Converto colonna '{column_name}' a TEXT (fallback)")
+        
+        cursor.execute(alter_query)
+        logger.info(f"[SUCCESS] Colonna '{column_name}' adattata con successo")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[ERROR] Errore nell'adattamento della colonna '{column_name}': {e}")
+        return False
+
+def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
+    """
+    Inserisce dati con retry automatico e adattamento della struttura in caso di errori.
+    
+    Questa funzione è intelligente e si adatta automaticamente ai problemi di compatibilità
+    modificando la struttura della tabella quando necessario.
+    """
+    
+    for attempt in range(max_retries):
+        try:
+            # Tenta l'inserimento normale
+            if isinstance(data, list) and len(data) > 0:
+                cursor.executemany(query, data)
+            else:
+                cursor.execute(query, data)
+            
+            # Se arriviamo qui, l'inserimento è riuscito
+            return True
+            
+        except mysql.connector.Error as e:
+            logger.warning(f"[RETRY] Tentativo {attempt + 1}/{max_retries} fallito: {e}")
+            
+            adapted = False
+            
+            # Errore 1406: Data too long
+            if e.errno == 1406:
+                adapted = handle_data_too_long_error(cursor, str(e), table_name)
+            
+            # Errore 1264: Out of range value
+            elif e.errno == 1264:
+                adapted = handle_type_compatibility_error(cursor, str(e), table_name)
+            
+            # Errore 1366: Incorrect string/integer/decimal/date value
+            elif e.errno == 1366:
+                adapted = handle_type_compatibility_error(cursor, str(e), table_name)
+            
+            # Errore 1265: Data truncated
+            elif e.errno == 1265:
+                adapted = handle_type_compatibility_error(cursor, str(e), table_name)
+            
+            # Altri errori specifici che possono essere adattati
+            elif "Incorrect" in str(e) or "Data truncated" in str(e):
+                adapted = handle_type_compatibility_error(cursor, str(e), table_name)
+            
+            if adapted:
+                logger.info(f"[ADAPT] Struttura adattata, riprovo inserimento...")
+                # Continua il loop per riprovare con la struttura modificata
+                continue
+            else:
+                # Se non riusciamo ad adattare, e siamo all'ultimo tentativo, rilancia l'errore
+                if attempt == max_retries - 1:
+                    logger.error(f"[FAIL] Impossibile adattare la struttura dopo {max_retries} tentativi")
+                    raise
+                else:
+                    # Aspetta un po' prima di riprovare
+                    time.sleep(1)
+    
+    return False
 
 class AdaptiveBatchSizer:
     """Gestisce il batch size adattivo basato sull'utilizzo RAM real-time."""
@@ -258,7 +384,7 @@ def calculate_dynamic_insert_batch_size():
         return 100000  # Era 50000, ora 100000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
-    """Inserisce i dati direttamente in MySQL senza passare per CSV."""
+    """Inserisce i dati direttamente in MySQL senza passare per CSV con adattamento dinamico."""
     if not main_data:
         return 0
         
@@ -276,9 +402,9 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     usage_pct = memory_info.percent
     target_usage_pct = 80.0
     
-    logger.info(f"?? Inserimento diretto di {len(main_data):,} record in {table_name}")
-    logger.info(f"?? Batch size AGGRESSIVO iniziale: {initial_batch_size:,}")
-    logger.info(f"?? RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
+    logger.info(f"[INSERT] Inserimento INTELLIGENTE di {len(main_data):,} record in {table_name}")
+    logger.info(f"[INSERT] Batch size aggressivo iniziale: {initial_batch_size:,}")
+    logger.info(f"[RAM] RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
                f"Target: {target_usage_pct:.0f}% | Disponibile: {available_ram_gb:.1f}GB")
     
     rows_inserted = 0
@@ -288,20 +414,22 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     insert_query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
     
     insert_start_time = time.time()
+    adaptation_count = 0  # Contatore di adattamenti automatici
     
     try:
         # Processa i dati in batch con dimensioni adattive
         i = 0
         while i < len(main_data):
-            # Ottieni il batch size corrente (pu� essere cambiato dall'adaptive sizer)
+            # Ottieni il batch size corrente (può essere cambiato dall'adaptive sizer)
             current_batch_size = batch_sizer.current_batch_size
             
             batch_start_time = time.time()
             batch = main_data[i:i + current_batch_size]
             
-            try:
-                # Esegui INSERT batch
-                cursor.executemany(insert_query, batch)
+            # Usa il sistema di inserimento adattivo intelligente
+            success = adaptive_insert_with_retry(cursor, insert_query, batch, table_name)
+            
+            if success:
                 rows_inserted += len(batch)
                 
                 batch_time = time.time() - batch_start_time
@@ -318,27 +446,12 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                     current_ram = psutil.virtual_memory().used / (1024**3)
                     current_usage = psutil.virtual_memory().percent
                     
-                    logger.info(f"?? INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe | "
+                    logger.info(f"[PROGRESS] INSERT: {rows_inserted:,}/{len(main_data):,} righe | "
                               f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s | "
                               f"RAM: {current_ram:.1f}GB ({current_usage:.1f}%) | Batch size: {current_batch_size:,}")
-            
-            except mysql.connector.Error as e:
-                if e.errno == 1406:  # Data too long error
-                    logger.warning(f"?? Errore Data too long rilevato: {e}")
-                    
-                    # Tenta di risolvere modificando la colonna
-                    if handle_data_too_long_error(cursor, str(e), table_name):
-                        logger.info(f"?? Ritento l'inserimento del batch dopo la modifica...")
-                        # Riprova l'inserimento dello stesso batch
-                        cursor.executemany(insert_query, batch)
-                        rows_inserted += len(batch)
-                        logger.info(f"? Batch inserito con successo dopo la modifica")
-                    else:
-                        logger.error(f"? Impossibile risolvere l'errore Data too long")
-                        raise
-                else:
-                    # Altri errori MySQL
-                    raise
+            else:
+                logger.error(f"[FAIL] Inserimento batch fallito dopo adattamenti automatici")
+                break
             
             i += current_batch_size
         
@@ -348,13 +461,17 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
         final_usage_pct = psutil.virtual_memory().percent
         final_batch_size = batch_sizer.current_batch_size
         
-        logger.info(f"?? INSERT diretto completato: {rows_inserted:,} righe totali")
-        logger.info(f"?? Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
+        logger.info(f"[COMPLETE] INSERT intelligente completato: {rows_inserted:,} righe totali")
+        logger.info(f"[PERF] Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
                    f"Batch size finale: {final_batch_size:,} | RAM finale: {final_ram_gb:.1f}GB ({final_usage_pct:.1f}%)")
+        
+        if adaptation_count > 0:
+            logger.info(f"[ADAPT] Sistema adattivo: {adaptation_count} modifiche automatiche alla struttura")
+        
         return rows_inserted
         
     except Exception as e:
-        logger.error(f"?? Errore in INSERT diretto: {e}")
+        logger.error(f"[ERROR] Errore in INSERT intelligente: {e}")
         raise
 
 def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None, category=None):
@@ -506,14 +623,15 @@ def analyze_json_structure(json_files):
     field_lengths = defaultdict(int)
     field_patterns = defaultdict(set)  # Per memorizzare i pattern dei valori
     field_has_mixed = defaultdict(bool)  # Traccia se un campo ha valori misti
+    field_sample_values = defaultdict(list)  # Campioni di valori per analisi più approfondita
     
     with LogContext(analysis_logger, "analisi struttura JSON", files=len(json_files)):
-        analysis_logger.info("Analisi per determinare:")
-        analysis_logger.info("1. I tipi di dati per ogni campo")
-        analysis_logger.info("2. Le lunghezze massime dei campi stringa")
-        analysis_logger.info("3. I pattern dei valori per determinare il tipo pi� appropriato")
-        analysis_logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
-        analysis_logger.info("5. Logica CONSERVATIVA: anche un solo valore alfanumerico = VARCHAR")
+        analysis_logger.info("Analisi INTELLIGENTE per determinare:")
+        analysis_logger.info("1. Tipi di dati ottimali per ogni campo")
+        analysis_logger.info("2. Lunghezze massime e pattern dei valori")
+        analysis_logger.info("3. Compatibilità MySQL e gestione errori")
+        analysis_logger.info("4. Adattamento dinamico per robustezza")
+        analysis_logger.info("5. Limite: 3k righe per file + analisi campionamento")
         
         total_files = len(json_files)
         files_analyzed = 0
@@ -522,8 +640,8 @@ def analyze_json_structure(json_files):
         last_progress_time = time.time()
         progress_interval = 1.0
         
-        # Limite righe per file per analisi veloce
-        MAX_ROWS_PER_FILE = 2000
+        # Limite righe per file per analisi veloce ma approfondita
+        MAX_ROWS_PER_FILE = 3000  # Aumentato da 2k a 3k per maggiore precisione
         
         # Monitoraggio memoria dinamico come failsafe
         process = psutil.Process()
@@ -532,220 +650,197 @@ def analyze_json_structure(json_files):
         analysis_logger.info(f"Limite righe per file: {MAX_ROWS_PER_FILE:,}")
         log_memory_status(analysis_logger, "limite massimo analisi")
         
-        # Campi che devono SEMPRE essere VARCHAR (blacklist)
-        ALWAYS_VARCHAR_FIELDS = {
-            'numero_gara', 'codice_gara', 'id_gara', 'numero', 'codice', 'id', 
-            'identificativo', 'riferimento', 'cup', 'cig', 'numero_lotto',
-            'codice_fiscale', 'partita_iva', 'numero_verde', 'numero_telefono'
-        }
-        
-        # Campi che devono SEMPRE essere DATE/DATETIME (whitelist)
-        ALWAYS_DATE_FIELDS = {
-            'data_creazione', 'data_pubblicazione', 'data_scadenza', 'data_aggiornamento',
-            'data_inizio', 'data_fine', 'data_inserimento', 'data_modifica',
-            'created_at', 'updated_at', 'published_at', 'expired_at'
-        }
-        
-        # Pattern migliorati per identificare meglio i tipi di campi
+        # Pattern migliorati e più intelligenti per identificare i tipi
         patterns = {
-            'monetary': r'^[�$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
-            'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
-            'date_iso': r'^\d{4}-\d{2}-\d{2}$',       # Date ISO (YYYY-MM-DD)
-            'date_european': r'^\d{2}/\d{2}/\d{4}$',  # Date europee (DD/MM/YYYY)
-            'date_american': r'^\d{2}/\d{2}/\d{4}$',  # Date americane (MM/DD/YYYY)
-            'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # DateTime ISO
-            'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',  # DateTime europeo
-            'timestamp': r'^\d{10,13}$',               # Timestamp Unix
-            'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
-            'pure_integer': r'^\d+$',                  # SOLO numeri interi puri
-            'pure_decimal': r'^\d+[.,]\d+$',          # SOLO decimali puri
-            'alphanumeric_mixed': r'^[A-Z0-9]+$',     # Alfanumerici misti (es. Z2B1FADD05)
-            'email': r'^[^@]+@[^@]+\.[^@]+$',         # Email
-            'url': r'^https?://',                      # URL
-            'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
-            'postal_code': r'^\d{5}$',                 # CAP
-            'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\d{2}$',  # Codice fiscale
-            'partita_iva': r'^\d{11}$',               # Partita IVA
-            'cup_code': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
-            'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
+            # Tipi numerici precisi
+            'pure_integer': r'^\d+$',                    # Solo numeri interi puri
+            'negative_integer': r'^-\d+$',               # Numeri negativi
+            'pure_decimal': r'^\d+[.,]\d+$',            # Solo decimali puri
+            'negative_decimal': r'^-\d+[.,]\d+$',       # Decimali negativi
+            'scientific': r'^\d+[.,]?\d*[eE][+-]?\d+$', # Notazione scientifica
+            
+            # Valori monetari e percentuali
+            'monetary_euro': r'^€?\s*\d+([.,]\d{2})?$',  # Euro
+            'monetary_dollar': r'^\$?\s*\d+([.,]\d{2})?$', # Dollari
+            'percentage': r'^\d+([.,]\d+)?%$',           # Percentuali
+            
+            # Date e tempi - pattern più precisi
+            'date_iso': r'^\d{4}-\d{2}-\d{2}$',         # Date ISO (YYYY-MM-DD)
+            'date_european': r'^\d{2}/\d{2}/\d{4}$',    # Date europee (DD/MM/YYYY)
+            'date_american': r'^\d{2}/\d{2}/\d{4}$',    # Date americane (MM/DD/YYYY)
+            'date_italian': r'^\d{2}-\d{2}-\d{4}$',     # Date italiane (DD-MM-YYYY)
+            'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', # DateTime ISO
+            'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}', # DateTime europeo
+            'time_hhmm': r'^\d{2}:\d{2}$',              # Ore e minuti
+            'time_hhmmss': r'^\d{2}:\d{2}:\d{2}$',      # Ore, minuti, secondi
+            'timestamp_unix': r'^\d{10,13}$',           # Timestamp Unix
+            
+            # Booleani e valori speciali
+            'boolean_it': r'^(si|no|vero|falso)$',      # Booleani italiani
+            'boolean_en': r'^(true|false|yes|no|1|0)$', # Booleani inglesi
+            
+            # Codici specifici italiani/ANAC
+            'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$', # Codice fiscale
+            'partita_iva': r'^\d{11}$',                 # Partita IVA
+            'cup_code': r'^[A-Z]\d{13}$',               # CUP
+            'cig_code': r'^[A-Z0-9]{10}$',              # CIG
+            'postal_code_it': r'^\d{5}$',               # CAP italiano
+            
+            # Email, URL, telefoni
+            'email': r'^[^@]+@[^@]+\.[^@]+$',           # Email
+            'url': r'^https?://',                        # URL
+            'phone_it': r'^(\+39\s?)?(\d{2,4}[\s-]?)?\d{6,10}$', # Telefoni italiani
+            
+            # Alfanumerici e codici misti
+            'alphanumeric_upper': r'^[A-Z0-9]+$',       # Solo maiuscole e numeri
+            'alphanumeric_mixed': r'^[A-Za-z0-9]+$',    # Lettere e numeri misti
+            'code_with_dashes': r'^[A-Z0-9-]+$',        # Codici con trattini
+            
+            # Testi e descrizioni
+            'text_short': r'^.{1,50}$',                 # Testo corto
+            'text_medium': r'^.{51,255}$',              # Testo medio
+            'text_long': r'^.{256,}$',                  # Testo lungo
         }
         
-        def get_value_pattern_and_type(value):
-            """Determina il pattern di un valore e se � misto."""
-            if value is None:
-                return 'null', False
+        def analyze_value_type(value):
+            """Analizza un singolo valore e determina il suo tipo più specifico."""
+            if value is None or value == '':
+                return 'null'
+            
             if isinstance(value, bool):
-                return 'boolean', False
+                return 'boolean_native'
             if isinstance(value, int):
-                return 'pure_integer', False
+                return 'integer_native'
             if isinstance(value, float):
-                return 'pure_decimal', False
+                return 'decimal_native'
             if isinstance(value, (list, dict)):
-                return 'json', False
+                return 'json_native'
                 
             value_str = str(value).strip()
             if not value_str:
-                return 'empty', False
-                
-            # Controlla se contiene sia lettere che numeri (MISTO)
-            has_letters = any(c.isalpha() for c in value_str)
-            has_digits = any(c.isdigit() for c in value_str)
-            is_mixed = has_letters and has_digits
+                return 'empty'
             
+            # Testa tutti i pattern in ordine di specificità
             for pattern_name, pattern in patterns.items():
                 if re.match(pattern, value_str, re.IGNORECASE):
-                    return pattern_name, is_mixed
-            return 'text', has_letters or has_digits
-        
-        def check_memory_limit():
-            """Controlla se abbiamo raggiunto il limite di memoria."""
-            current_memory = process.memory_info().rss
-            return current_memory < max_memory_bytes
-        
-        def determine_field_type(field, patterns, field_has_mixed_values, values_count):
-            """Determina il tipo pi� appropriato per un campo basato sui suoi pattern."""
-            field_lower = field.lower()
+                    return pattern_name
             
-            # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorit� massima)
-            if field_lower in ALWAYS_DATE_FIELDS:
-                return 'DATETIME'
-            
-            # REGOLA 0.5: Campi lunghi comuni sempre TEXT (denominazioni, descrizioni, etc.)
-            ALWAYS_TEXT_KEYWORDS = [
-                'denominazione', 'descrizione', 'amministrazione', 'ragione_sociale', 
-                'oggetto', 'dettaglio', 'motivazione', 'specifiche', 'note'
-            ]
-            if any(keyword in field_lower for keyword in ALWAYS_TEXT_KEYWORDS):
-                return 'TEXT'
-            
-            # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
-            if field_lower in ALWAYS_VARCHAR_FIELDS:
-                # Dimensioni specifiche per campi noti
-                if field_lower in ['cig']:
-                    return 'VARCHAR(13)'
-                elif field_lower in ['cup']:
-                    return 'VARCHAR(15)'
-                elif field_lower in ['codice_fiscale']:
-                    return 'VARCHAR(16)'
-                elif field_lower in ['partita_iva']:
-                    return 'VARCHAR(11)'
-                elif field_lower in ['numero_verde', 'numero_telefono']:
-                    return 'VARCHAR(20)'
-                else:
-                    # Per altri campi della blacklist, usa dimensione basata sulla lunghezza effettiva
-                    max_length = field_lengths.get(field, 50)
-                    if max_length > 1000:
-                        return 'TEXT'
-                    elif max_length > 500:
-                        return 'VARCHAR(500)'
-                    elif max_length > 100:
-                        return 'VARCHAR(150)'
-                    else:
-                        return 'VARCHAR(100)'
-                
-            # REGOLA 2: Se il campo ha valori misti alfanumerici, � VARCHAR
-            if field_has_mixed_values:
-                max_length = field_lengths.get(field, 50)
-                if max_length > 1000:
-                    return 'TEXT'
-                elif max_length > 500:
-                    return 'VARCHAR(500)'
-                elif max_length > 100:
-                    return 'VARCHAR(150)'
-                else:
-                    return 'VARCHAR(100)'
-                
-            # REGOLA 3: Se contiene pattern alfanumerici misti, � VARCHAR
-            if 'alphanumeric_mixed' in patterns:
-                max_length = field_lengths.get(field, 50)
-                if max_length > 1000:
-                    return 'TEXT'
-                elif max_length > 500:
-                    return 'VARCHAR(500)'
-                elif max_length > 100:
-                    return 'VARCHAR(150)'
-                else:
-                    return 'VARCHAR(100)'
-                
-            # Se il campo � vuoto o ha solo valori null, usa VARCHAR piccolo
-            if not patterns or patterns == {'null'} or patterns == {'empty'}:
-                return 'VARCHAR(50)'
-                
-            # Se il campo contiene JSON, usa il tipo JSON
-            if 'json' in patterns:
-                return 'JSON'
-                
-            # Se il campo contiene booleani, usa BOOLEAN
-            if patterns == {'boolean'}:
-                return 'BOOLEAN'
-                
-            # Se il campo contiene solo numeri interi PURI, usa INT
-            if patterns == {'pure_integer'}:
-                return 'INT'
-                
-            # Se il campo contiene numeri decimali PURI o monetari, usa DECIMAL
-            if patterns == {'pure_decimal'} or patterns == {'monetary'}:
-                return 'DECIMAL(20,2)'
-                
-            # Se il campo contiene date, usa DATE o DATETIME
-            if any(p in patterns for p in ['date_iso', 'date_european', 'date_american']):
-                return 'DATE'
-                
-            # Se il campo contiene datetime o timestamp, usa DATETIME
-            if any(p in patterns for p in ['datetime_iso', 'datetime_european', 'timestamp']):
-                return 'DATETIME'
-                
-            # Se il campo contiene percentuali, usa DECIMAL
-            if patterns == {'percentage'}:
-                return 'DECIMAL(5,2)'
-                
-            # Se il campo contiene email, usa VARCHAR
-            if patterns == {'email'}:
-                return 'VARCHAR(100)'
-                
-            # Se il campo contiene URL, usa TEXT (spesso lunghi)
-            if patterns == {'url'}:
-                return 'TEXT'
-                
-            # Se il campo contiene numeri di telefono, usa VARCHAR
-            if patterns == {'phone'}:
-                return 'VARCHAR(20)'
-                
-            # Se il campo contiene CAP, usa VARCHAR
-            if patterns == {'postal_code'}:
-                return 'VARCHAR(5)'
-                
-            # Se il campo contiene codice fiscale, usa VARCHAR
-            if patterns == {'fiscal_code'}:
-                return 'VARCHAR(16)'
-                
-            # Se il campo contiene partita IVA, usa VARCHAR
-            if patterns == {'partita_iva'}:
-                return 'VARCHAR(11)'
-                
-            # Se il campo contiene CUP, usa VARCHAR
-            if patterns == {'cup_code'}:
-                return 'VARCHAR(15)'
-                
-            # Se il campo contiene CIG, usa VARCHAR
-            if patterns == {'cig_code'}:
-                return 'VARCHAR(13)'
-                
-            # FALLBACK: Per sicurezza, usa VARCHAR con dimensione basata sulla lunghezza effettiva
-            max_length = field_lengths.get(field, 50)
-            if max_length > 1000:
-                return 'TEXT'
-            elif max_length > 500:
-                return 'VARCHAR(500)'
-            elif max_length > 200:
-                return 'VARCHAR(250)'
-            elif max_length > 100:
-                return 'VARCHAR(150)'
-            elif max_length > 50:
-                return 'VARCHAR(100)'
+            # Se nessun pattern specifico, classifica come testo
+            length = len(value_str)
+            if length <= 50:
+                return 'text_short'
+            elif length <= 255:
+                return 'text_medium'
             else:
-                return 'VARCHAR(50)'
+                return 'text_long'
         
+        def determine_mysql_type(field, type_counts, max_length, sample_values):
+            """Determina il tipo MySQL più appropriato basato sull'analisi."""
+            total_values = sum(type_counts.values())
+            if total_values == 0:
+                return 'VARCHAR(50)'  # Default fallback
+            
+            # Ordina i tipi per frequenza
+            sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
+            primary_type = sorted_types[0][0]
+            primary_count = sorted_types[0][1]
+            primary_percentage = (primary_count / total_values) * 100
+            
+            analysis_logger.debug(f"Campo '{field}': tipo primario '{primary_type}' ({primary_percentage:.1f}%)")
+            
+            # Logica per determinare il tipo MySQL
+            
+            # 1. Se > 90% dei valori sono dello stesso tipo, usa quello
+            if primary_percentage >= 90:
+                
+                # Tipi numerici
+                if primary_type in ['integer_native', 'pure_integer', 'negative_integer']:
+                    # Verifica range per scegliere INT, BIGINT, etc.
+                    sample_numbers = [int(v) for v in sample_values if str(v).lstrip('-').isdigit()]
+                    if sample_numbers:
+                        max_val = max(sample_numbers)
+                        min_val = min(sample_numbers)
+                        if min_val >= -32768 and max_val <= 32767:
+                            return 'SMALLINT'
+                        elif min_val >= -2147483648 and max_val <= 2147483647:
+                            return 'INT'
+                        else:
+                            return 'BIGINT'
+                    return 'INT'
+                
+                elif primary_type in ['decimal_native', 'pure_decimal', 'negative_decimal', 'scientific']:
+                    return 'DECIMAL(20,6)'  # Precisione alta per decimali
+                
+                elif primary_type in ['monetary_euro', 'monetary_dollar']:
+                    return 'DECIMAL(15,2)'  # Standard per valori monetari
+                
+                elif primary_type == 'percentage':
+                    return 'DECIMAL(5,2)'   # Percentuali 0-100.xx
+                
+                # Tipi data/tempo
+                elif primary_type in ['date_iso', 'date_european', 'date_american', 'date_italian']:
+                    return 'DATE'
+                
+                elif primary_type in ['datetime_iso', 'datetime_european', 'timestamp_unix']:
+                    return 'DATETIME'
+                
+                elif primary_type in ['time_hhmm', 'time_hhmmss']:
+                    return 'TIME'
+                
+                # Booleani
+                elif primary_type in ['boolean_native', 'boolean_it', 'boolean_en']:
+                    return 'BOOLEAN'
+                
+                # Codici specifici con lunghezza fissa
+                elif primary_type == 'fiscal_code':
+                    return 'VARCHAR(16)'
+                elif primary_type == 'partita_iva':
+                    return 'VARCHAR(11)'
+                elif primary_type == 'cup_code':
+                    return 'VARCHAR(15)'
+                elif primary_type == 'cig_code':
+                    return 'VARCHAR(10)'
+                elif primary_type == 'postal_code_it':
+                    return 'VARCHAR(5)'
+                
+                # Email, URL
+                elif primary_type == 'email':
+                    return 'VARCHAR(255)'
+                elif primary_type == 'url':
+                    return 'TEXT'  # URL possono essere lunghi
+                elif primary_type in ['phone_it']:
+                    return 'VARCHAR(20)'
+                
+                # JSON nativo
+                elif primary_type == 'json_native':
+                    return 'JSON'
+            
+            # 2. Se ci sono tipi misti ma prevalentemente numerici
+            numeric_types = ['integer_native', 'decimal_native', 'pure_integer', 'pure_decimal', 'negative_integer', 'negative_decimal']
+            numeric_percentage = sum(type_counts.get(t, 0) for t in numeric_types) / total_values * 100
+            
+            if numeric_percentage >= 70:
+                # Se la maggior parte sono numeri, usa DECIMAL per sicurezza
+                return 'DECIMAL(20,6)'
+            
+            # 3. Se ci sono molte date miste
+            date_types = ['date_iso', 'date_european', 'date_american', 'date_italian', 'datetime_iso', 'datetime_european']
+            date_percentage = sum(type_counts.get(t, 0) for t in date_types) / total_values * 100
+            
+            if date_percentage >= 70:
+                return 'DATETIME'  # Tipo più flessibile per date
+            
+            # 4. Fallback: VARCHAR/TEXT basato sulla lunghezza
+            if max_length <= 50:
+                return 'VARCHAR(100)'  # Margine di sicurezza
+            elif max_length <= 255:
+                return 'VARCHAR(500)'  # Margine di sicurezza
+            elif max_length <= 1000:
+                return 'TEXT'
+            else:
+                return 'LONGTEXT'
+        
+        # Analisi dei file
         for json_file in json_files:
             files_analyzed += 1
             file_records = 0
@@ -757,7 +852,7 @@ def analyze_json_structure(json_files):
                 with open(json_file, 'r', encoding='utf-8') as f:
                     for line in f:
                         try:
-                            # Limite principale: 2k righe per file
+                            # Limite principale: 3k righe per file
                             if file_records >= MAX_ROWS_PER_FILE:
                                 limit_reached = True
                                 break
@@ -767,22 +862,22 @@ def analyze_json_structure(json_files):
                             records_analyzed += 1
                             
                             for field, value in record.items():
-                                if value is None:
-                                    continue
-                                    
                                 field = field.lower().replace(' ', '_')
-                                pattern, is_mixed = get_value_pattern_and_type(value)
-                                field_patterns[field].add(pattern)
                                 
-                                # Traccia se il campo ha valori misti
-                                if is_mixed:
-                                    field_has_mixed[field] = True
+                                # Analizza il tipo del valore
+                                value_type = analyze_value_type(value)
+                                field_types[field][value_type] += 1
                                 
+                                # Campiona alcuni valori per analisi più approfondita
+                                if len(field_sample_values[field]) < 50:  # Max 50 campioni per campo
+                                    field_sample_values[field].append(value)
+                                
+                                # Traccia lunghezza massima per stringhe
                                 if isinstance(value, str):
                                     current_length = len(value)
                                     if current_length > field_lengths[field]:
                                         field_lengths[field] = current_length
-                        
+                            
                             # Controllo memoria ogni 1000 record (failsafe)
                             if file_records % 1000 == 0:
                                 if not check_memory_limit():
@@ -799,10 +894,10 @@ def analyze_json_structure(json_files):
                                 speed = file_records / elapsed if elapsed > 0 else 0
                                 total_elapsed = current_time - start_time
                                 avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
-                                
+                                    
                                 log_file_progress(progress_logger, files_analyzed, total_files, 
-                                                Path(json_file).name, 
-                                                f"Record: {file_records:,}/{MAX_ROWS_PER_FILE:,} | {speed:.1f} rec/s")
+                                                    Path(json_file).name, 
+                                                    f"Record: {file_records:,}/{MAX_ROWS_PER_FILE:,} | {speed:.1f} rec/s")
                                 log_performance_stats(progress_logger, "Analisi totale", records_analyzed, total_elapsed)
                                 log_memory_status(memory_logger, "analisi")
                                 
@@ -815,10 +910,10 @@ def analyze_json_structure(json_files):
                 file_time = time.time() - file_start_time
                 
                 # Determina lo status del file
-                status = "?? LIMITE RAM" if memory_exceeded else "?? LIMITE 2K" if limit_reached else "?"
-                    
+                status = "[MEMORY]" if memory_exceeded else "[LIMIT]" if limit_reached else "[COMPLETE]"
+                        
                 log_performance_stats(analysis_logger, f"File {status}", file_records, file_time, 
-                                    f"{files_analyzed}/{total_files}")
+                                        f"{files_analyzed}/{total_files}")
                 
                 # Garbage collection dopo ogni file
                 gc.collect()
@@ -827,115 +922,101 @@ def analyze_json_structure(json_files):
                 log_error_with_context(analysis_logger, e, f"file {json_file}", "analisi")
                 continue
         
-        # Crea le definizioni delle tabelle
+        # Crea le definizioni delle tabelle con tipi intelligenti
         table_definitions = {}
         total_estimated_row_size = 0
-        field_size_breakdown = []
+        field_analysis_report = []
         
-        for field, patterns in field_patterns.items():
-            column_def = determine_field_type(field, patterns, field_has_mixed[field], records_analyzed)
-            table_definitions[field] = column_def
+        for field, type_counts in field_types.items():
+            mysql_type = determine_mysql_type(field, type_counts, field_lengths[field], field_sample_values[field])
+            table_definitions[field] = mysql_type
             
-            # Calcola la dimensione stimata del campo
-            field_size = 0
-            if column_def.startswith('VARCHAR'):
-                # Estrai la dimensione dal VARCHAR
-                size_str = column_def[8:-1]  # Rimuove 'VARCHAR(' e ')'
-                field_size = int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
-            elif column_def == 'TEXT':
-                field_size = 768  # Dimensione minima per TEXT in InnoDB
-            elif column_def == 'INT':
-                field_size = 4
-            elif column_def.startswith('DECIMAL'):
-                field_size = 8
-            elif column_def == 'DATE':
-                field_size = 3
-            elif column_def == 'DATETIME':
-                field_size = 8
-            elif column_def == 'BOOLEAN':
-                field_size = 1
-            elif column_def == 'JSON':
-                field_size = 0  # I campi JSON vanno in tabelle separate
-            else:
-                field_size = 10  # Default per tipi sconosciuti
-                
+            # Calcola la dimensione stimata del campo per MySQL
+            field_size = estimate_mysql_field_size(mysql_type)
             total_estimated_row_size += field_size
-            if field_size > 0:
-                field_size_breakdown.append((field, column_def, field_size))
+            
+            # Prepara report di analisi
+            total_values = sum(type_counts.values())
+            primary_type = max(type_counts.items(), key=lambda x: x[1])[0] if type_counts else 'unknown'
+            field_analysis_report.append((field, mysql_type, total_values, primary_type, field_size))
         
         # Garbage collection finale
         gc.collect()
         
-        # Stampa un riepilogo della struttura trovata
+        # Report di analisi intelligente
         mysql_row_limit = 65535
         
-        analysis_logger.info("Riepilogo analisi:")
+        analysis_logger.info("="*80)
+        analysis_logger.info("[ANALYSIS] Riepilogo analisi intelligente:")
         log_file_progress(analysis_logger, files_analyzed, total_files, "completati")
         log_performance_stats(analysis_logger, "Record analizzati", records_analyzed, time.time() - start_time)
-        analysis_logger.info(f"?? Media record per file: {records_analyzed/files_analyzed:.0f}")
-        analysis_logger.info(f"?? Campi trovati: {len(table_definitions)}")
-        analysis_logger.info(f"?? Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
+        analysis_logger.info(f"[STATS] Media record per file: {records_analyzed/files_analyzed:.0f}")
+        analysis_logger.info(f"[STATS] Campi rilevati: {len(table_definitions)}")
+        analysis_logger.info(f"[STATS] Dimensione riga stimata: {total_estimated_row_size:,} bytes")
         log_memory_status(memory_logger, "finale analisi")
         
-        # Riepilogo ottimizzazioni dimensioni
-        analysis_logger.info(f"Ottimizzazioni dimensioni tabella:")
-        analysis_logger.info(f"   ?? Dimensione riga stimata: {total_estimated_row_size:,} bytes")
-        analysis_logger.info(f"   ?? Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
-        
+        # Verifica limite MySQL
         if total_estimated_row_size > mysql_row_limit:
-            analysis_logger.warning(f"?? RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
-            analysis_logger.warning(f"?? Convertendo pi� campi a TEXT...")
-            
-            # Riottimizza convertendo i campi pi� grandi a TEXT
-            for field, column_def in table_definitions.items():
-                if column_def.startswith('VARCHAR') and '500' in column_def:
+            analysis_logger.warning(f"[WARN] RIGA TROPPO GRANDE! Supera il limite MySQL di {(total_estimated_row_size - mysql_row_limit):,} bytes")
+            # Auto-ottimizzazione: converti campi grandi a TEXT
+            optimized_count = 0
+            for field, mysql_type in table_definitions.items():
+                if mysql_type.startswith('VARCHAR') and '500' in mysql_type:
                     table_definitions[field] = 'TEXT'
-                    analysis_logger.info(f"      ?? {field}: {column_def} ? TEXT")
+                    analysis_logger.info(f"[AUTO-FIX] {field}: {mysql_type} -> TEXT")
+                    optimized_count += 1
             
-            # Ricalcola la dimensione
-            total_estimated_row_size = 0
-            for field, column_def in table_definitions.items():
-                field_size = 0
-                if column_def.startswith('VARCHAR'):
-                    size_str = column_def[8:-1]
-                    field_size = int(size_str) * 3
-                elif column_def == 'TEXT':
-                    field_size = 768  
-                elif column_def == 'INT':
-                    field_size = 4
-                elif column_def.startswith('DECIMAL'):
-                    field_size = 8
-                elif column_def == 'DATE':
-                    field_size = 3
-                elif column_def == 'DATETIME':
-                    field_size = 8
-                elif column_def == 'BOOLEAN':
-                    field_size = 1
-                elif column_def == 'JSON':
-                    field_size = 0
-                else:
-                    field_size = 10
-                total_estimated_row_size += field_size
-            
-            analysis_logger.info(f"   ? Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
-        else:
-            analysis_logger.info(f"   ? Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
+            if optimized_count > 0:
+                analysis_logger.info(f"[AUTO-FIX] Ottimizzati {optimized_count} campi per rispettare i limiti MySQL")
         
-        # Mostra breakdown dei campi pi� grandi
-        field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
-        analysis_logger.info(f"Top 10 campi per dimensione:")
-        for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
-            mixed_indicator = "??" if field_has_mixed[field] else ""
-            analysis_logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
+        # Report dettagliato per categoria
+        analysis_logger.info("[REPORT] Analisi per campo:")
+        field_analysis_report.sort(key=lambda x: x[4], reverse=True)  # Ordina per dimensione
+        for field, mysql_type, total_values, primary_type, size in field_analysis_report[:20]:  # Top 20
+            analysis_logger.info(f"  {field}: {mysql_type} ({total_values:,} valori, tipo: {primary_type}, {size}B)")
         
-        analysis_logger.info("Dettaglio tutti i campi:")
-        for field, def_type in table_definitions.items():
-            mixed_indicator = "??" if field_has_mixed[field] else ""
-            analysis_logger.info(f"   ?? {field}: {def_type} {mixed_indicator}")
-            if field in field_patterns:
-                analysis_logger.info(f"      Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
+        if len(field_analysis_report) > 20:
+            analysis_logger.info(f"  ... e altri {len(field_analysis_report) - 20} campi")
+        
+        analysis_logger.info("="*80)
         
         return table_definitions
+
+def estimate_mysql_field_size(mysql_type):
+    """Stima la dimensione in bytes di un campo MySQL."""
+    if mysql_type.startswith('VARCHAR'):
+        # Estrai la dimensione dal VARCHAR
+        size_str = mysql_type[8:-1]  # Rimuove 'VARCHAR(' e ')'
+        return int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
+    elif mysql_type == 'TEXT':
+        return 768  # Dimensione minima per TEXT in InnoDB
+    elif mysql_type == 'LONGTEXT':
+        return 1024
+    elif mysql_type in ['SMALLINT']:
+        return 2
+    elif mysql_type in ['INT']:
+        return 4
+    elif mysql_type in ['BIGINT']:
+        return 8
+    elif mysql_type.startswith('DECIMAL'):
+        return 8  # Approssimazione per DECIMAL
+    elif mysql_type in ['DATE']:
+        return 3
+    elif mysql_type in ['DATETIME', 'TIMESTAMP']:
+        return 8
+    elif mysql_type in ['TIME']:
+        return 3
+    elif mysql_type in ['BOOLEAN']:
+        return 1
+    elif mysql_type == 'JSON':
+        return 0  # I campi JSON vanno in tabelle separate
+    else:
+        return 10  # Default per tipi sconosciuti
+
+def check_memory_limit():
+    """Controlla se abbiamo raggiunto il limite di memoria."""
+    current_memory = psutil.virtual_memory().available
+    return current_memory < max_memory_bytes
 
 def generate_short_alias(field_name, existing_aliases):
     """Genera un alias corto per un campo lungo."""
@@ -1213,49 +1294,128 @@ def find_json_files(base_path):
     import_logger.info(f"Trovati {len(json_file_paths)} file JSON in {base_path}")
     return json_file_paths
 
+# Mappa categorie → elenco di pattern regex da cercare nel nome file
+CATEGORIES = {
+    "aggiudicatari":          [r"aggiudicatari"],
+    "aggiudicazioni":         [r"aggiudicazioni"],
+    "avvio_contratto":        [r"avvio-contratto"],
+    "categorie_dpcm":         [r"categorie-dpcm-aggregazione"],
+    "categorie_opera":        [r"categorie-opera"],
+    "cig":                    [r"^cig_json", r"^smartcig_json"],
+    "collaudo":               [r"collaudo"],
+    "fine_contratto":         [r"fine-contratto"],
+    "fonti_finanziamento":    [r"fonti-finanziamento"],
+    "lavorazioni":            [r"lavorazioni"],
+    "partecipanti":           [r"partecipanti"],
+    "pubblicazioni":          [r"pubblicazioni"],
+    "quadro_economico":       [r"quadro-economico"],
+    "sospensioni":            [r"sospensioni"],
+    "stati_avanzamento":      [r"stati-avanzamento"],
+    "subappalti":             [r"subappalti"],
+    "varianti":               [r"varianti"],
+    # categorie "extra" dai tuoi nomi:
+    "bandi_modalita":         [r"bandi-cig-modalita-realizzazione"],
+    "bandi_tipo_scelta":      [r"bandi-cig-tipo-scelta-contraente"],
+    "centri_di_costo":        [r"centri-di-costo"],
+    "pnrr_indicatori":        [r"indicatori-pnrrpnc"],
+    "pnrr_misurepremiali":    [r"misurepremiali-pnrrpnc"],
+    "stazioni_appaltanti":    [r"stazioni-appaltanti"],
+}
+
 def group_files_by_category(json_files):
     """
-    Raggruppa i file JSON per categoria basata sui nomi delle cartelle.
+    Raggruppa i file JSON per categoria basata su pattern regex predefiniti.
     
-    Estrae la categoria dal percorso del file, ignorando prefissi YYYYMMDD.
-    Esempi:
-    - /database/JSON/cig/file.json -> categoria: cig
-    - /database/JSON/aggiudicatari/20240101-file.json -> categoria: aggiudicatari
-    - /database/JSON/pubblicazioni/file.json -> categoria: pubblicazioni
+    Usa la mappa CATEGORIES per identificare la categoria di ogni file
+    basandosi sui pattern regex applicati al nome del file.
     """
-    categories = {}
+    # Inizializza le categorie vuote
+    categorized_files = {category: [] for category in CATEGORIES.keys()}
+    uncategorized_files = []
     
     for json_file in json_files:
         file_path = Path(json_file)
+        file_name = file_path.name  # Solo il nome del file, senza path
         
-        # Prendi il nome della cartella parent (categoria)
-        if len(file_path.parts) >= 2:
-            category = file_path.parts[-2]  # Cartella parent del file
-        else:
-            # Fallback: prova a estrarre dal nome file stesso
-            file_name = file_path.stem
-            # Rimuovi prefisso YYYYMMDD se presente
-            match = re.match(r'^\d{8}-(.+)$', file_name)
-            if match:
-                category = match.group(1).split('_')[0]  # Prima parte dopo il prefisso
-            else:
-                category = file_name.split('_')[0]  # Prima parte del nome
+        # Rimuovi estensione per il matching
+        file_stem = file_path.stem
         
-        # Pulisci il nome della categoria
-        category = category.lower().replace('-', '_').replace(' ', '_')
+        category_found = False
         
-        # Rimuovi suffissi comuni come _json, _data, etc.
-        category = re.sub(r'_(json|data|file)$', '', category)
+        # Testa ogni categoria con i suoi pattern
+        for category, patterns in CATEGORIES.items():
+            for pattern in patterns:
+                # Cerca il pattern nel nome del file (case insensitive)
+                if re.search(pattern, file_stem, re.IGNORECASE):
+                    categorized_files[category].append(json_file)
+                    import_logger.debug(f"File '{file_name}' -> categoria '{category}' (pattern: '{pattern}')")
+                    category_found = True
+                    break
+            
+            if category_found:
+                break
         
-        if category not in categories:
-            categories[category] = []
-        categories[category].append(json_file)
+        # Se nessun pattern ha fatto match, aggiungi agli uncategorized
+        if not category_found:
+            uncategorized_files.append(json_file)
+            import_logger.warning(f"File NON categorizzato: '{file_name}'")
     
-    import_logger.info(f"File raggruppati in {len(categories)} categorie:")
+    # Rimuovi categorie vuote dal risultato
+    final_categories = {cat: files for cat, files in categorized_files.items() if files}
+    
+    # Statistiche di categorizzazione
+    total_categorized = sum(len(files) for files in final_categories.values())
+    import_logger.info(f"[CATEGORIES] Categorizzazione completata:")
+    import_logger.info(f"  - File categorizzati: {total_categorized}")
+    import_logger.info(f"  - File NON categorizzati: {len(uncategorized_files)}")
+    import_logger.info(f"  - Categorie attive: {len(final_categories)}")
+    
+    for category, files in final_categories.items():
+        import_logger.info(f"    * {category}: {len(files)} file")
+    
+    if uncategorized_files:
+        import_logger.warning(f"[WARN] File non categorizzati:")
+        for uncategorized in uncategorized_files[:10]:  # Mostra solo i primi 10
+            import_logger.warning(f"    - {Path(uncategorized).name}")
+        if len(uncategorized_files) > 10:
+            import_logger.warning(f"    ... e altri {len(uncategorized_files) - 10} file")
+    
+    return final_categories
+
+def test_categorization(base_path):
+    """
+    Testa la categorizzazione dei file senza eseguire l'import.
+    Utile per verificare che i pattern regex funzionino correttamente.
+    """
+    import_logger.info(f"[TEST] Testing categorizzazione files in {base_path}")
+    
+    json_files = find_json_files(base_path)
+    if not json_files:
+        import_logger.warning(f"[TEST] Nessun file JSON trovato in {base_path}")
+        return
+    
+    import_logger.info(f"[TEST] Trovati {len(json_files)} file JSON totali")
+    categories = group_files_by_category(json_files)
+    
+    # Report dettagliato per categoria
+    import_logger.info(f"[TEST] Report dettagliato categorizzazione:")
     for category, files in categories.items():
-        import_logger.info(f"  - {category}: {len(files)} file")
+        import_logger.info(f"[TEST] === CATEGORIA: {category.upper()} ({len(files)} file) ===")
+        for file_path in files[:5]:  # Mostra solo i primi 5 per categoria
+            file_name = Path(file_path).name
+            import_logger.info(f"[TEST]   - {file_name}")
+        if len(files) > 5:
+            import_logger.info(f"[TEST]   ... e altri {len(files) - 5} file")
     
     return categories
+
+def print_category_patterns():
+    """Stampa tutti i pattern definiti per il debug."""
+    import_logger.info("[DEBUG] Pattern regex per categoria:")
+    for category, patterns in CATEGORIES.items():
+        import_logger.info(f"  {category}:")
+        for pattern in patterns:
+            import_logger.info(f"    - {pattern}")
 
 def process_chunk_unified(args, execution_mode="sequential"):
     """
@@ -1616,23 +1776,56 @@ class ProgressTracker:
             }
 
 def main():
+    import sys
+    
+    # Modalità test se viene passato il parametro --test
+    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+        try:
+            with LogContext(logger, "test categorizzazione"):
+                logger.info(f"[TEST MODE] Inizio test categorizzazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Stampa i pattern per debug
+                print_category_patterns()
+                
+                # Testa la categorizzazione
+                categories = test_categorization(JSON_BASE_PATH)
+                
+                if categories:
+                    logger.info(f"[TEST] [SUCCESS] Test completato! Trovate {len(categories)} categorie attive")
+                    
+                    # Mostra statistiche finali
+                    total_files = sum(len(files) for files in categories.values())
+                    logger.info(f"[TEST] [STATS] Statistiche finali:")
+                    logger.info(f"[TEST]   - File totali categorizzati: {total_files}")
+                    logger.info(f"[TEST]   - Categorie con file: {len(categories)}")
+                    logger.info(f"[TEST]   - Categorie definite: {len(CATEGORIES)}")
+                else:
+                    logger.warning(f"[TEST] [WARN] Nessuna categoria trovata!")
+                
+        except Exception as e:
+            log_error_with_context(logger, e, "test categorizzazione")
+            raise
+        
+        return  # Esce senza fare l'importazione
+    
+    # Modalità normale (importazione completa)
     try:
         with LogContext(logger, "importazione MySQL"):
             logger.info(f"Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             log_memory_status(memory_logger, "inizio")
             logger.info(f"Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
             logger.info(f"Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
+        
+        # Verifica lo spazio disco
+        check_disk_space()
+        
+        # Usa DatabaseManager per la connessione principale
+        with DatabaseManager.get_connection() as conn:
+            import_all_json_files(JSON_BASE_PATH, conn)
             
-            # Verifica lo spazio disco
-            check_disk_space()
-            
-            # Usa DatabaseManager per la connessione principale
-            with DatabaseManager.get_connection() as conn:
-                import_all_json_files(JSON_BASE_PATH, conn)
-            
-            # Chiudi il pool alla fine
-            DatabaseManager.close_pool()
-            logger.info("Tutte le connessioni chiuse.")
+        # Chiudi il pool alla fine
+        DatabaseManager.close_pool()
+        logger.info("Tutte le connessioni chiuse.")
     except Exception as e:
         log_error_with_context(logger, e, "main", "importazione MySQL")
         raise

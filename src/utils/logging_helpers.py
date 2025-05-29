@@ -19,15 +19,15 @@ class LogContext:
     def __enter__(self) -> 'LogContext':
         self.start_time = time.time()
         context_str = " | ".join(f"{k}={v}" for k, v in self.context.items()) if self.context else ""
-        self.logger.info(f"🔄 Inizio {self.operation_name}" + (f" ({context_str})" if context_str else ""))
+        self.logger.info(f"[START] Inizio {self.operation_name}" + (f" ({context_str})" if context_str else ""))
         return self
     
     def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         elapsed = time.time() - (self.start_time or 0)
         if exc_type is None:
-            self.logger.info(f"✅ Completato {self.operation_name} in {elapsed:.1f}s")
+            self.logger.info(f"[COMPLETE] Completato {self.operation_name} in {elapsed:.1f}s")
         else:
-            self.logger.error(f"❌ Errore in {self.operation_name} dopo {elapsed:.1f}s: {exc_val}")
+            self.logger.error(f"[ERROR] Errore in {self.operation_name} dopo {elapsed:.1f}s: {exc_val}")
 
 
 def log_memory_status(logger_instance: logging.Logger, context: str = "") -> None:
