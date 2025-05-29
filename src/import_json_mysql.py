@@ -51,20 +51,20 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Calcola la RAM totale del sistema
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
 TOTAL_MEMORY_GB = TOTAL_MEMORY_BYTES / (1024 ** 3)
-MEMORY_BUFFER_RATIO = 0.3  # Aumentato a 30% per evitare swap
+MEMORY_BUFFER_RATIO = 0.25  # Ridotto a 25% per sfruttare meglio la RAM
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.02   # Ridotto al 2% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.1     # Ridotto al 10% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.15    # Aumentato al 15% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Limita il chunk size massimo a 10000 record per evitare problemi con max_allowed_packet
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 10000)
+# Limita il chunk size massimo a 20000 record per sfruttare meglio la RAM
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 20000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -1267,7 +1267,10 @@ def main():
         logger.info("Tutte le connessioni chiuse.")
     except Exception as e:
         logger.error(f"Errore durante l'importazione in MySQL: {e}")
-        raise
+        logger.error("\n⚠️ IMPORTANTE: Copia i messaggi di errore sopra prima di procedere")
+        logger.info("\nPremi INVIO per continuare...")
+        input()
+        # Non facciamo raise per mantenere il terminale attivo
 
 if __name__ == "__main__":
     main() 
