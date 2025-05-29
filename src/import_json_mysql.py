@@ -77,10 +77,10 @@ BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k
 CPU_CORES = multiprocessing.cpu_count()
 NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
 NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti MySQL, ma thread aggressivi
-logger.info(f"🖥️  CPU cores disponibili: {CPU_CORES}")
-logger.info(f"🚀  Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilità)")
-logger.info(f"🚀  Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
+logger.info(f"???  CPU cores disponibili: {CPU_CORES}")
+logger.info(f"??  Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
+logger.info(f"???  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilit�)")
+logger.info(f"??  Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -89,7 +89,7 @@ MEMORY_BUFFER_RATIO = 0.2  # Solo 20% libero, 80% usabile
 USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
-# Chunk size più aggressivo con più RAM
+# Chunk size pi� aggressivo con pi� RAM
 CHUNK_SIZE_INIT_RATIO = 0.10   # 10% della RAM usabile (raddoppiato)
 CHUNK_SIZE_MAX_RATIO = 0.25    # 25% della RAM usabile (aumentato)
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
@@ -97,7 +97,7 @@ INITIAL_CHUNK_SIZE = max(5000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO)
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 5000  # Aumentato da 1000 a 5000
 
-# Chunk size massimo MOLTO più aggressivo
+# Chunk size massimo MOLTO pi� aggressivo
 MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 150000)  # Aumentato da 75k a 150k
 
 def log_memory_status(logger_instance: logging.Logger, context: str = "") -> None:
@@ -109,47 +109,47 @@ def log_memory_status(logger_instance: logging.Logger, context: str = "") -> Non
     available_gb = memory_info.available / (1024**3)
     
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"💻 {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
+    logger_instance.info(f"?? {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
 
 def log_performance_stats(logger_instance: logging.Logger, operation: str, count: int, elapsed_time: float, context: str = "") -> None:
     """Helper per logging statistiche performance."""
     speed = count / elapsed_time if elapsed_time > 0 else 0
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"📊 {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
+    logger_instance.info(f"?? {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
 
 def log_file_progress(logger_instance: logging.Logger, current: int, total: int, file_name: str = "", extra_info: str = "") -> None:
     """Helper per logging progresso file."""
     pct = (current / total * 100) if total > 0 else 0
     file_info = f" - {file_name}" if file_name else ""
     extra = f" | {extra_info}" if extra_info else ""
-    logger_instance.info(f"📁 Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
+    logger_instance.info(f"?? Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
 
 def log_batch_progress(logger_instance: logging.Logger, processed: int, total: int, speed: Optional[float] = None, memory_info: Optional[str] = None) -> None:
     """Helper per logging progresso batch con informazioni opzionali."""
     pct = (processed / total * 100) if total > 0 else 0
     speed_info = f" | {speed:.0f} rec/s" if speed else ""
     memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
-    logger_instance.info(f"📦 Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
+    logger_instance.info(f"?? Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
 
 def log_error_with_context(logger_instance: logging.Logger, error: Exception, context: str = "", operation: str = "") -> None:
     """Helper per logging errori con contesto."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
+    logger_instance.error(f"? {context_str}Errore{operation_str}: {error}")
 
 def log_resource_optimization(logger_instance: logging.Logger) -> None:
     """Helper per logging configurazione risorse ottimizzate."""
-    logger_instance.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
-    logger_instance.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger_instance.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger_instance.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger_instance.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger_instance.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
+    logger_instance.info("?? Configurazione risorse DINAMICHE ottimizzate:")
+    logger_instance.info(f"   ?? CPU: {CPU_CORES} core ? {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
+    logger_instance.info(f"   ??? RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger_instance.info(f"   ?? RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger_instance.info(f"   ?? Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger_instance.info(f"   ?? Batch size principale: {BATCH_SIZE:,}")
     
     current_insert_batch = calculate_dynamic_insert_batch_size()
     current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
+    logger_instance.info(f"   ? INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   ?? Chunk size max: {MAX_CHUNK_SIZE:,}")
 
 def handle_data_too_long_error(cursor, error_message, table_name):
     """Gestisce errori di 'Data too long' modificando la colonna da VARCHAR a TEXT."""
@@ -159,16 +159,16 @@ def handle_data_too_long_error(cursor, error_message, table_name):
         return False
         
     column_name = match.group(1)
-    logger.warning(f"⚠️ Colonna '{column_name}' troppo piccola, converto a TEXT...")
+    logger.warning(f"?? Colonna '{column_name}' troppo piccola, converto a TEXT...")
     
     try:
         # Modifica la colonna da VARCHAR a TEXT
         alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
         cursor.execute(alter_query)
-        logger.info(f"✅ Colonna '{column_name}' convertita a TEXT")
+        logger.info(f"? Colonna '{column_name}' convertita a TEXT")
         return True
     except Exception as e:
-        logger.error(f"❌ Errore nella modifica della colonna '{column_name}': {e}")
+        logger.error(f"? Errore nella modifica della colonna '{column_name}': {e}")
         return False
 
 class AdaptiveBatchSizer:
@@ -180,7 +180,7 @@ class AdaptiveBatchSizer:
         self.performance_history = []
         self.adjustment_factor = 2.0  # Moltiplicatore MOLTO AGGRESSIVO (era 1.5)
         self.min_batch = 10000  # Aumentato da 5000
-        self.max_batch = 1000000  # 🚀🚀🚀 UN MILIONE! (era 300000)
+        self.max_batch = 1000000  # ?????? UN MILIONE! (era 300000)
         
     def adjust_batch_size(self, current_ram_usage, processing_speed):
         """Aggiusta il batch size basato su utilizzo RAM e performance."""
@@ -194,7 +194,7 @@ class AdaptiveBatchSizer:
             if avg_ram_usage < (self.target_ram_usage * 0.60):
                 new_batch_size = min(self.max_batch, int(self.current_batch_size * 3.0))  # TRIPLICA!
                 if new_batch_size > self.current_batch_size:
-                    logger.info(f"🚀🚀🚀 MEGA AUTO-TUNE: Batch size TRIPLICATO da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.info(f"?????? MEGA AUTO-TUNE: Batch size TRIPLICATO da {self.current_batch_size:,} a {new_batch_size:,} "
                                f"(RAM SPRECATA: {avg_ram_usage*100:.1f}% vs target {self.target_ram_usage*100:.0f}%)")
                     self.current_batch_size = new_batch_size
                     
@@ -202,7 +202,7 @@ class AdaptiveBatchSizer:
             elif avg_ram_usage < (self.target_ram_usage * 0.75):
                 new_batch_size = min(self.max_batch, int(self.current_batch_size * self.adjustment_factor))
                 if new_batch_size > self.current_batch_size:
-                    logger.info(f"🚀🚀 SUPER AUTO-TUNE: Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.info(f"???? SUPER AUTO-TUNE: Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
                                f"(RAM sottoutilizzata: {avg_ram_usage*100:.1f}%)")
                     self.current_batch_size = new_batch_size
                     
@@ -210,7 +210,7 @@ class AdaptiveBatchSizer:
             elif avg_ram_usage > (self.target_ram_usage * 0.90):
                 new_batch_size = max(self.min_batch, int(self.current_batch_size / 1.5))
                 if new_batch_size < self.current_batch_size:
-                    logger.warning(f"⚠️ AUTO-TUNE: Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.warning(f"?? AUTO-TUNE: Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
                                   f"(RAM sovraccarica: {avg_ram_usage*100:.1f}%)")
                     self.current_batch_size = new_batch_size
         
@@ -238,23 +238,23 @@ def calculate_dynamic_insert_batch_size():
         
         # Limiti di sicurezza ESTREMI
         min_batch = 10000   # Aumentato da 5000
-        max_batch = 1000000  # 🚀🚀🚀 UN MILIONE! (era 300000)
+        max_batch = 1000000  # ?????? UN MILIONE! (era 300000)
         
         # Batch size ESTREMO basato su utilizzo attuale
-        if current_usage_pct < 0.3:      # < 30% RAM usata → batch MOSTRUOSO
+        if current_usage_pct < 0.3:      # < 30% RAM usata ? batch MOSTRUOSO
             batch_size = min(max_batch, max(500000, max_batch_from_memory))
-        elif current_usage_pct < 0.5:   # 30-50% RAM usata → batch gigantesco
+        elif current_usage_pct < 0.5:   # 30-50% RAM usata ? batch gigantesco
             batch_size = min(800000, max(400000, max_batch_from_memory // 2))
-        elif current_usage_pct < 0.65:  # 50-65% RAM usata → batch massiccio
+        elif current_usage_pct < 0.65:  # 50-65% RAM usata ? batch massiccio
             batch_size = min(600000, max(300000, max_batch_from_memory // 3))
-        elif current_usage_pct < 0.75:  # 65-75% RAM usata → batch molto alto
+        elif current_usage_pct < 0.75:  # 65-75% RAM usata ? batch molto alto
             batch_size = min(400000, max(200000, max_batch_from_memory // 4))
-        else:                            # > 75% RAM usata → batch alto
+        else:                            # > 75% RAM usata ? batch alto
             batch_size = min(200000, max(min_batch, max_batch_from_memory // 6))
             
         return max(min_batch, min(batch_size, max_batch))
     else:
-        # Se già oltre il 90%, usa batch ridotto ma ancora alto
+        # Se gi� oltre il 90%, usa batch ridotto ma ancora alto
         return 100000  # Era 50000, ora 100000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
@@ -276,9 +276,9 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     usage_pct = memory_info.percent
     target_usage_pct = 80.0
     
-    logger.info(f"📥 Inserimento diretto di {len(main_data):,} record in {table_name}")
-    logger.info(f"🚀 Batch size AGGRESSIVO iniziale: {initial_batch_size:,}")
-    logger.info(f"💻 RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
+    logger.info(f"?? Inserimento diretto di {len(main_data):,} record in {table_name}")
+    logger.info(f"?? Batch size AGGRESSIVO iniziale: {initial_batch_size:,}")
+    logger.info(f"?? RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
                f"Target: {target_usage_pct:.0f}% | Disponibile: {available_ram_gb:.1f}GB")
     
     rows_inserted = 0
@@ -293,7 +293,7 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
         # Processa i dati in batch con dimensioni adattive
         i = 0
         while i < len(main_data):
-            # Ottieni il batch size corrente (può essere cambiato dall'adaptive sizer)
+            # Ottieni il batch size corrente (pu� essere cambiato dall'adaptive sizer)
             current_batch_size = batch_sizer.current_batch_size
             
             batch_start_time = time.time()
@@ -318,23 +318,23 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                     current_ram = psutil.virtual_memory().used / (1024**3)
                     current_usage = psutil.virtual_memory().percent
                     
-                    logger.info(f"🚀 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe | "
+                    logger.info(f"?? INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe | "
                               f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s | "
                               f"RAM: {current_ram:.1f}GB ({current_usage:.1f}%) | Batch size: {current_batch_size:,}")
             
             except mysql.connector.Error as e:
                 if e.errno == 1406:  # Data too long error
-                    logger.warning(f"⚠️ Errore Data too long rilevato: {e}")
+                    logger.warning(f"?? Errore Data too long rilevato: {e}")
                     
                     # Tenta di risolvere modificando la colonna
                     if handle_data_too_long_error(cursor, str(e), table_name):
-                        logger.info(f"🔄 Ritento l'inserimento del batch dopo la modifica...")
+                        logger.info(f"?? Ritento l'inserimento del batch dopo la modifica...")
                         # Riprova l'inserimento dello stesso batch
                         cursor.executemany(insert_query, batch)
                         rows_inserted += len(batch)
-                        logger.info(f"✅ Batch inserito con successo dopo la modifica")
+                        logger.info(f"? Batch inserito con successo dopo la modifica")
                     else:
-                        logger.error(f"❌ Impossibile risolvere l'errore Data too long")
+                        logger.error(f"? Impossibile risolvere l'errore Data too long")
                         raise
                 else:
                     # Altri errori MySQL
@@ -348,13 +348,13 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
         final_usage_pct = psutil.virtual_memory().percent
         final_batch_size = batch_sizer.current_batch_size
         
-        logger.info(f"🎯 INSERT diretto completato: {rows_inserted:,} righe totali")
-        logger.info(f"📊 Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
+        logger.info(f"?? INSERT diretto completato: {rows_inserted:,} righe totali")
+        logger.info(f"?? Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
                    f"Batch size finale: {final_batch_size:,} | RAM finale: {final_ram_gb:.1f}GB ({final_usage_pct:.1f}%)")
         return rows_inserted
         
     except Exception as e:
-        logger.error(f"📥 Errore in INSERT diretto: {e}")
+        logger.error(f"?? Errore in INSERT diretto: {e}")
         raise
 
 def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None):
@@ -447,7 +447,7 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
 def connect_mysql():
     """
     DEPRECATO: Usa DatabaseManager.get_connection() al posto di questa funzione.
-    Wrapper per compatibilità con codice esistente.
+    Wrapper per compatibilit� con codice esistente.
     """
     db_logger.warning("connect_mysql() deprecato - usa DatabaseManager.get_connection()")
     with DatabaseManager.get_connection() as conn:
@@ -481,21 +481,21 @@ def check_disk_space():
             tmp_dir_free_gb = 0
         
         logger.info("Spazio disco disponibile:")
-        logger.info(f"   📁 {database_path}: {database_free_gb:.1f}GB")
-        logger.info(f"   📁 {tmp_path}: {tmp_free_gb:.1f}GB")
-        logger.info(f"   📁 {tmp_dir_path}: {tmp_dir_free_gb:.1f}GB")
+        logger.info(f"   ?? {database_path}: {database_free_gb:.1f}GB")
+        logger.info(f"   ?? {tmp_path}: {tmp_free_gb:.1f}GB")
+        logger.info(f"   ?? {tmp_dir_path}: {tmp_dir_free_gb:.1f}GB")
         
-        # Avvisa se lo spazio è basso
+        # Avvisa se lo spazio � basso
         if database_free_gb < 10:
-            logger.warning(f"⚠️ Spazio disponibile su {database_path} è basso!")
+            logger.warning(f"?? Spazio disponibile su {database_path} � basso!")
         if tmp_free_gb < 1:
-            logger.warning(f"⚠️ Spazio disponibile su {tmp_path} è basso!")
+            logger.warning(f"?? Spazio disponibile su {tmp_path} � basso!")
         if tmp_dir_free_gb < 1:
-            logger.warning(f"⚠️ Spazio disponibile su {tmp_dir_path} è basso!")
+            logger.warning(f"?? Spazio disponibile su {tmp_dir_path} � basso!")
             
         return database_free_gb, tmp_free_gb, tmp_dir_free_gb
     except Exception as e:
-        logger.error(f"❌ Errore nel controllo dello spazio disco: {e}")
+        logger.error(f"? Errore nel controllo dello spazio disco: {e}")
         return None, None, None
 
 def analyze_json_structure(json_files):
@@ -508,7 +508,7 @@ def analyze_json_structure(json_files):
         analysis_logger.info("Analisi per determinare:")
         analysis_logger.info("1. I tipi di dati per ogni campo")
         analysis_logger.info("2. Le lunghezze massime dei campi stringa")
-        analysis_logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
+        analysis_logger.info("3. I pattern dei valori per determinare il tipo pi� appropriato")
         analysis_logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
         analysis_logger.info("5. Logica CONSERVATIVA: anche un solo valore alfanumerico = VARCHAR")
         
@@ -545,7 +545,7 @@ def analyze_json_structure(json_files):
         
         # Pattern migliorati per identificare meglio i tipi di campi
         patterns = {
-            'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
+            'monetary': r'^[�$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
             'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
             'date_iso': r'^\d{4}-\d{2}-\d{2}$',       # Date ISO (YYYY-MM-DD)
             'date_european': r'^\d{2}/\d{2}/\d{4}$',  # Date europee (DD/MM/YYYY)
@@ -568,7 +568,7 @@ def analyze_json_structure(json_files):
         }
         
         def get_value_pattern_and_type(value):
-            """Determina il pattern di un valore e se è misto."""
+            """Determina il pattern di un valore e se � misto."""
             if value is None:
                 return 'null', False
             if isinstance(value, bool):
@@ -600,10 +600,10 @@ def analyze_json_structure(json_files):
             return current_memory < max_memory_bytes
         
         def determine_field_type(field, patterns, field_has_mixed_values, values_count):
-            """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
+            """Determina il tipo pi� appropriato per un campo basato sui suoi pattern."""
             field_lower = field.lower()
             
-            # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorità massima)
+            # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorit� massima)
             if field_lower in ALWAYS_DATE_FIELDS:
                 return 'DATETIME'
             
@@ -640,7 +640,7 @@ def analyze_json_structure(json_files):
                     else:
                         return 'VARCHAR(100)'
                 
-            # REGOLA 2: Se il campo ha valori misti alfanumerici, è VARCHAR
+            # REGOLA 2: Se il campo ha valori misti alfanumerici, � VARCHAR
             if field_has_mixed_values:
                 max_length = field_lengths.get(field, 50)
                 if max_length > 1000:
@@ -652,7 +652,7 @@ def analyze_json_structure(json_files):
                 else:
                     return 'VARCHAR(100)'
                 
-            # REGOLA 3: Se contiene pattern alfanumerici misti, è VARCHAR
+            # REGOLA 3: Se contiene pattern alfanumerici misti, � VARCHAR
             if 'alphanumeric_mixed' in patterns:
                 max_length = field_lengths.get(field, 50)
                 if max_length > 1000:
@@ -664,7 +664,7 @@ def analyze_json_structure(json_files):
                 else:
                     return 'VARCHAR(100)'
                 
-            # Se il campo è vuoto o ha solo valori null, usa VARCHAR piccolo
+            # Se il campo � vuoto o ha solo valori null, usa VARCHAR piccolo
             if not patterns or patterns == {'null'} or patterns == {'empty'}:
                 return 'VARCHAR(50)'
                 
@@ -812,7 +812,7 @@ def analyze_json_structure(json_files):
                 file_time = time.time() - file_start_time
                 
                 # Determina lo status del file
-                status = "🔥 LIMITE RAM" if memory_exceeded else "📋 LIMITE 2K" if limit_reached else "✅"
+                status = "?? LIMITE RAM" if memory_exceeded else "?? LIMITE 2K" if limit_reached else "?"
                     
                 log_performance_stats(analysis_logger, f"File {status}", file_records, file_time, 
                                     f"{files_analyzed}/{total_files}")
@@ -869,25 +869,25 @@ def analyze_json_structure(json_files):
         analysis_logger.info("Riepilogo analisi:")
         log_file_progress(analysis_logger, files_analyzed, total_files, "completati")
         log_performance_stats(analysis_logger, "Record analizzati", records_analyzed, time.time() - start_time)
-        analysis_logger.info(f"📊 Media record per file: {records_analyzed/files_analyzed:.0f}")
-        analysis_logger.info(f"📊 Campi trovati: {len(table_definitions)}")
-        analysis_logger.info(f"📊 Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
+        analysis_logger.info(f"?? Media record per file: {records_analyzed/files_analyzed:.0f}")
+        analysis_logger.info(f"?? Campi trovati: {len(table_definitions)}")
+        analysis_logger.info(f"?? Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
         log_memory_status(memory_logger, "finale analisi")
         
         # Riepilogo ottimizzazioni dimensioni
         analysis_logger.info(f"Ottimizzazioni dimensioni tabella:")
-        analysis_logger.info(f"   📊 Dimensione riga stimata: {total_estimated_row_size:,} bytes")
-        analysis_logger.info(f"   📊 Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
+        analysis_logger.info(f"   ?? Dimensione riga stimata: {total_estimated_row_size:,} bytes")
+        analysis_logger.info(f"   ?? Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
         
         if total_estimated_row_size > mysql_row_limit:
-            analysis_logger.warning(f"⚠️ RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
-            analysis_logger.warning(f"⚠️ Convertendo più campi a TEXT...")
+            analysis_logger.warning(f"?? RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
+            analysis_logger.warning(f"?? Convertendo pi� campi a TEXT...")
             
-            # Riottimizza convertendo i campi più grandi a TEXT
+            # Riottimizza convertendo i campi pi� grandi a TEXT
             for field, column_def in table_definitions.items():
                 if column_def.startswith('VARCHAR') and '500' in column_def:
                     table_definitions[field] = 'TEXT'
-                    analysis_logger.info(f"      🔄 {field}: {column_def} → TEXT")
+                    analysis_logger.info(f"      ?? {field}: {column_def} ? TEXT")
             
             # Ricalcola la dimensione
             total_estimated_row_size = 0
@@ -914,21 +914,21 @@ def analyze_json_structure(json_files):
                     field_size = 10
                 total_estimated_row_size += field_size
             
-            analysis_logger.info(f"   ✅ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
+            analysis_logger.info(f"   ? Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
         else:
-            analysis_logger.info(f"   ✅ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
+            analysis_logger.info(f"   ? Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
         
-        # Mostra breakdown dei campi più grandi
+        # Mostra breakdown dei campi pi� grandi
         field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
         analysis_logger.info(f"Top 10 campi per dimensione:")
         for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
-            mixed_indicator = "🔀" if field_has_mixed[field] else ""
+            mixed_indicator = "??" if field_has_mixed[field] else ""
             analysis_logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
         
         analysis_logger.info("Dettaglio tutti i campi:")
         for field, def_type in table_definitions.items():
-            mixed_indicator = "🔀" if field_has_mixed[field] else ""
-            analysis_logger.info(f"   📋 {field}: {def_type} {mixed_indicator}")
+            mixed_indicator = "??" if field_has_mixed[field] else ""
+            analysis_logger.info(f"   ?? {field}: {def_type} {mixed_indicator}")
             if field in field_patterns:
                 analysis_logger.info(f"      Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
         
@@ -941,13 +941,13 @@ def generate_short_alias(field_name, existing_aliases):
     # Prendi le prime lettere di ogni parola
     words = base.split('_')
     if len(words) > 1:
-        # Se ci sono più parole, usa le iniziali
+        # Se ci sono pi� parole, usa le iniziali
         alias = ''.join(word[0] for word in words if word)
     else:
         # Altrimenti usa i primi caratteri
         alias = base[:8]
     
-    # Aggiungi un numero se l'alias esiste già
+    # Aggiungi un numero se l'alias esiste gi�
     counter = 1
     original_alias = alias
     while alias in existing_aliases:
@@ -966,7 +966,7 @@ def sanitize_field_name(field_name, existing_aliases=None):
     # Rimuove altri caratteri non validi
     sanitized = ''.join(c for c in sanitized if c.isalnum() or c == '_')
     
-    # Se il nome è troppo lungo, genera un alias
+    # Se il nome � troppo lungo, genera un alias
     if len(sanitized) > 64:
         short_alias = generate_short_alias(sanitized, existing_aliases)
         existing_aliases.add(short_alias)
@@ -977,7 +977,7 @@ def sanitize_field_name(field_name, existing_aliases=None):
 def get_column_type(field_type, length):
     """Determina il tipo di colonna appropriato in base alla lunghezza."""
     if field_type == 'VARCHAR':
-        # Se la lunghezza è maggiore di 1000, usa TEXT
+        # Se la lunghezza � maggiore di 1000, usa TEXT
         if length > 1000:
             return 'TEXT'
         # Altrimenti usa VARCHAR con la lunghezza specificata
@@ -996,7 +996,7 @@ def verify_table_structure(conn, table_name='main_data'):
             date_columns = []
             for column in columns:
                 field_name, field_type, is_null, key, default, extra = column
-                db_logger.info(f"   📋 {field_name}: {field_type}")
+                db_logger.info(f"   ?? {field_name}: {field_type}")
                 
                 # Evidenzia i campi data
                 if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
@@ -1005,7 +1005,7 @@ def verify_table_structure(conn, table_name='main_data'):
             if date_columns:
                 db_logger.info(f"Campi data nella tabella:")
                 for field_name, field_type in date_columns:
-                    status = "✅" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "⚠️"
+                    status = "?" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "??"
                     db_logger.info(f"   {status} {field_name}: {field_type}")
                     
         except mysql.connector.Error as e:
@@ -1016,7 +1016,7 @@ def verify_table_structure(conn, table_name='main_data'):
 def create_main_table(cursor, table_definitions, field_mapping, column_types):
     """Crea la tabella principale con tutti i campi non-JSON."""
     with LogContext(db_logger, "creazione tabella principale"):
-        # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
+        # Escludi il campo 'cig' dalla lista dei campi normali poich� � gi� la chiave primaria
         main_fields = [f"{field_mapping[field]} {column_types[field]}" 
                       for field in table_definitions.keys() 
                       if field.lower() != 'cig']
@@ -1201,13 +1201,13 @@ def find_json_files(base_path):
         return []
     
     if not base_dir.is_dir():
-        import_logger.warning(f"Il percorso non è una directory: {base_path}")
+        import_logger.warning(f"Il percorso non � una directory: {base_path}")
         return []
     
     # Usa rglob per ricerca ricorsiva di tutti i file .json
     json_files = list(base_dir.rglob("*.json"))
     
-    # Converte i Path objects in stringhe per compatibilità con il resto del codice
+    # Converte i Path objects in stringhe per compatibilit� con il resto del codice
     json_file_paths = [str(json_file) for json_file in json_files]
     
     import_logger.info(f"Trovati {len(json_file_paths)} file JSON in {base_path}")
@@ -1223,7 +1223,7 @@ def process_chunk_unified(args, execution_mode="sequential"):
     """
     chunk, file_name, batch_id, table_definitions = args
     
-    # Logging specifico per modalità
+    # Logging specifico per modalit�
     if execution_mode == "multiprocessing":
         print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
     else:
@@ -1244,7 +1244,7 @@ def process_chunk_unified(args, execution_mode="sequential"):
                 except Exception as e:
                     error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
                     if execution_mode == "multiprocessing":
-                        print(f"❌ {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
+                        print(f"? {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
                     else:
                         log_error_with_context(batch_logger, e, "chunk processing", f"tentativo {attempt + 1}/{max_retries}")
                     
@@ -1259,7 +1259,7 @@ def process_chunk_unified(args, execution_mode="sequential"):
             if attempt == max_retries - 1:
                 final_error = f"Errore nel processare chunk dopo {max_retries} tentativi: {e}"
                 if execution_mode == "multiprocessing":
-                    print(f"❌ {final_error}")
+                    print(f"? {final_error}")
                 else:
                     log_error_with_context(batch_logger, e, "chunk processing", f"fallimento finale dopo {max_retries} tentativi")
                 raise
@@ -1300,11 +1300,11 @@ def import_all_json_files(base_path, conn):
         for idx, json_file in enumerate(json_files, 1):
             file_name = Path(json_file).name
             
-            # Salta i file già processati con successo
+            # Salta i file gi� processati con successo
             with DatabaseManager.get_pooled_connection() as conn_check:
                 if is_file_processed(conn_check, file_name):
-                    import_logger.info(f"⏭️ File già processato: {file_name}")
-                    progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
+                    import_logger.info(f"?? File gi� processato: {file_name}")
+                    progress_tracker.processed_files += 1  # Aggiorna counter per file gi� processati
                     continue
             
             # Conta i record nel file per il progresso
@@ -1397,11 +1397,58 @@ def import_all_json_files(base_path, conn):
         total_time = final_stats['elapsed_time']
         
         import_logger.info("="*80)
-        import_logger.info("🎉 IMPORTAZIONE COMPLETATA!")
+        import_logger.info("?? IMPORTAZIONE COMPLETATA!")
         log_file_progress(import_logger, final_stats['processed_files'], final_stats['total_files'], "completati")
         log_performance_stats(import_logger, "Record totali", final_stats['total_records'], total_time)
-        import_logger.info(f"⏱️ Tempo totale: {str(timedelta(seconds=int(total_time)))}")
+        import_logger.info(f"?? Tempo totale: {str(timedelta(seconds=int(total_time)))}")
         import_logger.info("="*80)
+
+def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
+    """Implementazione completa per process_batch_parallel."""
+    main_data = []
+    json_data = defaultdict(list)
+    
+    for record, _ in batch:
+        cig = record.get('cig', '')
+        if not cig:
+            continue
+            
+        # Processo base: aggiungi solo CIG e source info
+        main_values = [cig]
+        
+        # Aggiungi valori per tutti i campi della definizione tabella
+        for field, def_type in table_definitions.items():
+            if field.lower() == 'cig':
+                continue
+            
+            field_lower = field.lower().replace(' ', '_')
+            value = record.get(field_lower)
+            
+            # Processo semplificato per i tipi base
+            if def_type == 'JSON' and value is not None:
+                json_data[field_mapping[field]].append((cig, json.dumps(value)))
+                value = None
+            elif value is not None:
+                if def_type.startswith('VARCHAR'):
+                    value = str(value)[:1000]  # Tronca se troppo lungo
+                elif def_type in ['DATE', 'DATETIME']:
+                    # Processo date semplificato
+                    if isinstance(value, str) and value.strip():
+                        # Mantieni solo se sembra una data valida
+                        if any(c in value for c in ['-', '/', ':']):
+                            pass  # Mantieni il valore
+                        else:
+                            value = None
+                    else:
+                        value = None
+            
+            main_values.append(value)
+        
+        # Aggiungi metadata
+        main_values.extend([file_name, batch_id])
+        main_data.append(tuple(main_values))
+    
+    return main_data, json_data
 
 class ProgressTracker:
     """Traccia il progresso dell'importazione con ETA e statistiche dettagliate."""
@@ -1415,7 +1462,7 @@ class ProgressTracker:
         self.current_file_name = None
         self.current_file_records = 0
         self.current_file_total_records = 0
-        self.file_speeds = []  # Per calcolare velocità media
+        self.file_speeds = []  # Per calcolare velocit� media
         self.lock = threading.Lock()
     
     def start_file(self, file_name, total_records):
@@ -1432,7 +1479,7 @@ class ProgressTracker:
             progress_logger.info(f"File {self.processed_files + 1}/{self.total_files}: {file_name}")
             progress_logger.info(f"Record nel file: {total_records:,}")
             log_file_progress(progress_logger, self.processed_files, self.total_files, "globale")
-            log_performance_stats(progress_logger, "Velocità media", self.total_records_processed, elapsed_total)
+            log_performance_stats(progress_logger, "Velocit� media", self.total_records_processed, elapsed_total)
     
     def update_file_progress(self, records_completed):
         """Aggiorna il progresso del file corrente."""
@@ -1469,10 +1516,10 @@ class ProgressTracker:
                 total_elapsed = time.time() - self.start_time
                 global_avg_speed = self.total_records_processed / total_elapsed if total_elapsed > 0 else 0
                 
-                # ETA globale basato sui file rimanenti e velocità media
+                # ETA globale basato sui file rimanenti e velocit� media
                 remaining_files = self.total_files - self.processed_files
                 if len(self.file_speeds) > 0 and remaining_files > 0:
-                    avg_file_speed = sum(self.file_speeds[-5:]) / len(self.file_speeds[-5:])  # Media ultime 5 velocità
+                    avg_file_speed = sum(self.file_speeds[-5:]) / len(self.file_speeds[-5:])  # Media ultime 5 velocit�
                     avg_records_per_file = self.total_records_processed / self.processed_files
                     estimated_remaining_records = remaining_files * avg_records_per_file
                     global_eta_seconds = estimated_remaining_records / avg_file_speed if avg_file_speed > 0 else 0
@@ -1480,11 +1527,11 @@ class ProgressTracker:
                 else:
                     global_eta = "N/A"
                 
-                progress_logger.info(f"✅ File completato: {self.current_file_name}")
+                progress_logger.info(f"? File completato: {self.current_file_name}")
                 log_performance_stats(progress_logger, "Record processati", records_processed, file_time)
                 log_file_progress(progress_logger, self.processed_files, self.total_files, "globale")
                 log_performance_stats(progress_logger, "Record totali", self.total_records_processed, total_elapsed, "media globale")
-                progress_logger.info(f"⏱️ ETA completamento: {global_eta} ({remaining_files} file rimanenti)")
+                progress_logger.info(f"?? ETA completamento: {global_eta} ({remaining_files} file rimanenti)")
                 
                 # Reset file corrente
                 self.current_file_name = None
@@ -1531,52 +1578,4 @@ def main():
         raise
 
 if __name__ == "__main__":
-    main() 
-
-# Implementazione di fallback per process_batch_parallel
-def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
-    """Implementazione di fallback per process_batch_parallel."""
-    main_data = []
-    json_data = defaultdict(list)
-    
-    for record, _ in batch:
-        cig = record.get('cig', '')
-        if not cig:
-            continue
-            
-        # Processo base: aggiungi solo CIG e source info
-        main_values = [cig]
-        
-        # Aggiungi valori per tutti i campi della definizione tabella
-        for field, def_type in table_definitions.items():
-            if field.lower() == 'cig':
-                continue
-            
-            field_lower = field.lower().replace(' ', '_')
-            value = record.get(field_lower)
-            
-            # Processo semplificato per i tipi base
-            if def_type == 'JSON' and value is not None:
-                json_data[field_mapping[field]].append((cig, json.dumps(value)))
-                value = None
-            elif value is not None:
-                if def_type.startswith('VARCHAR'):
-                    value = str(value)[:1000]  # Tronca se troppo lungo
-                elif def_type in ['DATE', 'DATETIME']:
-                    # Processo date semplificato
-                    if isinstance(value, str) and value.strip():
-                        # Mantieni solo se sembra una data valida
-                        if any(c in value for c in ['-', '/', ':']):
-                            pass  # Mantieni il valore
-                        else:
-                            value = None
-                    else:
-                        value = None
-            
-            main_values.append(value)
-        
-        # Aggiungi metadata
-        main_values.extend([file_name, batch_id])
-        main_data.append(tuple(main_values))
-    
-    return main_data, json_data
+    main()
