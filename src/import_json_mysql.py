@@ -905,18 +905,71 @@ def find_json_files(base_path):
                 json_files.append(os.path.join(root, file))
     return json_files
 
+def process_file(file_info):
+    idx, json_file = file_info
+    print(f"[Multiprocessing] Processo PID={os.getpid()} avviato per file {json_file}")
+    file_name = os.path.basename(json_file)
+    # Ottieni una connessione dal pool
+    conn = connection_pool.get_connection()
+    cursor = conn.cursor()
+    try:
+        # Salta i file già processati con successo
+        if is_file_processed(conn, file_name):
+            logger.info(f"\n⏭️  File già processato: {file_name}")
+            return
+        file_start_time = time.time()
+        file_records = 0
+        batch = []
+        batch_id = f"{int(time.time())}_{idx}"
+        logger.info("\n" + "="*80)
+        logger.info(f"📂 Processando file {idx}: {file_name}")
+        logger.info("="*80)
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    batch.append((record, file_name))
+                    file_records += 1
+                    if len(batch) >= BATCH_SIZE:
+                        process_batch(cursor, batch, table_definitions, batch_id)
+                        conn.commit()
+                        batch = []
+                        gc.collect()
+                except Exception as e:
+                    logger.error(f"\n❌ Errore nel parsing del record: {e}")
+                    continue
+        # Processa l'ultimo batch
+        if batch:
+            process_batch(cursor, batch, table_definitions, batch_id)
+            conn.commit()
+        mark_file_processed(conn, file_name, file_records)
+        file_time = time.time() - file_start_time
+        logger.info(f"\n✅ File completato: {file_name}")
+        logger.info(f"   • Record processati: {file_records:,}")
+        logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
+        logger.info(f"   • Velocità: {file_records/file_time:.1f} record/s")
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
+        mark_file_processed(conn, file_name, file_records, 'failed', error_message)
+    finally:
+        cursor.close()
+        conn.close()
+
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
-    
     # Analizza la struttura dei JSON
+    global table_definitions
     table_definitions = analyze_json_structure(json_files)
-    
     # Crea le tabelle dinamicamente
     create_dynamic_tables(conn, table_definitions)
-    
-    # Crea un pool di connessioni
+    # Crea un pool di connessioni globale
+    global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
         pool_size=NUM_WORKERS,
@@ -939,75 +992,9 @@ def import_all_json_files(base_path, conn):
         use_unicode=True,
         auth_plugin='mysql_native_password'
     )
-    
-    def process_file(file_info):
-        idx, json_file = file_info
-        file_name = os.path.basename(json_file)
-        
-        # Ottieni una connessione dal pool
-        conn = connection_pool.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            # Salta i file già processati con successo
-            if is_file_processed(conn, file_name):
-                logger.info(f"\n⏭️  File già processato: {file_name}")
-                return
-            
-            file_start_time = time.time()
-            file_records = 0
-            batch = []
-            batch_id = f"{int(time.time())}_{idx}"
-            
-            logger.info("\n" + "="*80)
-            logger.info(f"📂 Processando file {idx}/{total_files}: {file_name}")
-            logger.info("="*80)
-            
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        batch.append((record, file_name))
-                        file_records += 1
-                        
-                        if len(batch) >= BATCH_SIZE:
-                            process_batch(cursor, batch, table_definitions, batch_id)
-                            conn.commit()
-                            batch = []
-                            gc.collect()
-                    except Exception as e:
-                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                        continue
-            
-            # Processa l'ultimo batch
-            if batch:
-                process_batch(cursor, batch, table_definitions, batch_id)
-                conn.commit()
-            
-            # Marca il file come processato con successo
-            mark_file_processed(conn, file_name, file_records)
-            
-            file_time = time.time() - file_start_time
-            logger.info(f"\n✅ File completato: {file_name}")
-            logger.info(f"   • Record processati: {file_records:,}")
-            logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
-            logger.info(f"   • Velocità: {file_records/file_time:.1f} record/s")
-            
-        except Exception as e:
-            error_message = str(e)
-            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
-            mark_file_processed(conn, file_name, file_records, 'failed', error_message)
-        finally:
-            cursor.close()
-            conn.close()
-    
     # Crea un pool di processi per l'elaborazione parallela
     with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
         pool.map(process_file, enumerate(json_files, 1))
-    
     logger.info("\n" + "="*80)
     logger.info("✨ Importazione completata!")
     logger.info("="*80)
