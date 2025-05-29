@@ -925,7 +925,18 @@ def import_all_json_files(base_path, conn):
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
     global table_definitions
     table_definitions = analyze_json_structure(json_files)
-    create_dynamic_tables(conn, table_definitions)
+    # Usa una connessione temporanea per la creazione delle tabelle
+    tmp_conn = mysql.connector.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset='utf8mb4',
+        autocommit=True
+    )
+    create_dynamic_tables(tmp_conn, table_definitions)
+    tmp_conn.close()
+    # Pool di connessioni per i worker
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
