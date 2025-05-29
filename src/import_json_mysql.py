@@ -19,6 +19,10 @@ import platform
 import re
 from pathlib import Path
 
+# Crea la directory dei log se non esiste prima della configurazione logging
+logs_dir = Path('logs')
+logs_dir.mkdir(exist_ok=True)
+
 # Configurazione logging
 logging.basicConfig(
     level=logging.INFO,
@@ -632,11 +636,11 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
                         json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
                         insert_json = f"""
                         INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                        VALUES (%s, %s, %s, %s) AS new_data
+                        VALUES (%s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE
-                            {field}_json = new_data.{field}_json,
-                            source_file = new_data.source_file,
-                            batch_id = new_data.batch_id
+                            {field}_json = VALUES({field}_json),
+                            source_file = VALUES(source_file),
+                            batch_id = VALUES(batch_id)
                         """
                         cursor.executemany(insert_json, json_data_with_metadata)
                     except mysql.connector.Error as e:
@@ -1391,10 +1395,10 @@ def create_metadata_tables(cursor, table_definitions, field_mapping, column_type
         for field, def_type in table_definitions.items():
             cursor.execute("""
                 INSERT INTO field_mapping (original_name, sanitized_name, field_type)
-                VALUES (%s, %s, %s) AS new_data
+                VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
-                    sanitized_name = new_data.sanitized_name,
-                    field_type = new_data.field_type
+                    sanitized_name = VALUES(sanitized_name),
+                    field_type = VALUES(field_type)
             """, (field, field_mapping[field], column_types[field]))
             mapping_records += 1
         
@@ -1464,12 +1468,12 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
     try:
         cursor.execute("""
             INSERT INTO processed_files (file_name, record_count, status, error_message)
-            VALUES (%s, %s, %s, %s) AS new_data
+            VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 processed_at = CURRENT_TIMESTAMP,
-                record_count = new_data.record_count,
-                status = new_data.status,
-                error_message = new_data.error_message
+                record_count = VALUES(record_count),
+                status = VALUES(status),
+                error_message = VALUES(error_message)
         """, (file_name, record_count, status, error_message))
         conn.commit()
     except Exception as e:
@@ -1828,10 +1832,6 @@ class ProgressTracker:
 
 def main():
     try:
-        # Crea la directory dei log se non esiste usando pathlib
-        logs_dir = Path('logs')
-        logs_dir.mkdir(exist_ok=True)
-        
         with LogContext(logger, "importazione MySQL"):
             logger.info(f"Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
             log_memory_status(memory_logger, "inizio")
