@@ -313,19 +313,80 @@ def handle_data_too_long_error(cursor, error_message, table_name):
         logger.error(f"❌ Errore nella modifica della colonna '{column_name}': {e}")
         return False
 
-def calculate_dynamic_insert_batch_size():
-    """Calcola dinamicamente il batch size per INSERT basato su risorse disponibili."""
-    # RAM disponibile in GB
-    available_memory = psutil.virtual_memory().available / (1024**3)
+class AdaptiveBatchSizer:
+    """Gestisce il batch size adattivo basato sull'utilizzo RAM real-time."""
     
-    # Batch size basato su RAM (più RAM = batch più grandi)
-    if available_memory > 20:      # > 20GB disponibili
-        return 5000
-    elif available_memory > 10:    # > 10GB disponibili  
-        return 3000
-    elif available_memory > 5:     # > 5GB disponibili
-        return 2000
-    else:                          # < 5GB disponibili
+    def __init__(self, initial_batch_size, target_ram_usage=0.8):
+        self.current_batch_size = initial_batch_size
+        self.target_ram_usage = target_ram_usage
+        self.performance_history = []
+        self.adjustment_factor = 1.2  # Moltiplicatore per aumenti
+        self.min_batch = 1000
+        self.max_batch = 50000
+        
+    def adjust_batch_size(self, current_ram_usage, processing_speed):
+        """Aggiusta il batch size basato su utilizzo RAM e performance."""
+        self.performance_history.append((current_ram_usage, processing_speed))
+        
+        # Se abbiamo abbastanza storia, adatta il batch size
+        if len(self.performance_history) >= 3:
+            avg_ram_usage = sum(h[0] for h in self.performance_history[-3:]) / 3
+            
+            # Se RAM sottoutilizzata (< 70% del target), aumenta batch size
+            if avg_ram_usage < (self.target_ram_usage * 0.70):
+                new_batch_size = min(self.max_batch, int(self.current_batch_size * self.adjustment_factor))
+                if new_batch_size > self.current_batch_size:
+                    logger.info(f"🚀 AUTO-TUNE: Batch size aumentato da {self.current_batch_size:,} a {new_batch_size:,} "
+                               f"(RAM sottoutilizzata: {avg_ram_usage*100:.1f}%)")
+                    self.current_batch_size = new_batch_size
+                    
+            # Se RAM eccessivamente utilizzata (> 85% del target), diminuisci batch size
+            elif avg_ram_usage > (self.target_ram_usage * 0.85):
+                new_batch_size = max(self.min_batch, int(self.current_batch_size / self.adjustment_factor))
+                if new_batch_size < self.current_batch_size:
+                    logger.warning(f"⚠️ AUTO-TUNE: Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
+                                  f"(RAM sovraccarica: {avg_ram_usage*100:.1f}%)")
+                    self.current_batch_size = new_batch_size
+        
+        return self.current_batch_size
+
+def calculate_dynamic_insert_batch_size():
+    """Calcola dinamicamente il batch size per INSERT basato su utilizzo RAM aggressivo (80%)."""
+    # Memoria totale e utilizzata
+    memory_info = psutil.virtual_memory()
+    total_memory = memory_info.total
+    available_memory = memory_info.available
+    used_memory = memory_info.used
+    
+    # Target: utilizzare l'80% della RAM totale (20% buffer di sicurezza)
+    target_memory_usage = total_memory * 0.8
+    current_usage_pct = used_memory / total_memory
+    available_for_batch = target_memory_usage - used_memory
+    
+    # Stima grossolana: 1 record = ~2KB in memoria durante elaborazione
+    estimated_record_size_bytes = 2 * 1024
+    
+    # Calcola batch size aggressivo basato su memoria disponibile
+    if available_for_batch > 0:
+        max_batch_from_memory = int(available_for_batch / estimated_record_size_bytes)
+        
+        # Limiti di sicurezza
+        min_batch = 1000   # Minimo assoluto
+        max_batch = 50000  # Massimo assoluto per evitare problemi MySQL
+        
+        # Batch size progressivo basato su utilizzo attuale
+        if current_usage_pct < 0.5:      # < 50% RAM usata → batch aggressivo
+            batch_size = min(max_batch, max(10000, max_batch_from_memory))
+        elif current_usage_pct < 0.65:   # 50-65% RAM usata → batch medio-alto
+            batch_size = min(20000, max(5000, max_batch_from_memory // 2))
+        elif current_usage_pct < 0.75:   # 65-75% RAM usata → batch medio
+            batch_size = min(10000, max(3000, max_batch_from_memory // 4))
+        else:                            # > 75% RAM usata → batch conservativo
+            batch_size = min(5000, max(min_batch, max_batch_from_memory // 8))
+            
+        return max(min_batch, min(batch_size, max_batch))
+    else:
+        # Se già oltre l'80%, usa batch piccolissimo
         return 1000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
@@ -333,12 +394,24 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     if not main_data:
         return 0
         
-    # Calcola batch size dinamico basato su risorse disponibili
-    insert_batch_size = calculate_dynamic_insert_batch_size()
-    available_ram = psutil.virtual_memory().available / (1024**3)
+    # Calcola batch size dinamico iniziale basato su utilizzo RAM aggressivo
+    initial_batch_size = calculate_dynamic_insert_batch_size()
+    
+    # Inizializza l'adaptive batch sizer
+    batch_sizer = AdaptiveBatchSizer(initial_batch_size, target_ram_usage=0.8)
+    
+    # Statistiche RAM dettagliate
+    memory_info = psutil.virtual_memory()
+    total_ram_gb = memory_info.total / (1024**3)
+    used_ram_gb = memory_info.used / (1024**3)
+    available_ram_gb = memory_info.available / (1024**3)
+    usage_pct = memory_info.percent
+    target_usage_pct = 80.0
     
     logger.info(f"📥 Inserimento diretto di {len(main_data):,} record in {table_name}")
-    logger.info(f"🚀 Batch size dinamico: {insert_batch_size:,} (RAM disponibile: {available_ram:.1f}GB)")
+    logger.info(f"🚀 Batch size AGGRESSIVO iniziale: {initial_batch_size:,}")
+    logger.info(f"💻 RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
+               f"Target: {target_usage_pct:.0f}% | Disponibile: {available_ram_gb:.1f}GB")
     
     rows_inserted = 0
     
@@ -349,10 +422,14 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     insert_start_time = time.time()
     
     try:
-        # Processa i dati in batch
-        for i in range(0, len(main_data), insert_batch_size):
+        # Processa i dati in batch con dimensioni adattive
+        i = 0
+        while i < len(main_data):
+            # Ottieni il batch size corrente (può essere cambiato dall'adaptive sizer)
+            current_batch_size = batch_sizer.current_batch_size
+            
             batch_start_time = time.time()
-            batch = main_data[i:i + insert_batch_size]
+            batch = main_data[i:i + current_batch_size]
             
             try:
                 # Esegui INSERT batch
@@ -361,13 +438,21 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                 
                 batch_time = time.time() - batch_start_time
                 batch_speed = len(batch) / batch_time if batch_time > 0 else 0
+                current_ram_usage = psutil.virtual_memory().percent / 100.0
                 
-                # Log progresso ogni 10k righe con statistiche performance
+                # Auto-tuning del batch size basato su performance
+                new_batch_size = batch_sizer.adjust_batch_size(current_ram_usage, batch_speed)
+                
+                # Log progresso ogni 10k righe con statistiche performance e RAM
                 if rows_inserted % 10000 == 0:
                     elapsed_total = time.time() - insert_start_time
                     avg_speed = rows_inserted / elapsed_total if elapsed_total > 0 else 0
+                    current_ram = psutil.virtual_memory().used / (1024**3)
+                    current_usage = psutil.virtual_memory().percent
+                    
                     logger.info(f"🚀 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe | "
-                              f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s")
+                              f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s | "
+                              f"RAM: {current_ram:.1f}GB ({current_usage:.1f}%) | Batch size: {current_batch_size:,}")
             
             except mysql.connector.Error as e:
                 if e.errno == 1406:  # Data too long error
@@ -386,14 +471,18 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                 else:
                     # Altri errori MySQL
                     raise
+            
+            i += current_batch_size
         
         total_time = time.time() - insert_start_time
         avg_speed = rows_inserted / total_time if total_time > 0 else 0
-        final_ram = psutil.virtual_memory().available / (1024**3)
+        final_ram_gb = psutil.virtual_memory().used / (1024**3)
+        final_usage_pct = psutil.virtual_memory().percent
+        final_batch_size = batch_sizer.current_batch_size
         
         logger.info(f"🎯 INSERT diretto completato: {rows_inserted:,} righe totali")
         logger.info(f"📊 Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
-                   f"Batch size: {insert_batch_size:,} | RAM finale: {final_ram:.1f}GB")
+                   f"Batch size finale: {final_batch_size:,} | RAM finale: {final_ram_gb:.1f}GB ({final_usage_pct:.1f}%)")
         return rows_inserted
         
     except Exception as e:
