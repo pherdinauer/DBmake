@@ -40,12 +40,12 @@ MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato a 75k con più RAM
 
-# Ottimizzazione aggressiva: 90% CPU, 80% RAM
-NUM_THREADS = 14  # Thread per elaborazione interna
-NUM_WORKERS = 7   # 7 worker process per usare ~87.5% della CPU (7/8 core)
+# Ottimizzazione più conservativa per stabilità MySQL
+NUM_THREADS = 8  # Thread per elaborazione interna
+NUM_WORKERS = 4   # Ridotto da 7 a 4 per evitare sovraccarico MySQL
 logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
-logger.info(f"🖥️  Worker process: {NUM_WORKERS} (~87.5% CPU)")
+logger.info(f"🖥️  Worker process: {NUM_WORKERS} (ridotto per stabilità MySQL)")
 
 # Directory temporanea per i file CSV
 TEMP_DIR = '/database/tmp'
@@ -501,6 +501,7 @@ def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
     field_lengths = defaultdict(int)
     field_patterns = defaultdict(set)  # Per memorizzare i pattern dei valori
+    field_has_mixed = defaultdict(bool)  # Traccia se un campo ha valori misti
     
     logger.info("🔍 Analisi della struttura dei JSON...")
     logger.info("Questa fase analizza la struttura dei JSON per determinare:")
@@ -508,6 +509,7 @@ def analyze_json_structure(json_files):
     logger.info("2. Le lunghezze massime dei campi stringa")
     logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
     logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
+    logger.info("5. Logica CONSERVATIVA: anche un solo valore alfanumerico = VARCHAR")
     
     total_files = len(json_files)
     files_analyzed = 0
@@ -526,58 +528,83 @@ def analyze_json_structure(json_files):
     logger.info(f"📊 Limite righe per file: {MAX_ROWS_PER_FILE:,}")
     logger.info(f"💾 Memoria massima per analisi: {max_memory_bytes/1024/1024/1024:.1f}GB")
     
-    # Pattern per identificare i tipi di campi
+    # Campi che devono SEMPRE essere VARCHAR (blacklist)
+    ALWAYS_VARCHAR_FIELDS = {
+        'numero_gara', 'codice_gara', 'id_gara', 'numero', 'codice', 'id', 
+        'identificativo', 'riferimento', 'cup', 'cig', 'numero_lotto',
+        'codice_fiscale', 'partita_iva', 'numero_verde', 'numero_telefono'
+    }
+    
+    # Pattern migliorati per identificare meglio i tipi di campi
     patterns = {
         'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
         'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
         'date': r'^\d{4}-\d{2}-\d{2}$',           # Date ISO
         'datetime': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # Date e orari
         'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
-        'integer': r'^\d+$',                       # Numeri interi
-        'decimal': r'^\d+([.,]\d+)?$',             # Numeri decimali
-        'alphanumeric': r'^[A-Za-z0-9]+$',        # Alfanumerici
-        'identifier': r'^[A-Za-z0-9_-]+$',        # Identificatori
+        'pure_integer': r'^\d+$',                  # SOLO numeri interi puri
+        'pure_decimal': r'^\d+[.,]\d+$',          # SOLO decimali puri
+        'alphanumeric_mixed': r'^[A-Z0-9]+$',     # Alfanumerici misti (es. Z2B1FADD05)
         'email': r'^[^@]+@[^@]+\.[^@]+$',         # Email
         'url': r'^https?://',                      # URL
         'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
         'postal_code': r'^\d{5}$',                 # CAP
         'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$',  # Codice fiscale
         'partita_iva': r'^\d{11}$',               # Partita IVA
-        'cup': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
-        'cig': r'^[A-Z]\d{8}[A-Z]\d{2}$'         # CIG
+        'cup_code': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
+        'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
     }
     
     import re
     
-    def get_value_pattern(value):
-        """Determina il pattern di un valore."""
+    def get_value_pattern_and_type(value):
+        """Determina il pattern di un valore e se è misto."""
         if value is None:
-            return 'null'
+            return 'null', False
         if isinstance(value, bool):
-            return 'boolean'
+            return 'boolean', False
         if isinstance(value, int):
-            return 'integer'
+            return 'pure_integer', False
         if isinstance(value, float):
-            return 'decimal'
+            return 'pure_decimal', False
         if isinstance(value, (list, dict)):
-            return 'json'
+            return 'json', False
             
         value_str = str(value).strip()
         if not value_str:
-            return 'empty'
+            return 'empty', False
             
+        # Controlla se contiene sia lettere che numeri (MISTO)
+        has_letters = any(c.isalpha() for c in value_str)
+        has_digits = any(c.isdigit() for c in value_str)
+        is_mixed = has_letters and has_digits
+        
         for pattern_name, pattern in patterns.items():
             if re.match(pattern, value_str, re.IGNORECASE):
-                return pattern_name
-        return 'text'
+                return pattern_name, is_mixed
+        return 'text', has_letters or has_digits
     
     def check_memory_limit():
         """Controlla se abbiamo raggiunto il limite di memoria."""
         current_memory = process.memory_info().rss
         return current_memory < max_memory_bytes
     
-    def determine_field_type(field, patterns, values_count):
+    def determine_field_type(field, patterns, field_has_mixed_values, values_count):
         """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
+        field_lower = field.lower()
+        
+        # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR
+        if field_lower in ALWAYS_VARCHAR_FIELDS:
+            return 'VARCHAR(255)'
+            
+        # REGOLA 2: Se il campo ha valori misti alfanumerici, è VARCHAR
+        if field_has_mixed_values:
+            return 'VARCHAR(255)'
+            
+        # REGOLA 3: Se contiene pattern alfanumerici misti, è VARCHAR
+        if 'alphanumeric_mixed' in patterns:
+            return 'VARCHAR(255)'
+            
         # Se il campo è vuoto o ha solo valori null, usa VARCHAR
         if not patterns or patterns == {'null'} or patterns == {'empty'}:
             return 'VARCHAR(255)'
@@ -590,12 +617,12 @@ def analyze_json_structure(json_files):
         if patterns == {'boolean'}:
             return 'BOOLEAN'
             
-        # Se il campo contiene solo numeri interi, usa INT
-        if patterns == {'integer'}:
+        # Se il campo contiene solo numeri interi PURI, usa INT
+        if patterns == {'pure_integer'}:
             return 'INT'
             
-        # Se il campo contiene numeri decimali o monetari, usa DECIMAL
-        if {'decimal', 'monetary'} & patterns:
+        # Se il campo contiene numeri decimali PURI o monetari, usa DECIMAL
+        if patterns == {'pure_decimal'} or patterns == {'monetary'}:
             return 'DECIMAL(20,2)'
             
         # Se il campo contiene date, usa DATE
@@ -609,10 +636,6 @@ def analyze_json_structure(json_files):
         # Se il campo contiene percentuali, usa DECIMAL
         if patterns == {'percentage'}:
             return 'DECIMAL(5,2)'
-            
-        # Se il campo contiene solo identificatori o alfanumerici, usa VARCHAR
-        if patterns <= {'identifier', 'alphanumeric'}:
-            return 'VARCHAR(64)'
             
         # Se il campo contiene email, usa VARCHAR
         if patterns == {'email'}:
@@ -639,14 +662,14 @@ def analyze_json_structure(json_files):
             return 'VARCHAR(11)'
             
         # Se il campo contiene CUP, usa VARCHAR
-        if patterns == {'cup'}:
+        if patterns == {'cup_code'}:
             return 'VARCHAR(15)'
             
         # Se il campo contiene CIG, usa VARCHAR
-        if patterns == {'cig'}:
+        if patterns == {'cig_code'}:
             return 'VARCHAR(13)'
             
-        # Per tutti gli altri casi, usa VARCHAR con lunghezza appropriata
+        # FALLBACK: Per sicurezza, usa VARCHAR per tutto il resto
         return 'VARCHAR(255)'
     
     for json_file in json_files:
@@ -674,8 +697,12 @@ def analyze_json_structure(json_files):
                                 continue
                                 
                             field = field.lower().replace(' ', '_')
-                            pattern = get_value_pattern(value)
+                            pattern, is_mixed = get_value_pattern_and_type(value)
                             field_patterns[field].add(pattern)
+                            
+                            # Traccia se il campo ha valori misti
+                            if is_mixed:
+                                field_has_mixed[field] = True
                             
                             if isinstance(value, str):
                                 current_length = len(value)
@@ -743,7 +770,7 @@ def analyze_json_structure(json_files):
     # Crea le definizioni delle tabelle
     table_definitions = {}
     for field, patterns in field_patterns.items():
-        column_def = determine_field_type(field, patterns, records_analyzed)
+        column_def = determine_field_type(field, patterns, field_has_mixed[field], records_analyzed)
         table_definitions[field] = column_def
     
     # Garbage collection finale
@@ -756,10 +783,12 @@ def analyze_json_structure(json_files):
     logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
     logger.info(f"   • Media record per file: {records_analyzed/files_analyzed:.0f}")
     logger.info(f"   • Campi trovati: {len(table_definitions)}")
+    logger.info(f"   • Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
     logger.info(f"   • RAM finale: {final_memory_gb:.1f}GB")
     logger.info("\nDettaglio campi:")
     for field, def_type in table_definitions.items():
-        logger.info(f"   • {field}: {def_type}")
+        mixed_indicator = "🔀" if field_has_mixed[field] else ""
+        logger.info(f"   • {field}: {def_type} {mixed_indicator}")
         if field in field_patterns:
             logger.info(f"     Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
     
@@ -954,16 +983,32 @@ def find_json_files(base_path):
 def process_chunk(args):
     chunk, file_name, batch_id, table_definitions = args
     print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
-    conn = connection_pool.get_connection()
-    cursor = conn.cursor()
-    try:
-        process_batch(cursor, chunk, table_definitions, batch_id)
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Errore nel processare chunk: {e}")
-    finally:
-        cursor.close()
-        conn.close()
+    
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            conn = connection_pool.get_connection()
+            cursor = conn.cursor()
+            try:
+                process_batch(cursor, chunk, table_definitions, batch_id)
+                conn.commit()
+                return  # Successo
+            except Exception as e:
+                logger.error(f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Backoff exponenziale
+                else:
+                    raise
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
+                raise
 
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
@@ -982,11 +1027,11 @@ def import_all_json_files(base_path, conn):
     )
     create_dynamic_tables(tmp_conn, table_definitions)
     tmp_conn.close()
-    # Pool di connessioni più grande per gestire 7 worker
+    # Pool di connessioni ridotto per stabilità
     global connection_pool
     connection_pool = mysql.connector.pooling.MySQLConnectionPool(
         pool_name="mypool",
-        pool_size=NUM_WORKERS + 4,  # Pool più grande per 7 worker + buffer
+        pool_size=NUM_WORKERS + 2,  # Ridotto per evitare sovraccarico
         host=MYSQL_HOST,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
@@ -1007,12 +1052,12 @@ def import_all_json_files(base_path, conn):
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("📊 Configurazione risorse AGGRESSIVA (90% CPU, 80% RAM):")
+    logger.info("📊 Configurazione risorse STABILE:")
     logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
     logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core ({NUM_WORKERS/8*100:.1f}% CPU)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (ridotto per stabilità)")
     logger.info(f"   • Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 4}")
+    logger.info(f"   • Pool connessioni: {NUM_WORKERS + 2}")
     logger.info(f"   • Chunk size max: {MAX_CHUNK_SIZE:,}")
     
     # Processa file per file per evitare OOM
