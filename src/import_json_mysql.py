@@ -968,44 +968,90 @@ def import_all_json_files(base_path, conn):
     logger.info(f"   • Batch size: {BATCH_SIZE:,}")
     logger.info(f"   • Pool connessioni: {NUM_WORKERS + 3}")
     
-    all_chunks = []
+    # Processa file per file per evitare OOM
+    total_processed_files = 0
+    total_processed_records = 0
+    
     for idx, json_file in enumerate(json_files, 1):
         file_name = os.path.basename(json_file)
+        
+        # Salta i file già processati con successo
+        conn_check = connection_pool.get_connection()
+        if is_file_processed(conn_check, file_name):
+            logger.info(f"\n⏭️  File già processato: {file_name}")
+            conn_check.close()
+            continue
+        conn_check.close()
+        
+        logger.info(f"\n📂 Processando file {idx}/{total_files}: {file_name}")
+        file_start_time = time.time()
+        
         batch_id = f"{int(time.time())}_{idx}"
         chunk_size = BATCH_SIZE
+        file_chunks = []
         current_chunk = []
-        with open(json_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    current_chunk.append((record, file_name))
-                    if len(current_chunk) >= chunk_size:
-                        all_chunks.append((current_chunk, file_name, batch_id, table_definitions))
-                        current_chunk = []
-                except Exception as e:
-                    logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                    continue
-        if current_chunk:
-            all_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+        file_record_count = 0
+        
+        # Leggi il file e crea i chunk (solo per questo file)
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        current_chunk.append((record, file_name))
+                        file_record_count += 1
+                        
+                        if len(current_chunk) >= chunk_size:
+                            file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+                            current_chunk = []
+                    except Exception as e:
+                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
+                        continue
+                        
+                if current_chunk:
+                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+            
+            logger.info(f"🚀 File: {file_name} - Chunk da processare: {len(file_chunks)} (record: {file_record_count:,})")
+            
+            # Processa i chunk di questo file con il pool
+            if file_chunks:
+                with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
+                    pool.map(process_chunk, file_chunks)
+                
+                # Marca il file come processato
+                conn_mark = connection_pool.get_connection()
+                mark_file_processed(conn_mark, file_name, file_record_count)
+                conn_mark.close()
+                
+                total_processed_files += 1
+                total_processed_records += file_record_count
+                
+                file_time = time.time() - file_start_time
+                logger.info(f"✅ File completato: {file_name}")
+                logger.info(f"   • Record processati: {file_record_count:,}")
+                logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
+                logger.info(f"   • Velocità: {file_record_count/file_time:.1f} record/s")
+                logger.info(f"   • Progresso: {total_processed_files}/{total_files} file ({total_processed_files/total_files*100:.1f}%)")
+            
+            # Libera la memoria dei chunk di questo file
+            del file_chunks
+            del current_chunk
+            gc.collect()
+            
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
+            conn_mark = connection_pool.get_connection()
+            mark_file_processed(conn_mark, file_name, file_record_count, 'failed', error_message)
+            conn_mark.close()
     
-    logger.info(f"🚀 Numero totale di chunk da processare: {len(all_chunks)}")
-    logger.info(f"📈 Chunk per worker: {len(all_chunks) / NUM_WORKERS:.1f}")
-    
-    with multiprocessing.Pool(processes=NUM_WORKERS) as pool:
-        pool.map(process_chunk, all_chunks)
-    # Marca tutti i file come processati (conteggio record per file)
-    file_record_count = {}
-    for chunk, file_name, _, _ in all_chunks:
-        file_record_count[file_name] = file_record_count.get(file_name, 0) + len(chunk)
-    for file_name, total_records in file_record_count.items():
-        c = connection_pool.get_connection()
-        mark_file_processed(c, file_name, total_records)
-        c.close()
     logger.info("\n" + "="*80)
     logger.info("✨ Importazione completata!")
+    logger.info(f"📊 File processati: {total_processed_files}/{total_files}")
+    logger.info(f"📊 Record totali: {total_processed_records:,}")
     logger.info("="*80)
 
 def main():
