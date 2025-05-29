@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import time
 import gc
@@ -46,6 +46,27 @@ logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
 logger.info(f"🖥️  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilità)")
 logger.info(f"🖥️  Batch size: {BATCH_SIZE:,} (ridotto per stabilità MySQL)")
+
+# Directory temporanea per i file CSV - Linux optimized
+TEMP_DIR_PREFERRED = '/database/tmp'
+TEMP_DIR_FALLBACK = os.path.join(tempfile.gettempdir(), 'dbmake_tmp')
+
+try:
+    # Prova a creare la directory preferita
+    os.makedirs(TEMP_DIR_PREFERRED, exist_ok=True)
+    # Test di scrittura per verificare i permessi
+    test_file = os.path.join(TEMP_DIR_PREFERRED, 'test_write.tmp')
+    with open(test_file, 'w') as f:
+        f.write('test')
+    os.remove(test_file)
+    TEMP_DIR = TEMP_DIR_PREFERRED
+    logger.info(f"📁 Directory temporanea: {TEMP_DIR} ✅")
+except (OSError, PermissionError) as e:
+    logger.warning(f"⚠️ Impossibile usare {TEMP_DIR_PREFERRED}: {e}")
+    logger.info(f"🔄 Fallback a directory temporanea di sistema...")
+    os.makedirs(TEMP_DIR_FALLBACK, exist_ok=True)
+    TEMP_DIR = TEMP_DIR_FALLBACK
+    logger.info(f"📁 Directory temporanea: {TEMP_DIR} ✅")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -199,7 +220,7 @@ class RecordProcessor:
                             # Formato non riconosciuto, imposta a NULL
                             value = None
                 except Exception as e:
-                    logger.warning(f"🖥️ Errore nella conversione del campo data {field}: {value} - {str(e)}")
+                    logger.warning(f"⚠️ Errore nella conversione del campo data {field}: {value} - {str(e)}")
                     value = None
             
             # Handle numeric fields
@@ -218,7 +239,7 @@ class RecordProcessor:
                             # Round to 2 decimal places to avoid precision issues
                             value = round(value, 2)
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"🖥️ Errore nella conversione del campo numerico {field}: {value} - {str(e)}")
+                    logger.warning(f"⚠️ Errore nella conversione del campo numerico {field}: {value} - {str(e)}")
                     value = None
             
             # Handle VARCHAR fields
@@ -245,7 +266,7 @@ class RecordProcessor:
         with self.lock:
             self.processed_count += count
             if self.processed_count % 10000 == 0:  # Log ogni 10000 record
-                logger.info(f"🖥️ Progresso: {self.processed_count}/{self.total_count} record "
+                logger.info(f"📊 Progresso: {self.processed_count}/{self.total_count} record "
                           f"({(self.processed_count/self.total_count*100):.1f}%)")
 
 def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
@@ -291,12 +312,212 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
             processor.json_data[field].extend(data)
     
     return processor.main_data, processor.json_data
+
+def write_batch_to_csv(batch_data, fields, batch_id):
+    """Scrive un batch di dati in un file CSV temporaneo."""
+    csv_file = os.path.join(TEMP_DIR, f'main_data_batch_{batch_id}.csv')
+    
+    try:
+        # Debug: controlla se ci sono campi data problematici
+        date_field_indices = []
+        for i, field in enumerate(fields):
+            if 'data_' in field.lower() or field.lower() in ['created_at', 'updated_at']:
+                date_field_indices.append((i, field))
+        
+        if date_field_indices:
+            logger.info(f"🗓️ Debug campi data nel batch {batch_id}:")
+            logger.info(f"   • Campi data trovati: {[f[1] for f in date_field_indices]}")
+            
+            # Mostra alcuni esempi di valori data
+            for row_idx, row in enumerate(batch_data[:3]):  # Solo primi 3 record
+                for field_idx, field_name in date_field_indices:
+                    if field_idx < len(row):
+                        value = row[field_idx]
+                        logger.info(f"   • Record {row_idx+1}, {field_name}: '{value}' (tipo: {type(value).__name__})")
+        
+        # Converti i dati per CSV - gestione corretta di None/NULL
+        processed_batch_data = []
+        for row in batch_data:
+            processed_row = []
+            for value in row:
+                if value is None:
+                    # Per MySQL NULL, scrivi stringa vuota nel CSV
+                    processed_row.append('')
+                elif isinstance(value, str) and value == 'None':
+                    # Se è stringa 'None', trattala come NULL
+                    processed_row.append('')
+                else:
+                    # Valore normale
+                    processed_row.append(value)
+            processed_batch_data.append(processed_row)
+        
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)  # Cambiato da QUOTE_ALL
+            # Scrivi l'header
+            writer.writerow(fields)
+            # Scrivi i dati processati
+            writer.writerows(processed_batch_data)
+        
+        # Verifica che il file sia stato creato
+        if os.path.exists(csv_file):
+            file_size = os.path.getsize(csv_file)
+            logger.info(f"✅ File CSV creato: {csv_file} ({file_size} bytes)")
+            
+            # Debug: mostra le prime righe del CSV
+            logger.info(f"🔍 Prime 3 righe del CSV:")
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    if i >= 4:  # Header + 3 righe dati
+                        break
+                    if i == 0:
+                        logger.info(f"   Header: {line.strip()[:200]}...")
+                    else:
+                        logger.info(f"   Riga {i}: {line.strip()[:200]}...")
+        else:
+            logger.error(f"❌ File CSV non creato: {csv_file}")
+            raise FileNotFoundError(f"File CSV non creato: {csv_file}")
+            
+        return csv_file
+    except Exception as e:
+        logger.error(f"❌ Errore nella scrittura del file CSV: {e}")
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+        raise
+
+def load_data_from_csv(cursor, csv_file, table_name, fields):
+    """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE o INSERT batch."""
+    try:
+        # Normalizza il path per MySQL (usa sempre forward slash)
+        normalized_path = csv_file.replace('\\', '/')
+        
+        # Controlla la dimensione del file
+        file_size = os.path.getsize(csv_file)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        logger.info(f"📥 Caricamento dati da: {csv_file}")
+        logger.info(f"📥 Dimensione file: {file_size_mb:.1f}MB")
+        
+        # Threshold per decidere metodo di caricamento
+        MAX_FILE_SIZE_MB = 50  # Se > 50MB, usa INSERT batch
+        
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            logger.warning(f"⚠️ File troppo grande ({file_size_mb:.1f}MB > {MAX_FILE_SIZE_MB}MB)")
+            logger.info(f"🔄 Fallback a INSERT batch...")
+            
+            # Usa INSERT batch invece di LOAD DATA
+            rows_affected = load_data_with_insert_batch(cursor, csv_file, table_name, fields)
+            
+        else:
+            logger.info(f"📥 Path normalizzato: {normalized_path}")
+            
+            # Costruisci la query LOAD DATA con gestione corretta dei NULL
+            load_data_query = f"""
+            LOAD DATA LOCAL INFILE '{normalized_path}'
+            INTO TABLE {table_name}
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"' ESCAPED BY '\\\\'
+            LINES TERMINATED BY '\\n'
+            IGNORE 1 LINES
+            ({', '.join(fields)})
+            SET {', '.join([f'{field} = NULLIF({field}, "")' for field in fields])}
+            """
+            
+            logger.info(f"📥 Query LOAD DATA con NULL handling...")
+            
+            # Esegui la query
+            cursor.execute(load_data_query)
+            
+            # Verifica il numero di righe inserite
+            cursor.execute("SELECT ROW_COUNT()")
+            rows_affected = cursor.fetchone()[0]
+        
+        logger.info(f"✅ Importate {rows_affected} righe dal file {csv_file}")
+        
+    except mysql.connector.Error as e:
+        logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
+        logger.error(f"❌ File: {csv_file}")
+        logger.error(f"❌ Path normalizzato: {normalized_path}")
+        logger.error(f"❌ File esiste: {os.path.exists(csv_file)}")
+        
+        # Se LOAD DATA fallisce, prova INSERT batch come fallback
+        if "Got packets out of order" in str(e) or "Lost connection" in str(e):
+            logger.warning(f"🔄 LOAD DATA fallito, provo INSERT batch...")
+            try:
+                rows_affected = load_data_with_insert_batch(cursor, csv_file, table_name, fields)
+                logger.info(f"✅ Fallback riuscito: {rows_affected} righe inserite")
+            except Exception as fallback_error:
+                logger.error(f"❌ Anche INSERT batch fallito: {fallback_error}")
+                raise
+        else:
+            raise
+    finally:
+        # Pulisci il file temporaneo
+        try:
+            if os.path.exists(csv_file):
+                os.remove(csv_file)
+                logger.info(f"🗑️ File temporaneo rimosso: {csv_file}")
+        except Exception as e:
+            logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
+
+def load_data_with_insert_batch(cursor, csv_file, table_name, fields):
+    """Carica dati usando INSERT batch invece di LOAD DATA LOCAL INFILE."""
+    import csv as csv_module
+    
+    logger.info(f"🔄 Caricamento con INSERT batch: {csv_file}")
+    
+    rows_inserted = 0
+    insert_batch_size = 1000  # Insert 1000 righe alla volta
+    
+    # Prepara la query INSERT
+    placeholders = ', '.join(['%s'] * len(fields))
+    insert_query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
+    
+    try:
+        with open(csv_file, 'r', encoding='utf-8') as f:
+            reader = csv_module.reader(f)
+            
+            # Salta l'header
+            next(reader)
+            
+            batch = []
+            for row in reader:
+                # Converti 'None' string a None reale per NULL MySQL
+                processed_row = []
+                for value in row:
+                    if value == 'None' or value == '':
+                        processed_row.append(None)
+                    else:
+                        processed_row.append(value)
+                
+                batch.append(processed_row)
+                
+                # Insert quando raggiungiamo la dimensione del batch
+                if len(batch) >= insert_batch_size:
+                    cursor.executemany(insert_query, batch)
+                    rows_inserted += len(batch)
+                    batch = []
+                    
+                    # Log progresso ogni 10k righe
+                    if rows_inserted % 10000 == 0:
+                        logger.info(f"📊 INSERT batch progresso: {rows_inserted:,} righe inserite")
+            
+            # Insert l'ultimo batch se non vuoto
+            if batch:
+                cursor.executemany(insert_query, batch)
+                rows_inserted += len(batch)
+        
+        logger.info(f"✅ INSERT batch completato: {rows_inserted:,} righe totali")
+        return rows_inserted
+        
+    except Exception as e:
+        logger.error(f"❌ Errore in INSERT batch: {e}")
+        raise
+
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV."""
     if not main_data:
         return 0
         
-    logger.info(f"🖥️ Inserimento diretto di {len(main_data):,} record in {table_name}")
+    logger.info(f"📥 Inserimento diretto di {len(main_data):,} record in {table_name}")
     
     rows_inserted = 0
     insert_batch_size = 1000  # Insert 1000 righe alla volta
@@ -316,13 +537,13 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
             
             # Log progresso ogni 10k righe
             if rows_inserted % 10000 == 0:
-                logger.info(f"🖥️ INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe inserite")
+                logger.info(f"📊 INSERT progresso: {rows_inserted:,}/{len(main_data):,} righe inserite")
         
-        logger.info(f"🖥️ INSERT diretto completato: {rows_inserted:,} righe totali")
+        logger.info(f"✅ INSERT diretto completato: {rows_inserted:,} righe totali")
         return rows_inserted
         
     except Exception as e:
-        logger.error(f"🖥️ Errore in INSERT diretto: {e}")
+        logger.error(f"❌ Errore in INSERT diretto: {e}")
         raise
 
 def process_batch(cursor, batch, table_definitions, batch_id):
@@ -338,11 +559,11 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             field_mapping = dict(cursor.fetchall())
         except mysql.connector.Error as e:
             if e.errno == 2006:  # MySQL server has gone away
-                logger.warning("🖥️ Connessione persa, riprovo...")
+                logger.warning("⚠️ Connessione persa, riprovo...")
                 raise ValueError("CONNECTION_LOST")
             raise
         
-        logger.info(f"🖥️ Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
+        logger.info(f"🔄 Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
         start_time = time.time()
         
         # Elabora il batch in parallelo
@@ -353,13 +574,13 @@ def process_batch(cursor, batch, table_definitions, batch_id):
             fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
             
             # Debug: mostra alcuni esempi di dati
-            logger.info(f"🖥️ Debug dati per INSERT diretto:")
-            logger.info(f"   🖥️ Campi totali: {len(fields)}")
-            logger.info(f"   🖥️ Record totali: {len(main_data):,}")
+            logger.info(f"🗓️ Debug dati per INSERT diretto:")
+            logger.info(f"   • Campi totali: {len(fields)}")
+            logger.info(f"   • Record totali: {len(main_data):,}")
             
             # Mostra i primi 2 record per debug
             for i, record in enumerate(main_data[:2]):
-                logger.info(f"   🖥️ Record {i+1}: {len(record)} valori")
+                logger.info(f"   • Record {i+1}: {len(record)} valori")
                 for j, (field, value) in enumerate(zip(fields, record)):
                     if 'data_' in field.lower() and j < 10:  # Solo primi 10 campi data
                         logger.info(f"     - {field}: {value} ({type(value).__name__})")
@@ -383,7 +604,7 @@ def process_batch(cursor, batch, table_definitions, batch_id):
                     cursor.executemany(insert_json, json_data_with_metadata)
                 except mysql.connector.Error as e:
                     if e.errno == 2006:  # MySQL server has gone away
-                        logger.warning("🖥️ Connessione persa durante l'inserimento JSON, riprovo...")
+                        logger.warning("⚠️ Connessione persa durante l'inserimento JSON, riprovo...")
                         raise ValueError("CONNECTION_LOST")
                     raise
         
@@ -401,26 +622,50 @@ def process_batch(cursor, batch, table_definitions, batch_id):
         
         elapsed_time = time.time() - start_time
         speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
-        logger.info(f"🖥️ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
+        logger.info(f"✅ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
         
     except mysql.connector.Error as e:
         if e.errno == 1153:  # Packet too large
-            logger.warning("\n🖥️ Batch troppo grande, riduco la dimensione...")
+            logger.warning("\n⚠️ Batch troppo grande, riduco la dimensione...")
             raise ValueError("BATCH_TOO_LARGE")
         raise
     except Exception as e:
-        logger.error(f"\n🖥️ Errore durante il processing del batch: {e}")
+        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
         raise
 
 def connect_mysql():
     max_retries = 3
     retry_delay = 5  # secondi
     
+    # Usa la directory temporanea determinata sopra
+    tmp_dir = TEMP_DIR
+    
+    # Pulisci la directory temporanea
+    for file in os.listdir(tmp_dir):
+        try:
+            file_path = os.path.join(tmp_dir, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except:
+            pass
+    
+    # Crea un file di configurazione MySQL temporaneo
+    mysql_config = f"""[client]
+tmpdir={tmp_dir}
+[mysqld]
+tmpdir={tmp_dir}
+"""
+    config_path = os.path.join(tmp_dir, 'mysql.cnf')
+    with open(config_path, 'w') as f:
+        f.write(mysql_config)
+    
     logger.info("\n🔍 Verifica configurazione MySQL:")
     logger.info(f"   • Host: {MYSQL_HOST}")
     logger.info(f"   • User: {MYSQL_USER}")
     logger.info(f"   • Database: {MYSQL_DATABASE}")
     logger.info(f"   • Password: {'*' * len(MYSQL_PASSWORD) if MYSQL_PASSWORD else 'non impostata'}")
+    logger.info(f"   • Directory temporanea: {tmp_dir}")
+    logger.info(f"   • File di configurazione: {config_path}")
     
     for attempt in range(max_retries):
         try:
@@ -436,12 +681,15 @@ def connect_mysql():
                 pool_size=5,
                 pool_name="mypool",
                 use_pure=True,  # Usa l'implementazione Python pura
+                client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],  # Permetti file locali
+                option_files=[config_path],  # Usa il file di configurazione
                 ssl_disabled=True,  # Disabilita SSL per evitare problemi di connessione
                 get_warnings=True,
                 raise_on_warnings=True,
                 consume_results=True,
                 buffered=True,
                 raw=False,
+                allow_local_infile=True,
                 use_unicode=True,
                 auth_plugin='mysql_native_password'
             )
@@ -455,11 +703,11 @@ def connect_mysql():
             cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
             cursor.close()
             
-            logger.info("🖥️ Connessione riuscita!")
+            logger.info("✅ Connessione riuscita!")
             return conn
         except mysql.connector.Error as err:
             if err.errno == errorcode.ER_BAD_DB_ERROR:
-                logger.warning(f"\n🖥️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
+                logger.warning(f"\n⚠️ Database '{MYSQL_DATABASE}' non trovato, tentativo di creazione...")
                 # Crea il database se non esiste
                 tmp_conn = mysql.connector.connect(
                     host=MYSQL_HOST,
@@ -473,14 +721,14 @@ def connect_mysql():
                 cursor = tmp_conn.cursor()
                 cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
                 tmp_conn.close()
-                logger.info(f"🖥️ Database '{MYSQL_DATABASE}' creato con successo!")
+                logger.info(f"✅ Database '{MYSQL_DATABASE}' creato con successo!")
                 return connect_mysql()
             elif attempt < max_retries - 1:
-                logger.warning(f"\n🖥️ Tentativo di connessione {attempt + 1} fallito: {err}")
-                logger.info(f"🖥️ Riprovo tra {retry_delay} secondi...")
+                logger.warning(f"\n⚠️ Tentativo di connessione {attempt + 1} fallito: {err}")
+                logger.info(f"🔄 Riprovo tra {retry_delay} secondi...")
                 time.sleep(retry_delay)
             else:
-                logger.error(f"\n🖥️ Errore di connessione dopo {max_retries} tentativi: {err}")
+                logger.error(f"\n❌ Errore di connessione dopo {max_retries} tentativi: {err}")
                 raise
 
 def check_disk_space():
@@ -502,22 +750,22 @@ def check_disk_space():
         else:
             tmp_dir_free_gb = 0
         
-        logger.info("\n🖥️ Spazio disco disponibile:")
-        logger.info(f"   🖥️ /database: {database_free_gb:.1f}GB")
-        logger.info(f"   🖥️ /tmp: {tmp_free_gb:.1f}GB")
-        logger.info(f"   🖥️ {tmp_dir}: {tmp_dir_free_gb:.1f}GB")
+        logger.info("\n💾 Spazio disco disponibile:")
+        logger.info(f"   • /database: {database_free_gb:.1f}GB")
+        logger.info(f"   • /tmp: {tmp_free_gb:.1f}GB")
+        logger.info(f"   • {tmp_dir}: {tmp_dir_free_gb:.1f}GB")
         
         # Avvisa se lo spazio è basso
         if database_free_gb < 10:
-            logger.warning("🖥️ Spazio disponibile su /database è basso!")
+            logger.warning("⚠️ Spazio disponibile su /database è basso!")
         if tmp_free_gb < 1:
-            logger.warning("🖥️ Spazio disponibile su /tmp è basso!")
+            logger.warning("⚠️ Spazio disponibile su /tmp è basso!")
         if tmp_dir_free_gb < 1:
-            logger.warning(f"🖥️ Spazio disponibile su {tmp_dir} è basso!")
+            logger.warning(f"⚠️ Spazio disponibile su {tmp_dir} è basso!")
             
         return database_free_gb, tmp_free_gb, tmp_dir_free_gb
     except Exception as e:
-        logger.error(f"🖥️ Errore nel controllo dello spazio disco: {e}")
+        logger.error(f"❌ Errore nel controllo dello spazio disco: {e}")
         return None, None, None
 
 def analyze_json_structure(json_files):
@@ -526,7 +774,7 @@ def analyze_json_structure(json_files):
     field_patterns = defaultdict(set)  # Per memorizzare i pattern dei valori
     field_has_mixed = defaultdict(bool)  # Traccia se un campo ha valori misti
     
-    logger.info("🖥️ Analisi della struttura dei JSON...")
+    logger.info("🔍 Analisi della struttura dei JSON...")
     logger.info("Questa fase analizza la struttura dei JSON per determinare:")
     logger.info("1. I tipi di dati per ogni campo")
     logger.info("2. Le lunghezze massime dei campi stringa")
@@ -548,8 +796,8 @@ def analyze_json_structure(json_files):
     process = psutil.Process()
     max_memory_bytes = USABLE_MEMORY_BYTES * 0.9  # 90% del buffer disponibile per l'analisi
     
-    logger.info(f"🖥️ Limite righe per file: {MAX_ROWS_PER_FILE:,}")
-    logger.info(f"🖥️ Memoria massima per analisi: {max_memory_bytes/1024/1024/1024:.1f}GB")
+    logger.info(f"📊 Limite righe per file: {MAX_ROWS_PER_FILE:,}")
+    logger.info(f"💾 Memoria massima per analisi: {max_memory_bytes/1024/1024/1024:.1f}GB")
     
     # Campi che devono SEMPRE essere VARCHAR (blacklist)
     ALWAYS_VARCHAR_FIELDS = {
@@ -800,7 +1048,7 @@ def analyze_json_structure(json_files):
                         if file_records % 1000 == 0:
                             if not check_memory_limit():
                                 current_memory_gb = process.memory_info().rss / (1024**3)
-                                logger.warning(f"🖥️ Limite memoria raggiunto ({current_memory_gb:.1f}GB), passo al prossimo file")
+                                logger.warning(f"⚠️ Limite memoria raggiunto ({current_memory_gb:.1f}GB), passo al prossimo file")
                                 memory_exceeded = True
                                 break
                             
@@ -815,7 +1063,7 @@ def analyze_json_structure(json_files):
                             avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
                             current_memory_gb = process.memory_info().rss / (1024**3)
                             
-                            logger.info(f"🖥️ Progresso: File {files_analyzed}/{total_files} | "
+                            logger.info(f"📊 Progresso: File {files_analyzed}/{total_files} | "
                                       f"Record nel file: {file_records:,}/{MAX_ROWS_PER_FILE:,} | "
                                       f"Velocità: {speed:.1f} record/s | "
                                       f"Totale: {records_analyzed:,} record ({avg_speed:.1f} record/s) | "
@@ -824,7 +1072,7 @@ def analyze_json_structure(json_files):
                             last_progress_time = current_time
                             
                     except Exception as e:
-                        logger.error(f"🖥️ Errore nell'analisi del record nel file {json_file}: {e}")
+                        logger.error(f"⚠️ Errore nell'analisi del record nel file {json_file}: {e}")
                         continue
             
             file_time = time.time() - file_start_time
@@ -834,24 +1082,24 @@ def analyze_json_structure(json_files):
             
             # Determina lo status del file
             if memory_exceeded:
-                status = "🖥️ LIMITE RAM"
+                status = "💾 LIMITE RAM"
             elif limit_reached:
-                status = "🖥️ LIMITE 2K"
+                status = "📊 LIMITE 2K"
             else:
-                status = "🖥️"
+                status = "✅"
                 
             logger.info(f"{status} File {files_analyzed}/{total_files} completato:")
-            logger.info(f"   🖥️ Record analizzati: {file_records:,}")
-            logger.info(f"   🖥️ Tempo file: {file_time:.1f}s")
-            logger.info(f"   🖥️ Velocità media: {file_records/file_time:.1f} record/s")
-            logger.info(f"   🖥️ Progresso totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
-            logger.info(f"   🖥️ RAM utilizzata: {current_memory_gb:.1f}GB")
+            logger.info(f"   • Record analizzati: {file_records:,}")
+            logger.info(f"   • Tempo file: {file_time:.1f}s")
+            logger.info(f"   • Velocità media: {file_records/file_time:.1f} record/s")
+            logger.info(f"   • Progresso totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
+            logger.info(f"   • RAM utilizzata: {current_memory_gb:.1f}GB")
             
             # Garbage collection dopo ogni file
             gc.collect()
             
         except Exception as e:
-            logger.error(f"🖥️ Errore nell'analisi del file {json_file}: {e}")
+            logger.error(f"⚠️ Errore nell'analisi del file {json_file}: {e}")
             continue
     
     # Crea le definizioni delle tabelle
@@ -897,28 +1145,28 @@ def analyze_json_structure(json_files):
     final_memory_gb = process.memory_info().rss / (1024**3)
     mysql_row_limit = 65535
     
-    logger.info("\n🖥️ Struttura JSON analizzata:")
-    logger.info(f"   🖥️ File analizzati: {files_analyzed}/{total_files}")
-    logger.info(f"   🖥️ Record totali analizzati: {records_analyzed:,}")
-    logger.info(f"   🖥️ Media record per file: {records_analyzed/files_analyzed:.0f}")
-    logger.info(f"   🖥️ Campi trovati: {len(table_definitions)}")
-    logger.info(f"   🖥️ Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
-    logger.info(f"   🖥️ RAM finale: {final_memory_gb:.1f}GB")
+    logger.info("\n📊 Struttura JSON analizzata:")
+    logger.info(f"   • File analizzati: {files_analyzed}/{total_files}")
+    logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
+    logger.info(f"   • Media record per file: {records_analyzed/files_analyzed:.0f}")
+    logger.info(f"   • Campi trovati: {len(table_definitions)}")
+    logger.info(f"   • Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
+    logger.info(f"   • RAM finale: {final_memory_gb:.1f}GB")
     
     # Riepilogo ottimizzazioni dimensioni
-    logger.info(f"\n🖥️ Ottimizzazioni dimensioni tabella:")
-    logger.info(f"   🖥️ Dimensione riga stimata: {total_estimated_row_size:,} bytes")
-    logger.info(f"   🖥️ Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
+    logger.info(f"\n🔧 Ottimizzazioni dimensioni tabella:")
+    logger.info(f"   • Dimensione riga stimata: {total_estimated_row_size:,} bytes")
+    logger.info(f"   • Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
     
     if total_estimated_row_size > mysql_row_limit:
-        logger.warning(f"   🖥️  RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
-        logger.warning(f"   🖥️  Convertendo più campi a TEXT...")
+        logger.warning(f"   ⚠️  RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
+        logger.warning(f"   ⚠️  Convertendo più campi a TEXT...")
         
         # Riottimizza convertendo i campi più grandi a TEXT
         for field, column_def in table_definitions.items():
             if column_def.startswith('VARCHAR') and '500' in column_def:
                 table_definitions[field] = 'TEXT'
-                logger.info(f"      🖥️ {field}: {column_def} → TEXT")
+                logger.info(f"       🔄 {field}: {column_def} → TEXT")
         
         # Ricalcola la dimensione
         total_estimated_row_size = 0
@@ -945,23 +1193,23 @@ def analyze_json_structure(json_files):
                 field_size = 10
             total_estimated_row_size += field_size
         
-        logger.info(f"   🖥️ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
+        logger.info(f"   ✅ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
     else:
-        logger.info(f"   🖥️ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
+        logger.info(f"   ✅ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
     
     # Mostra breakdown dei campi più grandi
     field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
-    logger.info(f"\n🖥️ Top 10 campi per dimensione:")
+    logger.info(f"\n📏 Top 10 campi per dimensione:")
     for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
-        mixed_indicator = "🖥️" if field_has_mixed[field] else ""
+        mixed_indicator = "🔀" if field_has_mixed[field] else ""
         logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
     
     logger.info("\nDettaglio tutti i campi:")
     for field, def_type in table_definitions.items():
-        mixed_indicator = "🖥️" if field_has_mixed[field] else ""
-        logger.info(f"   🖥️ {field}: {def_type} {mixed_indicator}")
+        mixed_indicator = "🔀" if field_has_mixed[field] else ""
+        logger.info(f"   • {field}: {def_type} {mixed_indicator}")
         if field in field_patterns:
-            logger.info(f"      Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
+            logger.info(f"     Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
     
     return table_definitions
 
@@ -1022,24 +1270,24 @@ def verify_table_structure(conn, table_name='main_data'):
         cursor.execute(f"DESCRIBE {table_name}")
         columns = cursor.fetchall()
         
-        logger.info(f"\n🖥️ Struttura tabella {table_name}:")
+        logger.info(f"\n🔍 Struttura tabella {table_name}:")
         date_columns = []
         for column in columns:
             field_name, field_type, is_null, key, default, extra = column
-            logger.info(f"   🖥️ {field_name}: {field_type}")
+            logger.info(f"   • {field_name}: {field_type}")
             
             # Evidenzia i campi data
             if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
                 date_columns.append((field_name, field_type))
         
         if date_columns:
-            logger.info(f"\n🖥️ Campi data nella tabella:")
+            logger.info(f"\n🗓️ Campi data nella tabella:")
             for field_name, field_type in date_columns:
-                status = "🖥️" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "🖥️"
-                logger.info(f"   🖥️ {status} {field_name}: {field_type}")
+                status = "✅" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "❌"
+                logger.info(f"   {status} {field_name}: {field_type}")
                 
     except mysql.connector.Error as e:
-        logger.error(f"🖥️ Errore nella verifica struttura tabella: {e}")
+        logger.error(f"❌ Errore nella verifica struttura tabella: {e}")
     finally:
         cursor.close()
 
@@ -1085,8 +1333,8 @@ def create_dynamic_tables(conn, table_definitions):
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     
-    logger.info(f"🖥️ Creazione tabella main_data...")
-    logger.info(f"🖥️ Campi principali: {len(main_fields)}")
+    logger.info(f"🏗️ Creazione tabella main_data...")
+    logger.info(f"🏗️ Campi principali: {len(main_fields)}")
     
     cursor.execute(create_main_table)
     
@@ -1172,7 +1420,7 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         """, (file_name, record_count, status, error_message))
         conn.commit()
     except Exception as e:
-        logger.error(f"🖥️ Errore nel marcare il file come processato: {e}")
+        logger.error(f"❌ Errore nel marcare il file come processato: {e}")
         conn.rollback()
     finally:
         cursor.close()
@@ -1215,10 +1463,80 @@ def process_chunk(args):
                 logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
                 raise
 
+def test_mysql_file_access(conn):
+    """Testa se MySQL può accedere ai file nella directory temporanea."""
+    cursor = conn.cursor()
+    try:
+        # Crea un file di test
+        test_file = os.path.join(TEMP_DIR, 'mysql_access_test.csv')
+        with open(test_file, 'w') as f:
+            f.write('test_col\n"test_value"\n')
+        
+        # Verifica che il file esista
+        if not os.path.exists(test_file):
+            logger.error(f"❌ File di test non creato: {test_file}")
+            return False
+        
+        logger.info(f"🧪 Test accesso MySQL al file: {test_file}")
+        
+        # Crea una tabella temporanea per il test
+        cursor.execute("""
+            CREATE TEMPORARY TABLE test_load (
+                test_col VARCHAR(50)
+            )
+        """)
+        
+        # Prova LOAD DATA LOCAL INFILE
+        load_query = f"""
+            LOAD DATA LOCAL INFILE '{test_file}'
+            INTO TABLE test_load
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+            LINES TERMINATED BY '\\n'
+            IGNORE 1 LINES
+        """
+        
+        cursor.execute(load_query)
+        
+        # Verifica che i dati siano stati caricati
+        cursor.execute("SELECT COUNT(*) FROM test_load")
+        count = cursor.fetchone()[0]
+        
+        if count > 0:
+            logger.info(f"✅ Test MySQL file access: SUCCESS ({count} righe caricate)")
+            success = True
+        else:
+            logger.warning(f"⚠️ Test MySQL file access: Nessuna riga caricata")
+            success = False
+        
+        # Pulisci
+        cursor.execute("DROP TEMPORARY TABLE test_load")
+        os.remove(test_file)
+        
+        return success
+        
+    except mysql.connector.Error as e:
+        logger.error(f"❌ Test MySQL file access FAILED: {e}")
+        # Pulisci in caso di errore
+        try:
+            cursor.execute("DROP TEMPORARY TABLE IF EXISTS test_load")
+            if os.path.exists(test_file):
+                os.remove(test_file)
+        except:
+            pass
+        return False
+    finally:
+        cursor.close()
+
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
+    
+    # Test accesso file MySQL
+    if not test_mysql_file_access(conn):
+        logger.error("❌ MySQL non può accedere ai file temporanei!")
+        logger.error("❌ Verifica configurazione secure_file_priv e local_infile")
+        return
     
     global table_definitions
     table_definitions = analyze_json_structure(json_files)
@@ -1246,23 +1564,25 @@ def import_all_json_files(base_path, conn):
         autocommit=True,
         connect_timeout=180,
         use_pure=True,
+        client_flags=[mysql.connector.ClientFlag.LOCAL_FILES],
         ssl_disabled=True,
         get_warnings=True,
         raise_on_warnings=True,
         consume_results=True,
         buffered=True,
         raw=False,
+        allow_local_infile=True,
         use_unicode=True,
         auth_plugin='mysql_native_password'
     )
     
-    logger.info("🖥️ Configurazione risorse MONO-PROCESSO:")
-    logger.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger.info(f"   🖥️ RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   🖥️ Worker process: {NUM_WORKERS}/8 core (MONO-PROCESSO)")
-    logger.info(f"   🖥️ Batch size: {BATCH_SIZE:,}")
-    logger.info(f"   🖥️ Pool connessioni: 2 (MINIMAL)")
-    logger.info(f"   🖥️ Chunk size max: {MAX_CHUNK_SIZE:,}")
+    logger.info("📊 Configurazione risorse MONO-PROCESSO:")
+    logger.info(f"   • RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger.info(f"   • RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger.info(f"   • Worker process: {NUM_WORKERS}/8 core (MONO-PROCESSO)")
+    logger.info(f"   • Batch size: {BATCH_SIZE:,}")
+    logger.info(f"   • Pool connessioni: 2 (MINIMAL)")
+    logger.info(f"   • Chunk size max: {MAX_CHUNK_SIZE:,}")
     
     # Processa file per file SEQUENZIALMENTE
     total_processed_files = 0
@@ -1274,12 +1594,12 @@ def import_all_json_files(base_path, conn):
         # Salta i file già processati con successo
         conn_check = connection_pool.get_connection()
         if is_file_processed(conn_check, file_name):
-            logger.info(f"\n🖥️  File già processato: {file_name}")
+            logger.info(f"\n⏭️  File già processato: {file_name}")
             conn_check.close()
             continue
         conn_check.close()
         
-        logger.info(f"\n🖥️ Processando file {idx}/{total_files}: {file_name}")
+        logger.info(f"\n📂 Processando file {idx}/{total_files}: {file_name}")
         file_start_time = time.time()
         
         batch_id = f"{int(time.time())}_{idx}"
@@ -1304,13 +1624,13 @@ def import_all_json_files(base_path, conn):
                             file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
                             current_chunk = []
                     except Exception as e:
-                        logger.error(f"\n🖥️ Errore nel parsing del record: {e}")
+                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
                         continue
                         
                 if current_chunk:
                     file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
             
-            logger.info(f"🖥️ File: {file_name} - Chunk da processare: {len(file_chunks)} (record: {file_record_count:,})")
+            logger.info(f"🚀 File: {file_name} - Chunk da processare: {len(file_chunks)} (record: {file_record_count:,})")
             
             # Processa i chunk di questo file SEQUENZIALMENTE (no multiprocessing)
             if file_chunks:
@@ -1318,7 +1638,7 @@ def import_all_json_files(base_path, conn):
                     try:
                         process_chunk_sequential(chunk_data)
                     except Exception as e:
-                        logger.error(f"🖥️ Errore nel processing chunk: {e}")
+                        logger.error(f"❌ Errore nel processing chunk: {e}")
                         # Continua con il prossimo chunk invece di fallire tutto
                         continue
                 
@@ -1331,11 +1651,11 @@ def import_all_json_files(base_path, conn):
                 total_processed_records += file_record_count
                 
                 file_time = time.time() - file_start_time
-                logger.info(f"🖥️ File completato: {file_name}")
-                logger.info(f"   🖥️ Record processati: {file_record_count:,}")
-                logger.info(f"   🖥️ Tempo elaborazione: {file_time:.1f}s")
-                logger.info(f"   🖥️ Velocità: {file_record_count/file_time:.1f} record/s")
-                logger.info(f"   🖥️ Progresso: {total_processed_files}/{total_files} file ({total_processed_files/total_files*100:.1f}%)")
+                logger.info(f"✅ File completato: {file_name}")
+                logger.info(f"   • Record processati: {file_record_count:,}")
+                logger.info(f"   • Tempo elaborazione: {file_time:.1f}s")
+                logger.info(f"   • Velocità: {file_record_count/file_time:.1f} record/s")
+                logger.info(f"   • Progresso: {total_processed_files}/{total_files} file ({total_processed_files/total_files*100:.1f}%)")
             
             # Libera la memoria dei chunk di questo file
             del file_chunks
@@ -1344,15 +1664,15 @@ def import_all_json_files(base_path, conn):
             
         except Exception as e:
             error_message = str(e)
-            logger.error(f"\n🖥️ Errore nel processing del file {file_name}: {error_message}")
+            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
             conn_mark = connection_pool.get_connection()
             mark_file_processed(conn_mark, file_name, file_record_count, 'failed', error_message)
             conn_mark.close()
     
     logger.info("\n" + "="*80)
-    logger.info("🖥️ Importazione completata!")
-    logger.info(f"🖥️ File processati: {total_processed_files}/{total_files}")
-    logger.info(f"🖥️ Record totali: {total_processed_records:,}")
+    logger.info("✨ Importazione completata!")
+    logger.info(f"📊 File processati: {total_processed_files}/{total_files}")
+    logger.info(f"📊 Record totali: {total_processed_records:,}")
     logger.info("="*80)
 
 def process_chunk_sequential(args):
@@ -1391,11 +1711,11 @@ def main():
         # Crea la directory dei log se non esiste
         os.makedirs('logs', exist_ok=True)
         
-        logger.info(f"🖥️ Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"🖥️ RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
-        logger.info(f"🖥️ RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
-        logger.info(f"🖥️ Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
-        logger.info(f"🖥️ Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
+        logger.info(f"🕒 Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"📊 RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
+        logger.info(f"📊 RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
+        logger.info(f"📊 Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
+        logger.info(f"📊 Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
         
         # Verifica lo spazio disco
         check_disk_space()
