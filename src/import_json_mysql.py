@@ -549,7 +549,7 @@ def analyze_json_structure(json_files):
         'url': r'^https?://',                      # URL
         'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
         'postal_code': r'^\d{5}$',                 # CAP
-        'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$',  # Codice fiscale
+        'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\d{2}$',  # Codice fiscale
         'partita_iva': r'^\d{11}$',               # Partita IVA
         'cup_code': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
         'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
@@ -593,21 +593,58 @@ def analyze_json_structure(json_files):
         """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
         field_lower = field.lower()
         
-        # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR
+        # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
         if field_lower in ALWAYS_VARCHAR_FIELDS:
-            return 'VARCHAR(255)'
+            # Dimensioni specifiche per campi noti
+            if field_lower in ['cig']:
+                return 'VARCHAR(13)'
+            elif field_lower in ['cup']:
+                return 'VARCHAR(15)'
+            elif field_lower in ['codice_fiscale']:
+                return 'VARCHAR(16)'
+            elif field_lower in ['partita_iva']:
+                return 'VARCHAR(11)'
+            elif field_lower in ['numero_verde', 'numero_telefono']:
+                return 'VARCHAR(20)'
+            else:
+                # Per altri campi della blacklist, usa dimensione basata sulla lunghezza effettiva
+                max_length = field_lengths.get(field, 50)
+                if max_length > 1000:
+                    return 'TEXT'
+                elif max_length > 500:
+                    return 'VARCHAR(500)'
+                elif max_length > 100:
+                    return 'VARCHAR(150)'
+                else:
+                    return 'VARCHAR(100)'
             
         # REGOLA 2: Se il campo ha valori misti alfanumerici, è VARCHAR
         if field_has_mixed_values:
-            return 'VARCHAR(255)'
+            max_length = field_lengths.get(field, 50)
+            if max_length > 1000:
+                return 'TEXT'
+            elif max_length > 500:
+                return 'VARCHAR(500)'
+            elif max_length > 100:
+                return 'VARCHAR(150)'
+            else:
+                return 'VARCHAR(100)'
             
         # REGOLA 3: Se contiene pattern alfanumerici misti, è VARCHAR
         if 'alphanumeric_mixed' in patterns:
-            return 'VARCHAR(255)'
+            max_length = field_lengths.get(field, 50)
+            if max_length > 1000:
+                return 'TEXT'
+            elif max_length > 500:
+                return 'VARCHAR(500)'
+            elif max_length > 100:
+                return 'VARCHAR(150)'
+            else:
+                return 'VARCHAR(100)'
             
-        # Se il campo è vuoto o ha solo valori null, usa VARCHAR
+        # Se il campo è vuoto o ha solo valori null, usa VARCHAR piccolo
         if not patterns or patterns == {'null'} or patterns == {'empty'}:
-            return 'VARCHAR(255)'
+            return 'VARCHAR(50)'
             
         # Se il campo contiene JSON, usa il tipo JSON
         if 'json' in patterns:
@@ -639,11 +676,11 @@ def analyze_json_structure(json_files):
             
         # Se il campo contiene email, usa VARCHAR
         if patterns == {'email'}:
-            return 'VARCHAR(255)'
+            return 'VARCHAR(100)'
             
-        # Se il campo contiene URL, usa VARCHAR
+        # Se il campo contiene URL, usa TEXT (spesso lunghi)
         if patterns == {'url'}:
-            return 'VARCHAR(512)'
+            return 'TEXT'
             
         # Se il campo contiene numeri di telefono, usa VARCHAR
         if patterns == {'phone'}:
@@ -669,8 +706,20 @@ def analyze_json_structure(json_files):
         if patterns == {'cig_code'}:
             return 'VARCHAR(13)'
             
-        # FALLBACK: Per sicurezza, usa VARCHAR per tutto il resto
-        return 'VARCHAR(255)'
+        # FALLBACK: Per sicurezza, usa VARCHAR con dimensione basata sulla lunghezza effettiva
+        max_length = field_lengths.get(field, 50)
+        if max_length > 1000:
+            return 'TEXT'
+        elif max_length > 500:
+            return 'VARCHAR(500)'
+        elif max_length > 200:
+            return 'VARCHAR(250)'
+        elif max_length > 100:
+            return 'VARCHAR(150)'
+        elif max_length > 50:
+            return 'VARCHAR(100)'
+        else:
+            return 'VARCHAR(50)'
     
     for json_file in json_files:
         files_analyzed += 1
@@ -769,15 +818,47 @@ def analyze_json_structure(json_files):
     
     # Crea le definizioni delle tabelle
     table_definitions = {}
+    total_estimated_row_size = 0
+    field_size_breakdown = []
+    
     for field, patterns in field_patterns.items():
         column_def = determine_field_type(field, patterns, field_has_mixed[field], records_analyzed)
         table_definitions[field] = column_def
+        
+        # Calcola la dimensione stimata del campo
+        field_size = 0
+        if column_def.startswith('VARCHAR'):
+            # Estrai la dimensione dal VARCHAR(n)
+            size_str = column_def[8:-1]  # Rimuove 'VARCHAR(' e ')'
+            field_size = int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
+        elif column_def == 'TEXT':
+            field_size = 768  # Dimensione minima per TEXT in InnoDB
+        elif column_def == 'INT':
+            field_size = 4
+        elif column_def.startswith('DECIMAL'):
+            field_size = 8
+        elif column_def == 'DATE':
+            field_size = 3
+        elif column_def == 'DATETIME':
+            field_size = 8
+        elif column_def == 'BOOLEAN':
+            field_size = 1
+        elif column_def == 'JSON':
+            field_size = 0  # I campi JSON vanno in tabelle separate
+        else:
+            field_size = 10  # Default per tipi sconosciuti
+            
+        total_estimated_row_size += field_size
+        if field_size > 0:
+            field_size_breakdown.append((field, column_def, field_size))
     
     # Garbage collection finale
     gc.collect()
     
     # Stampa un riepilogo della struttura trovata
     final_memory_gb = process.memory_info().rss / (1024**3)
+    mysql_row_limit = 65535
+    
     logger.info("\n📊 Struttura JSON analizzata:")
     logger.info(f"   • File analizzati: {files_analyzed}/{total_files}")
     logger.info(f"   • Record totali analizzati: {records_analyzed:,}")
@@ -785,7 +866,59 @@ def analyze_json_structure(json_files):
     logger.info(f"   • Campi trovati: {len(table_definitions)}")
     logger.info(f"   • Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
     logger.info(f"   • RAM finale: {final_memory_gb:.1f}GB")
-    logger.info("\nDettaglio campi:")
+    
+    # Riepilogo ottimizzazioni dimensioni
+    logger.info(f"\n🔧 Ottimizzazioni dimensioni tabella:")
+    logger.info(f"   • Dimensione riga stimata: {total_estimated_row_size:,} bytes")
+    logger.info(f"   • Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
+    
+    if total_estimated_row_size > mysql_row_limit:
+        logger.warning(f"   ⚠️  RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
+        logger.warning(f"   ⚠️  Convertendo più campi a TEXT...")
+        
+        # Riottimizza convertendo i campi più grandi a TEXT
+        for field, column_def in table_definitions.items():
+            if column_def.startswith('VARCHAR') and '500' in column_def:
+                table_definitions[field] = 'TEXT'
+                logger.info(f"       🔄 {field}: {column_def} → TEXT")
+        
+        # Ricalcola la dimensione
+        total_estimated_row_size = 0
+        for field, column_def in table_definitions.items():
+            field_size = 0
+            if column_def.startswith('VARCHAR'):
+                size_str = column_def[8:-1]
+                field_size = int(size_str) * 3
+            elif column_def == 'TEXT':
+                field_size = 768  
+            elif column_def == 'INT':
+                field_size = 4
+            elif column_def.startswith('DECIMAL'):
+                field_size = 8
+            elif column_def == 'DATE':
+                field_size = 3
+            elif column_def == 'DATETIME':
+                field_size = 8
+            elif column_def == 'BOOLEAN':
+                field_size = 1
+            elif column_def == 'JSON':
+                field_size = 0
+            else:
+                field_size = 10
+            total_estimated_row_size += field_size
+        
+        logger.info(f"   ✅ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
+    else:
+        logger.info(f"   ✅ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
+    
+    # Mostra breakdown dei campi più grandi
+    field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
+    logger.info(f"\n📏 Top 10 campi per dimensione:")
+    for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
+        mixed_indicator = "🔀" if field_has_mixed[field] else ""
+        logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
+    
+    logger.info("\nDettaglio tutti i campi:")
     for field, def_type in table_definitions.items():
         mixed_indicator = "🔀" if field_has_mixed[field] else ""
         logger.info(f"   • {field}: {def_type} {mixed_indicator}")
