@@ -18,6 +18,15 @@ import multiprocessing
 import platform
 import re
 from pathlib import Path
+from typing import Dict, List, Tuple, Any, Optional, Union, Set, DefaultDict
+
+# Import dei moduli separati
+from .database import DatabaseManager
+from .utils import (
+    LogContext, log_memory_status, log_performance_stats, 
+    log_file_progress, log_batch_progress, log_error_with_context,
+    log_resource_optimization, check_disk_space
+)
 
 # Crea la directory dei log se non esiste prima della configurazione logging
 logs_dir = Path('logs')
@@ -41,80 +50,6 @@ batch_logger = logger.getChild('batch')
 memory_logger = logger.getChild('memory')
 db_logger = logger.getChild('database')
 progress_logger = logger.getChild('progress')
-
-# Helper functions per logging strutturato
-class LogContext:
-    """Context manager per logging automatico di inizio/fine operazioni."""
-    
-    def __init__(self, logger_instance, operation_name, **context):
-        self.logger = logger_instance
-        self.operation_name = operation_name
-        self.context = context
-        self.start_time = None
-    
-    def __enter__(self):
-        self.start_time = time.time()
-        context_str = " | ".join(f"{k}={v}" for k, v in self.context.items()) if self.context else ""
-        self.logger.info(f"🔄 Inizio {self.operation_name}" + (f" ({context_str})" if context_str else ""))
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        elapsed = time.time() - self.start_time
-        if exc_type is None:
-            self.logger.info(f"✅ Completato {self.operation_name} in {elapsed:.1f}s")
-        else:
-            self.logger.error(f"❌ Errore in {self.operation_name} dopo {elapsed:.1f}s: {exc_val}")
-
-def log_memory_status(logger_instance, context=""):
-    """Helper per logging status memoria."""
-    memory_info = psutil.virtual_memory()
-    used_gb = memory_info.used / (1024**3)
-    total_gb = memory_info.total / (1024**3)
-    usage_pct = memory_info.percent
-    available_gb = memory_info.available / (1024**3)
-    
-    prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"💻 {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
-
-def log_performance_stats(logger_instance, operation, count, elapsed_time, context=""):
-    """Helper per logging statistiche performance."""
-    speed = count / elapsed_time if elapsed_time > 0 else 0
-    prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"📊 {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
-
-def log_file_progress(logger_instance, current, total, file_name="", extra_info=""):
-    """Helper per logging progresso file."""
-    pct = (current / total * 100) if total > 0 else 0
-    file_info = f" - {file_name}" if file_name else ""
-    extra = f" | {extra_info}" if extra_info else ""
-    logger_instance.info(f"📁 Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
-
-def log_batch_progress(logger_instance, processed, total, speed=None, memory_info=None):
-    """Helper per logging progresso batch con informazioni opzionali."""
-    pct = (processed / total * 100) if total > 0 else 0
-    speed_info = f" | {speed:.0f} rec/s" if speed else ""
-    memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
-    logger_instance.info(f"📦 Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
-
-def log_error_with_context(logger_instance, error, context="", operation=""):
-    """Helper per logging errori con contesto."""
-    context_str = f"[{context}] " if context else ""
-    operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
-
-def log_resource_optimization(logger_instance):
-    """Helper per logging configurazione risorse ottimizzate."""
-    logger_instance.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
-    logger_instance.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger_instance.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger_instance.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger_instance.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger_instance.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
-    
-    current_insert_batch = calculate_dynamic_insert_batch_size()
-    current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
 
 # Carica le variabili d'ambiente
 load_dotenv()
@@ -154,438 +89,56 @@ MIN_CHUNK_SIZE = 5000  # Aumentato da 1000 a 5000
 # Chunk size massimo MOLTO più aggressivo
 MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 150000)  # Aumentato da 75k a 150k
 
-class DatabaseManager:
-    """
-    Context Manager centralizzato per tutte le operazioni di database.
-    Gestisce connessioni singole, pool di connessioni e configurazione MySQL.
-    """
+def log_memory_status(logger_instance: logging.Logger, context: str = "") -> None:
+    """Helper per logging status memoria."""
+    memory_info = psutil.virtual_memory()
+    used_gb = memory_info.used / (1024**3)
+    total_gb = memory_info.total / (1024**3)
+    usage_pct = memory_info.percent
+    available_gb = memory_info.available / (1024**3)
     
-    _pool = None
-    _pool_config = None
-    _initialized = False
-    
-    def __init__(self, use_pool=False, pool_size=2):
-        self.use_pool = use_pool
-        self.pool_size = pool_size
-        self.connection = None
-        
-        # Configurazione MySQL standard
-        self.config = {
-            'host': MYSQL_HOST,
-            'user': MYSQL_USER,
-            'password': MYSQL_PASSWORD,
-            'database': MYSQL_DATABASE,
-            'charset': 'utf8mb4',
-            'autocommit': True,
-            'connect_timeout': 180,
-            'use_pure': True,
-            'ssl_disabled': True,
-            'get_warnings': True,
-            'raise_on_warnings': True,
-            'consume_results': True,
-            'buffered': True,
-            'raw': False,
-            'use_unicode': True,
-            'auth_plugin': 'mysql_native_password'
-        }
-    
-    @classmethod
-    def initialize_pool(cls, pool_size=2):
-        """Inizializza il pool di connessioni globale."""
-        if cls._pool is not None:
-            db_logger.warning("Pool già inizializzato, skip...")
-            return cls._pool
-            
-        try:
-            cls._pool_config = {
-                'pool_name': "anac_import_pool",
-                'pool_size': pool_size,
-                'host': MYSQL_HOST,
-                'user': MYSQL_USER,
-                'password': MYSQL_PASSWORD,
-                'database': MYSQL_DATABASE,
-                'charset': 'utf8mb4',
-                'autocommit': True,
-                'connect_timeout': 180,
-                'use_pure': True,
-                'ssl_disabled': True,
-                'get_warnings': True,
-                'raise_on_warnings': True,
-                'consume_results': True,
-                'buffered': True,
-                'raw': False,
-                'use_unicode': True,
-                'auth_plugin': 'mysql_native_password'
-            }
-            
-            # Crea il database se non esiste
-            cls._ensure_database_exists()
-            
-            cls._pool = mysql.connector.pooling.MySQLConnectionPool(**cls._pool_config)
-            cls._initialized = True
-            
-            db_logger.info(f"✅ Pool MySQL inizializzato: {pool_size} connessioni")
-            return cls._pool
-            
-        except Exception as e:
-            log_error_with_context(db_logger, e, "pool initialization")
-            raise
-    
-    @classmethod
-    def _ensure_database_exists(cls):
-        """Assicura che il database esista, creandolo se necessario."""
-        temp_config = cls._pool_config.copy() if cls._pool_config else {
-            'host': MYSQL_HOST,
-            'user': MYSQL_USER,
-            'password': MYSQL_PASSWORD,
-            'charset': 'utf8mb4',
-            'autocommit': True,
-            'ssl_disabled': True
-        }
-        
-        # Rimuovi il database dal config per la connessione iniziale
-        temp_config.pop('database', None)
-        temp_config.pop('pool_name', None)
-        temp_config.pop('pool_size', None)
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                db_logger.info(f"🔍 Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
-                
-                temp_conn = mysql.connector.connect(**temp_config)
-                cursor = temp_conn.cursor()
-                
-                # Controlla se il database esiste
-                cursor.execute("SHOW DATABASES LIKE %s", (MYSQL_DATABASE,))
-                if not cursor.fetchone():
-                    db_logger.info(f"🆕 Creazione database {MYSQL_DATABASE}...")
-                    cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                    db_logger.info(f"✅ Database {MYSQL_DATABASE} creato")
-                else:
-                    db_logger.info(f"✅ Database {MYSQL_DATABASE} già esistente")
-                
-                cursor.close()
-                temp_conn.close()
-                return
-                
-            except mysql.connector.Error as e:
-                if attempt < max_retries - 1:
-                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
-                    time.sleep(2)
-                else:
-                    log_error_with_context(db_logger, e, "database creation")
-                    raise
-    
-    @classmethod
-    def get_pool_connection(cls):
-        """Ottiene una connessione dal pool."""
-        if not cls._initialized:
-            cls.initialize_pool()
-        return cls._pool.get_connection()
-    
-    @classmethod
-    def close_pool(cls):
-        """Chiude il pool di connessioni."""
-        if cls._pool:
-            # Note: mysql.connector pools don't have explicit close method
-            cls._pool = None
-            cls._initialized = False
-            db_logger.info("🔒 Pool MySQL chiuso")
-    
-    def _create_single_connection(self):
-        """Crea una singola connessione con retry."""
-        max_retries = 3
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
-            try:
-                db_logger.info(f"🔄 Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
-                
-                # Assicura che il database esista
-                self._ensure_database_exists()
-                
-                conn = mysql.connector.connect(**self.config)
-                
-                # Configura parametri MySQL per performance
-                cursor = conn.cursor()
-                cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
-                cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
-                cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
-                cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
-                cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
-                cursor.close()
-                
-                db_logger.info("✅ Connessione MySQL stabilita")
-                return conn
-                
-            except mysql.connector.Error as e:
-                if attempt < max_retries - 1:
-                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
-                else:
-                    log_error_with_context(db_logger, e, "single connection", f"fallito dopo {max_retries} tentativi")
-                    raise
-    
-    def __enter__(self):
-        """Context manager entry."""
-        if self.use_pool:
-            self.connection = self.get_pool_connection()
-        else:
-            self.connection = self._create_single_connection()
-        return self.connection
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        if self.connection:
-            try:
-                if exc_type is None:
-                    self.connection.commit()
-                else:
-                    self.connection.rollback()
-                    db_logger.warning(f"Rollback per errore: {exc_val}")
-            except Exception as e:
-                log_error_with_context(db_logger, e, "transaction finalization")
-            finally:
-                self.connection.close()
-                self.connection = None
-    
-    @staticmethod
-    def get_connection():
-        """Factory method per connessione singola."""
-        return DatabaseManager(use_pool=False)
-    
-    @staticmethod
-    def get_pooled_connection():
-        """Factory method per connessione dal pool."""
-        return DatabaseManager(use_pool=True)
+    prefix = f"[{context}] " if context else ""
+    logger_instance.info(f"💻 {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
 
-class MemoryMonitor:
-    def __init__(self, max_memory_bytes):
-        self.max_memory_bytes = max_memory_bytes
-        self.current_chunk_size = INITIAL_CHUNK_SIZE
-        self.process = psutil.Process()
-        self.lock = threading.Lock()
-        self.running = True
-        self.last_memory_check = time.time()
-        self.memory_check_interval = 0.2  # Controlla la memoria più frequentemente
-        self.monitor_thread = threading.Thread(target=self._monitor_memory)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
+def log_performance_stats(logger_instance: logging.Logger, operation: str, count: int, elapsed_time: float, context: str = "") -> None:
+    """Helper per logging statistiche performance."""
+    speed = count / elapsed_time if elapsed_time > 0 else 0
+    prefix = f"[{context}] " if context else ""
+    logger_instance.info(f"📊 {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
 
-    def _monitor_memory(self):
-        while self.running:
-            try:
-                current_time = time.time()
-                if current_time - self.last_memory_check >= self.memory_check_interval:
-                    memory_info = self.process.memory_info()
-                    memory_usage = memory_info.rss
-                    percent_used = memory_usage / self.max_memory_bytes
-                    
-                    with self.lock:
-                        if percent_used > 0.95:  # 95% di memoria utilizzata
-                            self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.5))
-                            logger.warning(f"Memoria critica ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size dimezzato a {self.current_chunk_size}")
-                            gc.collect()
-                        elif percent_used > 0.85:  # 85% di memoria utilizzata
-                            self.current_chunk_size = max(MIN_CHUNK_SIZE, int(self.current_chunk_size * 0.7))
-                            logger.warning(f"Memoria alta ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size ridotto a {self.current_chunk_size}")
-                        elif percent_used < 0.70 and self.current_chunk_size < MAX_CHUNK_SIZE:  # 70% di memoria utilizzata
-                            # Aumenta più aggressivamente il chunk size
-                            new_size = min(MAX_CHUNK_SIZE, int(self.current_chunk_size * 1.5))
-                            if new_size > self.current_chunk_size:
-                                self.current_chunk_size = new_size
-                                logger.info(f"Memoria OK ({memory_usage/1024/1024/1024:.1f}GB/{USABLE_MEMORY_GB:.1f}GB), chunk size aumentato a {self.current_chunk_size}")
-                    
-                    self.last_memory_check = current_time
-            except Exception as e:
-                logger.error(f"Errore nel monitoraggio memoria: {e}")
-            time.sleep(0.1)
+def log_file_progress(logger_instance: logging.Logger, current: int, total: int, file_name: str = "", extra_info: str = "") -> None:
+    """Helper per logging progresso file."""
+    pct = (current / total * 100) if total > 0 else 0
+    file_info = f" - {file_name}" if file_name else ""
+    extra = f" | {extra_info}" if extra_info else ""
+    logger_instance.info(f"📁 Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
 
-    def get_chunk_size(self):
-        with self.lock:
-            return self.current_chunk_size
+def log_batch_progress(logger_instance: logging.Logger, processed: int, total: int, speed: Optional[float] = None, memory_info: Optional[str] = None) -> None:
+    """Helper per logging progresso batch con informazioni opzionali."""
+    pct = (processed / total * 100) if total > 0 else 0
+    speed_info = f" | {speed:.0f} rec/s" if speed else ""
+    memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
+    logger_instance.info(f"📦 Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
 
-    def stop(self):
-        self.running = False
-        self.monitor_thread.join()
+def log_error_with_context(logger_instance: logging.Logger, error: Exception, context: str = "", operation: str = "") -> None:
+    """Helper per logging errori con contesto."""
+    context_str = f"[{context}] " if context else ""
+    operation_str = f" durante {operation}" if operation else ""
+    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
 
-class RecordProcessor:
-    def __init__(self, table_definitions, field_mapping, file_name, batch_id):
-        self.table_definitions = table_definitions
-        self.field_mapping = field_mapping
-        self.file_name = file_name
-        self.batch_id = batch_id
-        self.main_data = []
-        self.json_data = defaultdict(list)
-        self.lock = threading.Lock()
-        self.processed_count = 0
-        self.total_count = 0
-
-    def process_record(self, record):
-        main_values = []
-        cig = record.get('cig', '')
-        if not cig:
-            return None, None
-
-        main_values.append(cig)
-        
-        for field, def_type in self.table_definitions.items():
-            if field.lower() == 'cig':
-                continue
-                
-            field_lower = field.lower().replace(' ', '_')
-            value = record.get(field_lower)
-            
-            # Handle DATE/DATETIME fields
-            if def_type in ['DATE', 'DATETIME'] and value is not None:
-                try:
-                    # Converte vari formati di data a formato MySQL
-                    if isinstance(value, str):
-                        # Rimuovi eventuali caratteri extra
-                        value = value.strip()
-                        
-                        # Se è vuoto dopo il trim, imposta a NULL
-                        if not value:
-                            value = None
-                        # Se contiene solo 0 o valori placeholder, imposta a NULL
-                        elif value in ['0', '0000-00-00', '0000-00-00 00:00:00', 'NULL', 'null']:
-                            value = None
-                        # Se è un timestamp unix (10-13 cifre)
-                        elif value.isdigit() and len(value) in [10, 13]:
-                            from datetime import datetime
-                            timestamp = int(value)
-                            if len(value) == 13:  # Timestamp in millisecondi
-                                timestamp = timestamp / 1000
-                            try:
-                                dt = datetime.fromtimestamp(timestamp)
-                                value = dt.strftime('%Y-%m-%d %H:%M:%S') if def_type == 'DATETIME' else dt.strftime('%Y-%m-%d')
-                            except (ValueError, OSError):
-                                value = None
-                        # Se è un formato data riconoscibile, mantienilo
-                        elif any(pattern in value for pattern in ['-', '/', ':']):
-                            # Tentativi di normalizzazione
-                            # Formato ISO: YYYY-MM-DD o YYYY-MM-DD HH:MM:SS
-                            if re.match(r'^\d{4}-\d{2}-\d{2}', value):
-                                if def_type == 'DATE' and len(value) > 10:
-                                    value = value[:10]  # Tronca la parte oraria per DATE
-                            # Formato europeo: DD/MM/YYYY
-                            elif re.match(r'^\d{2}/\d{2}/\d{4}', value):
-                                parts = value.split('/')
-                                if len(parts) >= 3:
-                                    try:
-                                        day, month, year = parts[0], parts[1], parts[2]
-                                        value = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                                        if def_type == 'DATETIME' and len(parts) > 3:
-                                            time_part = ' '.join(parts[3:])
-                                            value += f" {time_part}"
-                                    except:
-                                        value = None
-                            # Se non riconosciuto, prova a parsare con datetime
-                            else:
-                                try:
-                                    from dateutil import parser
-                                    dt = parser.parse(value)
-                                    value = dt.strftime('%Y-%m-%d %H:%M:%S') if def_type == 'DATETIME' else dt.strftime('%Y-%m-%d')
-                                except:
-                                    value = None
-                        else:
-                            # Formato non riconosciuto, imposta a NULL
-                            value = None
-                except Exception as e:
-                    logger.warning(f"🖥️ Errore nella conversione del campo data {field}: {value} - {str(e)}")
-                    value = None
-            
-            # Handle numeric fields
-            elif def_type in ['DOUBLE', 'DECIMAL'] and value is not None:
-                try:
-                    # Remove any non-numeric characters except decimal point and minus sign
-                    if isinstance(value, str):
-                        # Remove any currency symbols, spaces, and other non-numeric characters
-                        value = ''.join(c for c in value if c.isdigit() or c in '.-')
-                        # Handle empty string after cleaning
-                        if not value:
-                            value = None
-                        else:
-                            # Convert to float and handle potential scientific notation
-                            value = float(value)
-                            # Round to 2 decimal places to avoid precision issues
-                            value = round(value, 2)
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"🖥️ Errore nella conversione del campo numerico {field}: {value} - {str(e)}")
-                    value = None
-            
-            # Handle VARCHAR fields
-            elif def_type.startswith('VARCHAR'):
-                if value is not None:
-                    value = str(value)
-                    if len(value) > 1000:
-                        value = value[:1000]
-                else:
-                    value = None
-            
-            # Handle JSON fields
-            elif def_type == 'JSON' and value is not None:
-                with self.lock:
-                    self.json_data[self.field_mapping[field]].append((cig, json.dumps(value)))
-                value = None
-            
-            main_values.append(value)
-        
-        main_values.extend([self.file_name, self.batch_id])
-        return tuple(main_values), None
-
-    def add_processed(self, count):
-        with self.lock:
-            self.processed_count += count
-            if self.processed_count % 10000 == 0:  # Log ogni 10000 record
-                logger.info(f"🖥️ Progresso: {self.processed_count}/{self.total_count} record "
-                          f"({(self.processed_count/self.total_count*100):.1f}%)")
-
-def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
-    processor = RecordProcessor(table_definitions, field_mapping, file_name, batch_id)
-    processor.total_count = len(batch)
+def log_resource_optimization(logger_instance: logging.Logger) -> None:
+    """Helper per logging configurazione risorse ottimizzate."""
+    logger_instance.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
+    logger_instance.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
+    logger_instance.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger_instance.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger_instance.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger_instance.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
     
-    # Dividi il batch in sub-batch più piccoli per ogni thread
-    sub_batch_size = max(1000, len(batch) // (NUM_THREADS * 2))
-    sub_batches = [batch[i:i + sub_batch_size] for i in range(0, len(batch), sub_batch_size)]
-    
-    # Crea una coda per i risultati
-    result_queue = Queue()
-    
-    def worker(sub_batch):
-        local_main_data = []
-        local_json_data = defaultdict(list)
-        
-        for record, _ in sub_batch:
-            main_values, _ = processor.process_record(record)
-            if main_values:
-                local_main_data.append(main_values)
-        
-        # Aggiungi i dati processati alla coda
-        result_queue.put((local_main_data, local_json_data))
-        processor.add_processed(len(sub_batch))
-    
-    # Crea e avvia i thread
-    threads = []
-    for sub_batch in sub_batches:
-        thread = threading.Thread(target=worker, args=(sub_batch,))
-        thread.start()
-        threads.append(thread)
-    
-    # Attendi il completamento di tutti i thread
-    for thread in threads:
-        thread.join()
-    
-    # Raccogli i risultati
-    while not result_queue.empty():
-        local_main_data, local_json_data = result_queue.get()
-        processor.main_data.extend(local_main_data)
-        for field, data in local_json_data.items():
-            processor.json_data[field].extend(data)
-    
-    return processor.main_data, processor.json_data
+    current_insert_batch = calculate_dynamic_insert_batch_size()
+    current_ram = psutil.virtual_memory().available / (1024**3)
+    logger_instance.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
 
 def handle_data_too_long_error(cursor, error_message, table_name):
     """Gestisce errori di 'Data too long' modificando la colonna da VARCHAR a TEXT."""
