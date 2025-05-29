@@ -39,14 +39,14 @@ def log_memory_status(logger_instance: logging.Logger, context: str = "") -> Non
     available_gb = memory_info.available / (1024**3)
     
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"💻 {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
+    logger_instance.info(f"[RAM] {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
 
 
 def log_performance_stats(logger_instance: logging.Logger, operation: str, count: int, elapsed_time: float, context: str = "") -> None:
     """Helper per logging statistiche performance."""
     speed = count / elapsed_time if elapsed_time > 0 else 0
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"📊 {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
+    logger_instance.info(f"[PERF] {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
 
 
 def log_file_progress(logger_instance: logging.Logger, current: int, total: int, file_name: str = "", extra_info: str = "") -> None:
@@ -54,7 +54,7 @@ def log_file_progress(logger_instance: logging.Logger, current: int, total: int,
     pct = (current / total * 100) if total > 0 else 0
     file_info = f" - {file_name}" if file_name else ""
     extra = f" | {extra_info}" if extra_info else ""
-    logger_instance.info(f"📁 Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
+    logger_instance.info(f"[PROG] Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
 
 
 def log_batch_progress(logger_instance: logging.Logger, processed: int, total: int, speed: Optional[float] = None, memory_info: Optional[str] = None) -> None:
@@ -62,14 +62,14 @@ def log_batch_progress(logger_instance: logging.Logger, processed: int, total: i
     pct = (processed / total * 100) if total > 0 else 0
     speed_info = f" | {speed:.0f} rec/s" if speed else ""
     memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
-    logger_instance.info(f"📦 Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
+    logger_instance.info(f"[BATCH] Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
 
 
 def log_error_with_context(logger_instance: logging.Logger, error: Exception, context: str = "", operation: str = "") -> None:
     """Helper per logging errori con contesto."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
+    logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 
 def log_resource_optimization(logger_instance: logging.Logger) -> None:
@@ -80,14 +80,14 @@ def log_resource_optimization(logger_instance: logging.Logger) -> None:
         calculate_dynamic_insert_batch_size
     )
     
-    logger_instance.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
-    logger_instance.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger_instance.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger_instance.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger_instance.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger_instance.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
+    logger_instance.info("[CONFIG] Configurazione risorse DINAMICHE ottimizzate:")
+    logger_instance.info(f"   [CPU] CPU: {CPU_CORES} core -> {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
+    logger_instance.info(f"   [RAM] RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger_instance.info(f"   [RAM] RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger_instance.info(f"   [PROC] Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger_instance.info(f"   [BATCH] Batch size principale: {BATCH_SIZE:,}")
     
     current_insert_batch = calculate_dynamic_insert_batch_size()
     current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}") 
+    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   [CHUNK] Chunk size max: {MAX_CHUNK_SIZE:,}") 

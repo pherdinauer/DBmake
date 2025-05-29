@@ -77,10 +77,10 @@ BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k
 CPU_CORES = multiprocessing.cpu_count()
 NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
 NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti MySQL, ma thread aggressivi
-logger.info(f"???  CPU cores disponibili: {CPU_CORES}")
-logger.info(f"??  Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
-logger.info(f"???  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilit�)")
-logger.info(f"??  Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
+logger.info(f"[CPU] CPU cores disponibili: {CPU_CORES}")
+logger.info(f"[THREAD] Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
+logger.info(f"[PROC] Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilita)")
+logger.info(f"[BATCH] Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -109,47 +109,47 @@ def log_memory_status(logger_instance: logging.Logger, context: str = "") -> Non
     available_gb = memory_info.available / (1024**3)
     
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"?? {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
+    logger_instance.info(f"[RAM] {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
 
 def log_performance_stats(logger_instance: logging.Logger, operation: str, count: int, elapsed_time: float, context: str = "") -> None:
     """Helper per logging statistiche performance."""
     speed = count / elapsed_time if elapsed_time > 0 else 0
     prefix = f"[{context}] " if context else ""
-    logger_instance.info(f"?? {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
+    logger_instance.info(f"[PERF] {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
 
 def log_file_progress(logger_instance: logging.Logger, current: int, total: int, file_name: str = "", extra_info: str = "") -> None:
     """Helper per logging progresso file."""
     pct = (current / total * 100) if total > 0 else 0
     file_info = f" - {file_name}" if file_name else ""
     extra = f" | {extra_info}" if extra_info else ""
-    logger_instance.info(f"?? Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
+    logger_instance.info(f"[PROG] Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
 
 def log_batch_progress(logger_instance: logging.Logger, processed: int, total: int, speed: Optional[float] = None, memory_info: Optional[str] = None) -> None:
     """Helper per logging progresso batch con informazioni opzionali."""
     pct = (processed / total * 100) if total > 0 else 0
     speed_info = f" | {speed:.0f} rec/s" if speed else ""
     memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
-    logger_instance.info(f"?? Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
+    logger_instance.info(f"[BATCH] Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
 
 def log_error_with_context(logger_instance: logging.Logger, error: Exception, context: str = "", operation: str = "") -> None:
     """Helper per logging errori con contesto."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"? {context_str}Errore{operation_str}: {error}")
+    logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 def log_resource_optimization(logger_instance: logging.Logger) -> None:
     """Helper per logging configurazione risorse ottimizzate."""
-    logger_instance.info("?? Configurazione risorse DINAMICHE ottimizzate:")
-    logger_instance.info(f"   ?? CPU: {CPU_CORES} core ? {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger_instance.info(f"   ??? RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger_instance.info(f"   ?? RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger_instance.info(f"   ?? Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger_instance.info(f"   ?? Batch size principale: {BATCH_SIZE:,}")
+    logger_instance.info("[CONFIG] Configurazione risorse DINAMICHE ottimizzate:")
+    logger_instance.info(f"   [CPU] CPU: {CPU_CORES} core -> {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
+    logger_instance.info(f"   [RAM] RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger_instance.info(f"   [RAM] RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger_instance.info(f"   [PROC] Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger_instance.info(f"   [BATCH] Batch size principale: {BATCH_SIZE:,}")
     
     current_insert_batch = calculate_dynamic_insert_batch_size()
     current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   ? INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   ?? Chunk size max: {MAX_CHUNK_SIZE:,}")
+    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   [CHUNK] Chunk size max: {MAX_CHUNK_SIZE:,}")
 
 def handle_data_too_long_error(cursor, error_message, table_name):
     """Gestisce errori di 'Data too long' modificando la colonna da VARCHAR a TEXT."""
@@ -159,16 +159,16 @@ def handle_data_too_long_error(cursor, error_message, table_name):
         return False
         
     column_name = match.group(1)
-    logger.warning(f"?? Colonna '{column_name}' troppo piccola, converto a TEXT...")
+    logger.warning(f"[WARN] Colonna '{column_name}' troppo piccola, converto a TEXT...")
     
     try:
         # Modifica la colonna da VARCHAR a TEXT
         alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
         cursor.execute(alter_query)
-        logger.info(f"? Colonna '{column_name}' convertita a TEXT")
+        logger.info(f"[OK] Colonna '{column_name}' convertita a TEXT")
         return True
     except Exception as e:
-        logger.error(f"? Errore nella modifica della colonna '{column_name}': {e}")
+        logger.error(f"[ERROR] Errore nella modifica della colonna '{column_name}': {e}")
         return False
 
 class AdaptiveBatchSizer:
@@ -180,7 +180,7 @@ class AdaptiveBatchSizer:
         self.performance_history = []
         self.adjustment_factor = 2.0  # Moltiplicatore MOLTO AGGRESSIVO (era 1.5)
         self.min_batch = 10000  # Aumentato da 5000
-        self.max_batch = 1000000  # ?????? UN MILIONE! (era 300000)
+        self.max_batch = 1000000  # MASSIMO UN MILIONE! (era 300000)
         
     def adjust_batch_size(self, current_ram_usage, processing_speed):
         """Aggiusta il batch size basato su utilizzo RAM e performance."""
@@ -194,7 +194,7 @@ class AdaptiveBatchSizer:
             if avg_ram_usage < (self.target_ram_usage * 0.60):
                 new_batch_size = min(self.max_batch, int(self.current_batch_size * 3.0))  # TRIPLICA!
                 if new_batch_size > self.current_batch_size:
-                    logger.info(f"?????? MEGA AUTO-TUNE: Batch size TRIPLICATO da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.info(f"[MEGA-TUNE] Batch size TRIPLICATO da {self.current_batch_size:,} a {new_batch_size:,} "
                                f"(RAM SPRECATA: {avg_ram_usage*100:.1f}% vs target {self.target_ram_usage*100:.0f}%)")
                     self.current_batch_size = new_batch_size
                     
@@ -202,7 +202,7 @@ class AdaptiveBatchSizer:
             elif avg_ram_usage < (self.target_ram_usage * 0.75):
                 new_batch_size = min(self.max_batch, int(self.current_batch_size * self.adjustment_factor))
                 if new_batch_size > self.current_batch_size:
-                    logger.info(f"???? SUPER AUTO-TUNE: Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.info(f"[SUPER-TUNE] Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
                                f"(RAM sottoutilizzata: {avg_ram_usage*100:.1f}%)")
                     self.current_batch_size = new_batch_size
                     
@@ -210,7 +210,7 @@ class AdaptiveBatchSizer:
             elif avg_ram_usage > (self.target_ram_usage * 0.90):
                 new_batch_size = max(self.min_batch, int(self.current_batch_size / 1.5))
                 if new_batch_size < self.current_batch_size:
-                    logger.warning(f"?? AUTO-TUNE: Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.warning(f"[AUTO-TUNE] Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
                                   f"(RAM sovraccarica: {avg_ram_usage*100:.1f}%)")
                     self.current_batch_size = new_batch_size
         
@@ -238,23 +238,23 @@ def calculate_dynamic_insert_batch_size():
         
         # Limiti di sicurezza ESTREMI
         min_batch = 10000   # Aumentato da 5000
-        max_batch = 1000000  # ?????? UN MILIONE! (era 300000)
+        max_batch = 1000000  # MASSIMO UN MILIONE! (era 300000)
         
         # Batch size ESTREMO basato su utilizzo attuale
-        if current_usage_pct < 0.3:      # < 30% RAM usata ? batch MOSTRUOSO
+        if current_usage_pct < 0.3:      # < 30% RAM usata -> batch MOSTRUOSO
             batch_size = min(max_batch, max(500000, max_batch_from_memory))
-        elif current_usage_pct < 0.5:   # 30-50% RAM usata ? batch gigantesco
+        elif current_usage_pct < 0.5:   # 30-50% RAM usata -> batch gigantesco
             batch_size = min(800000, max(400000, max_batch_from_memory // 2))
-        elif current_usage_pct < 0.65:  # 50-65% RAM usata ? batch massiccio
+        elif current_usage_pct < 0.65:  # 50-65% RAM usata -> batch massiccio
             batch_size = min(600000, max(300000, max_batch_from_memory // 3))
-        elif current_usage_pct < 0.75:  # 65-75% RAM usata ? batch molto alto
+        elif current_usage_pct < 0.75:  # 65-75% RAM usata -> batch molto alto
             batch_size = min(400000, max(200000, max_batch_from_memory // 4))
-        else:                            # > 75% RAM usata ? batch alto
+        else:                            # > 75% RAM usata -> batch alto
             batch_size = min(200000, max(min_batch, max_batch_from_memory // 6))
             
         return max(min_batch, min(batch_size, max_batch))
     else:
-        # Se gi� oltre il 90%, usa batch ridotto ma ancora alto
+        # Se già oltre il 90%, usa batch ridotto ma ancora alto
         return 100000  # Era 50000, ora 100000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
@@ -357,14 +357,17 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
         logger.error(f"?? Errore in INSERT diretto: {e}")
         raise
 
-def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None):
+def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None, category=None):
     if not batch:
         return
 
     file_name = batch[0][1]
     
+    # Determina il nome della tabella per questa categoria
+    table_name = f"{category}_data" if category else "main_data"
+    
     with LogContext(batch_logger, f"processing batch", 
-                   batch_size=len(batch), file=file_name, batch_id=batch_id):
+                   batch_size=len(batch), file=file_name, batch_id=batch_id, category=category, table=table_name):
         try:
             # Ottieni il mapping dei campi
             try:
@@ -386,7 +389,7 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
                 fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
                 
                 # Debug: mostra alcuni esempi di dati
-                batch_logger.info(f"Dati per INSERT diretto:")
+                batch_logger.info(f"Dati per INSERT diretto in tabella '{table_name}':")
                 batch_logger.info(f"   Campi totali: {len(fields)}")
                 batch_logger.info(f"   Record totali: {len(main_data):,}")
                 
@@ -397,8 +400,8 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
                         if 'data_' in field.lower() and j < 10:  # Solo primi 10 campi data
                             batch_logger.info(f"     - {field}: {value} ({type(value).__name__})")
                 
-                # Inserimento diretto in MySQL (no CSV)
-                rows_affected = insert_batch_direct(cursor, main_data, 'main_data', fields)
+                # Inserimento diretto in MySQL nella tabella corretta per categoria
+                rows_affected = insert_batch_direct(cursor, main_data, table_name, fields)
             
             # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
             if json_data:
@@ -433,8 +436,8 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
                     thread.join()
             
             elapsed_time = time.time() - start_time
-            log_performance_stats(batch_logger, "Batch completato", len(batch), elapsed_time)
-            
+            log_performance_stats(batch_logger, f"Batch completato per categoria '{category}'", len(batch), elapsed_time)
+        
         except mysql.connector.Error as e:
             if e.errno == 1153:  # Packet too large
                 batch_logger.warning("Batch troppo grande, riduco la dimensione...")
@@ -996,7 +999,7 @@ def verify_table_structure(conn, table_name='main_data'):
             date_columns = []
             for column in columns:
                 field_name, field_type, is_null, key, default, extra = column
-                db_logger.info(f"   ?? {field_name}: {field_type}")
+                db_logger.info(f"   [OK] {field_name}: {field_type}")
                 
                 # Evidenzia i campi data
                 if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
@@ -1005,7 +1008,7 @@ def verify_table_structure(conn, table_name='main_data'):
             if date_columns:
                 db_logger.info(f"Campi data nella tabella:")
                 for field_name, field_type in date_columns:
-                    status = "?" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "??"
+                    status = "[OK]" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "[WARN]"
                     db_logger.info(f"   {status} {field_name}: {field_type}")
                     
         except mysql.connector.Error as e:
@@ -1140,28 +1143,25 @@ def prepare_field_mappings(table_definitions):
         
         return field_mapping, column_types
 
-def create_dynamic_tables(conn, table_definitions):
-    """Crea tutte le tabelle dinamiche necessarie per l'importazione."""
-    with LogContext(db_logger, "creazione tabelle dinamiche", tables=len(table_definitions)):
+def create_dynamic_tables(conn, table_definitions, categories):
+    """Crea tutte le tabelle dinamiche necessarie per l'importazione per categoria."""
+    with LogContext(db_logger, "creazione tabelle dinamiche", tables=len(categories), categories=len(categories)):
         cursor = conn.cursor()
         
         try:
             # 1. Prepara mapping dei campi e tipi di colonna
             field_mapping, column_types = prepare_field_mappings(table_definitions)
             
-            # 2. Crea la tabella principale
-            create_main_table(cursor, table_definitions, field_mapping, column_types)
+            # 2. Crea le tabelle per categoria (invece di una singola main_data)
+            category_tables_count = create_category_tables(cursor, table_definitions, field_mapping, column_types, categories)
             
-            # 3. Verifica la struttura creata
-            verify_table_structure(conn)
-            
-            # 4. Crea tabelle separate per i campi JSON
+            # 3. Crea tabelle separate per i campi JSON
             json_tables_count = create_json_tables(cursor, table_definitions, field_mapping)
             
-            # 5. Crea tabelle di metadati
+            # 4. Crea tabelle di metadati
             create_metadata_tables(cursor, table_definitions, field_mapping, column_types)
             
-            db_logger.info(f"Creazione completata: 1 tabella principale, {json_tables_count} tabelle JSON, 2 tabelle metadati")
+            db_logger.info(f"Creazione completata: {category_tables_count} tabelle per categoria, {json_tables_count} tabelle JSON, 2 tabelle metadati")
             
         finally:
             cursor.close()
@@ -1201,33 +1201,77 @@ def find_json_files(base_path):
         return []
     
     if not base_dir.is_dir():
-        import_logger.warning(f"Il percorso non � una directory: {base_path}")
+        import_logger.warning(f"Il percorso non è una directory: {base_path}")
         return []
     
     # Usa rglob per ricerca ricorsiva di tutti i file .json
     json_files = list(base_dir.rglob("*.json"))
     
-    # Converte i Path objects in stringhe per compatibilit� con il resto del codice
+    # Converte i Path objects in stringhe per compatibilità con il resto del codice
     json_file_paths = [str(json_file) for json_file in json_files]
     
     import_logger.info(f"Trovati {len(json_file_paths)} file JSON in {base_path}")
     return json_file_paths
+
+def group_files_by_category(json_files):
+    """
+    Raggruppa i file JSON per categoria basata sui nomi delle cartelle.
+    
+    Estrae la categoria dal percorso del file, ignorando prefissi YYYYMMDD.
+    Esempi:
+    - /database/JSON/cig/file.json -> categoria: cig
+    - /database/JSON/aggiudicatari/20240101-file.json -> categoria: aggiudicatari
+    - /database/JSON/pubblicazioni/file.json -> categoria: pubblicazioni
+    """
+    categories = {}
+    
+    for json_file in json_files:
+        file_path = Path(json_file)
+        
+        # Prendi il nome della cartella parent (categoria)
+        if len(file_path.parts) >= 2:
+            category = file_path.parts[-2]  # Cartella parent del file
+        else:
+            # Fallback: prova a estrarre dal nome file stesso
+            file_name = file_path.stem
+            # Rimuovi prefisso YYYYMMDD se presente
+            match = re.match(r'^\d{8}-(.+)$', file_name)
+            if match:
+                category = match.group(1).split('_')[0]  # Prima parte dopo il prefisso
+            else:
+                category = file_name.split('_')[0]  # Prima parte del nome
+        
+        # Pulisci il nome della categoria
+        category = category.lower().replace('-', '_').replace(' ', '_')
+        
+        # Rimuovi suffissi comuni come _json, _data, etc.
+        category = re.sub(r'_(json|data|file)$', '', category)
+        
+        if category not in categories:
+            categories[category] = []
+        categories[category].append(json_file)
+    
+    import_logger.info(f"File raggruppati in {len(categories)} categorie:")
+    for category, files in categories.items():
+        import_logger.info(f"  - {category}: {len(files)} file")
+    
+    return categories
 
 def process_chunk_unified(args, execution_mode="sequential"):
     """
     Processa un chunk con logica unificata per multiprocessing e sequential.
     
     Args:
-        args: (chunk, file_name, batch_id, table_definitions)
+        args: (chunk, file_name, batch_id, table_definitions, category)
         execution_mode: "multiprocessing" o "sequential"
     """
-    chunk, file_name, batch_id, table_definitions = args
+    chunk, file_name, batch_id, table_definitions, category = args
     
-    # Logging specifico per modalit�
+    # Logging specifico per modalità
     if execution_mode == "multiprocessing":
-        print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
+        print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name} per categoria '{category}'")
     else:
-        batch_logger.info(f"[Sequential] Elabora chunk di {len(chunk)} record del file {file_name}")
+        batch_logger.info(f"[Sequential] Elabora chunk di {len(chunk)} record del file {file_name} per categoria '{category}'")
     
     max_retries = 3
     retry_delay = 2
@@ -1238,13 +1282,13 @@ def process_chunk_unified(args, execution_mode="sequential"):
             with DatabaseManager.get_pooled_connection() as conn:
                 cursor = conn.cursor()
                 try:
-                    process_batch(cursor, chunk, table_definitions, batch_id)
+                    process_batch(cursor, chunk, table_definitions, batch_id, category=category)
                     conn.commit()
                     return  # Successo
                 except Exception as e:
                     error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
                     if execution_mode == "multiprocessing":
-                        print(f"? {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
+                        print(f"[ERROR] {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
                     else:
                         log_error_with_context(batch_logger, e, "chunk processing", f"tentativo {attempt + 1}/{max_retries}")
                     
@@ -1259,7 +1303,7 @@ def process_chunk_unified(args, execution_mode="sequential"):
             if attempt == max_retries - 1:
                 final_error = f"Errore nel processare chunk dopo {max_retries} tentativi: {e}"
                 if execution_mode == "multiprocessing":
-                    print(f"? {final_error}")
+                    print(f"[ERROR] {final_error}")
                 else:
                     log_error_with_context(batch_logger, e, "chunk processing", f"fallimento finale dopo {max_retries} tentativi")
                 raise
@@ -1275,8 +1319,12 @@ def process_chunk_sequential(args):
 def import_all_json_files(base_path, conn):
     with LogContext(import_logger, "importazione completa JSON", base_path=base_path):
         json_files = find_json_files(base_path)
+        
+        # Raggruppa i file per categoria
+        categories = group_files_by_category(json_files)
         total_files = len(json_files)
-        import_logger.info(f"Trovati {total_files} file JSON da importare")
+        
+        import_logger.info(f"Trovati {total_files} file JSON da importare in {len(categories)} categorie")
         
         # Inizializza il tracker del progresso
         progress_tracker = ProgressTracker(total_files)
@@ -1284,123 +1332,128 @@ def import_all_json_files(base_path, conn):
         global table_definitions
         table_definitions = analyze_json_structure(json_files)
         
-        # Usa DatabaseManager per la creazione delle tabelle
+        # Usa DatabaseManager per la creazione delle tabelle CON le categorie
         with DatabaseManager.get_connection() as tmp_conn:
-            create_dynamic_tables(tmp_conn, table_definitions)
+            create_dynamic_tables(tmp_conn, table_definitions, categories)
         
         # Inizializza il pool di connessioni centralizzato
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
         
         log_resource_optimization(import_logger)
         
-        # Processa file per file SEQUENZIALMENTE
+        # Processa categoria per categoria
         total_processed_files = 0
         total_processed_records = 0
         
-        for idx, json_file in enumerate(json_files, 1):
-            file_name = Path(json_file).name
+        for category, category_files in categories.items():
+            import_logger.info(f"[CATEGORIA] Processando categoria '{category}' con {len(category_files)} file")
             
-            # Salta i file gi� processati con successo
-            with DatabaseManager.get_pooled_connection() as conn_check:
-                if is_file_processed(conn_check, file_name):
-                    import_logger.info(f"?? File gi� processato: {file_name}")
-                    progress_tracker.processed_files += 1  # Aggiorna counter per file gi� processati
+            # Processa i file di questa categoria
+            for idx, json_file in enumerate(category_files, 1):
+                file_name = Path(json_file).name
+                
+                # Salta i file già processati con successo
+                with DatabaseManager.get_pooled_connection() as conn_check:
+                    if is_file_processed(conn_check, file_name):
+                        import_logger.info(f"[OK] File già processato: {file_name}")
+                        progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
+                        continue
+                
+                # Conta i record nel file per il progresso
+                file_record_count = 0
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip():
+                                file_record_count += 1
+                except Exception as e:
+                    log_error_with_context(import_logger, e, "conteggio record", file_name)
                     continue
-            
-            # Conta i record nel file per il progresso
-            file_record_count = 0
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip():
-                            file_record_count += 1
-            except Exception as e:
-                log_error_with_context(import_logger, e, "conteggio record", file_name)
-                continue
-            
-            # Inizia il tracking del file
-            progress_tracker.start_file(file_name, file_record_count)
-            
-            batch_id = f"{int(time.time())}_{idx}"
-            chunk_size = BATCH_SIZE
-            file_chunks = []
-            current_chunk = []
-            processed_records_in_file = 0
-            
-            # Leggi il file e crea i chunk (solo per questo file)
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            record = json.loads(line)
-                            current_chunk.append((record, file_name))
-                            processed_records_in_file += 1
-                            
-                            # Usa BATCH_SIZE dinamico invece di chunk_size fisso
-                            if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
-                                file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
-                                current_chunk = []
-                        except Exception as e:
-                            log_error_with_context(import_logger, e, "parsing record", file_name)
-                            continue
-                            
-                if current_chunk:
-                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
                 
-                batch_logger.info(f"Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
+                # Inizia il tracking del file
+                progress_tracker.start_file(file_name, file_record_count)
                 
-                # Processa i chunk di questo file SEQUENZIALMENTE
-                records_completed_in_file = 0
-                if file_chunks:
-                    for chunk_idx, chunk_data in enumerate(file_chunks, 1):
-                        try:
-                            chunk_records = len(chunk_data[0])
-                            batch_logger.info(f"Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record)")
-                            
-                            process_chunk_sequential(chunk_data)
-                            records_completed_in_file += chunk_records
-                            
-                            # Aggiorna progresso del file ogni chunk
-                            progress_tracker.update_file_progress(records_completed_in_file)
-                            
-                        except Exception as e:
-                            log_error_with_context(batch_logger, e, f"chunk {chunk_idx}", file_name)
-                            # Continua con il prossimo chunk invece di fallire tutto
-                            continue
+                batch_id = f"{int(time.time())}_{idx}"
+                chunk_size = BATCH_SIZE
+                file_chunks = []
+                current_chunk = []
+                processed_records_in_file = 0
+                
+                # Leggi il file e crea i chunk (solo per questo file)
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                                current_chunk.append((record, file_name, category))  # Aggiungi categoria
+                                processed_records_in_file += 1
+                                
+                                # Usa BATCH_SIZE dinamico invece di chunk_size fisso
+                                if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
+                                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions, category))
+                                    current_chunk = []
+                            except Exception as e:
+                                log_error_with_context(import_logger, e, "parsing record", file_name)
+                                continue
+                                
+                    if current_chunk:
+                        file_chunks.append((current_chunk, file_name, batch_id, table_definitions, category))
                     
-                    # Marca il file come processato
+                    batch_logger.info(f"Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
+                    
+                    # Processa i chunk di questo file SEQUENZIALMENTE
+                    records_completed_in_file = 0
+                    if file_chunks:
+                        for chunk_idx, chunk_data in enumerate(file_chunks, 1):
+                            try:
+                                chunk_records = len(chunk_data[0])
+                                batch_logger.info(f"Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record) per categoria '{category}'")
+                                
+                                process_chunk_sequential(chunk_data)
+                                records_completed_in_file += chunk_records
+                                
+                                # Aggiorna progresso del file ogni chunk
+                                progress_tracker.update_file_progress(records_completed_in_file)
+                                
+                            except Exception as e:
+                                log_error_with_context(batch_logger, e, f"chunk {chunk_idx}", file_name)
+                                # Continua con il prossimo chunk invece di fallire tutto
+                                continue
+                        
+                        # Marca il file come processato
+                        with DatabaseManager.get_pooled_connection() as conn_mark:
+                            mark_file_processed(conn_mark, file_name, processed_records_in_file)
+                        
+                        # Completa il tracking del file
+                        progress_tracker.finish_file(processed_records_in_file)
+                        
+                        total_processed_files += 1
+                        total_processed_records += processed_records_in_file
+                    
+                    # Libera la memoria dei chunk di questo file
+                    del file_chunks
+                    del current_chunk
+                    gc.collect()
+                
+                except Exception as e:
+                    error_message = str(e)
+                    log_error_with_context(import_logger, e, "processing file", file_name)
                     with DatabaseManager.get_pooled_connection() as conn_mark:
-                        mark_file_processed(conn_mark, file_name, processed_records_in_file)
-                    
-                    # Completa il tracking del file
-                    progress_tracker.finish_file(processed_records_in_file)
-                    
-                    total_processed_files += 1
-                    total_processed_records += processed_records_in_file
-                
-                # Libera la memoria dei chunk di questo file
-                del file_chunks
-                del current_chunk
-                gc.collect()
-            
-            except Exception as e:
-                error_message = str(e)
-                log_error_with_context(import_logger, e, "processing file", file_name)
-                with DatabaseManager.get_pooled_connection() as conn_mark:
-                    mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
+                        mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
         
         # Statistiche finali
         final_stats = progress_tracker.get_global_stats()
         total_time = final_stats['elapsed_time']
         
         import_logger.info("="*80)
-        import_logger.info("?? IMPORTAZIONE COMPLETATA!")
+        import_logger.info("[COMPLETE] IMPORTAZIONE COMPLETATA!")
         log_file_progress(import_logger, final_stats['processed_files'], final_stats['total_files'], "completati")
         log_performance_stats(import_logger, "Record totali", final_stats['total_records'], total_time)
-        import_logger.info(f"?? Tempo totale: {str(timedelta(seconds=int(total_time)))}")
+        import_logger.info(f"[TIME] Tempo totale: {str(timedelta(seconds=int(total_time)))}")
+        import_logger.info(f"[CATEGORIES] Categorie processate: {len(categories)}")
         import_logger.info("="*80)
 
 def process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id):
@@ -1408,7 +1461,14 @@ def process_batch_parallel(batch, table_definitions, field_mapping, file_name, b
     main_data = []
     json_data = defaultdict(list)
     
-    for record, _ in batch:
+    for record_data in batch:
+        # Gestisci sia il formato vecchio (record, file_name) che nuovo (record, file_name, category)
+        if len(record_data) == 3:
+            record, _, category = record_data
+        else:
+            record, _ = record_data
+            category = None
+            
         cig = record.get('cig', '')
         if not cig:
             continue
@@ -1576,6 +1636,45 @@ def main():
     except Exception as e:
         log_error_with_context(logger, e, "main", "importazione MySQL")
         raise
+
+def create_category_tables(cursor, table_definitions, field_mapping, column_types, categories):
+    """Crea le tabelle per categoria invece di una singola tabella principale."""
+    with LogContext(db_logger, "creazione tabelle per categoria", categories=len(categories)):
+        
+        tables_created = 0
+        
+        for category in categories.keys():
+            # Nome della tabella per questa categoria
+            table_name = f"{category}_data"
+            
+            # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
+            main_fields = [f"{field_mapping[field]} {column_types[field]}" 
+                          for field in table_definitions.keys() 
+                          if field.lower() != 'cig']
+            
+            create_table_sql = f"""
+            CREATE TABLE IF NOT EXISTS {table_name} (
+                cig VARCHAR(64),
+                {', '.join(main_fields)},
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source_file VARCHAR(255),
+                batch_id VARCHAR(64),
+                PRIMARY KEY (cig, source_file, batch_id),
+                INDEX idx_created_at (created_at),
+                INDEX idx_source_file (source_file),
+                INDEX idx_batch_id (batch_id),
+                INDEX idx_cig (cig),
+                INDEX idx_cig_source (cig, source_file),
+                INDEX idx_cig_batch (cig, batch_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+            """
+            
+            db_logger.info(f"Creazione tabella {table_name} con {len(main_fields)} campi principali")
+            cursor.execute(create_table_sql)
+            tables_created += 1
+        
+        db_logger.info(f"Create {tables_created} tabelle per categoria")
+        return tables_created
 
 if __name__ == "__main__":
     main()

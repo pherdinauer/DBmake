@@ -25,7 +25,7 @@ def log_error_with_context(logger_instance: logging.Logger, error: Exception, co
     """Helper per logging errori con contesto."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
+    logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 
 class DatabaseManager:
@@ -98,7 +98,7 @@ class DatabaseManager:
             cls._pool = mysql.connector.pooling.MySQLConnectionPool(**cls._pool_config)
             cls._initialized = True
             
-            db_logger.info(f"✅ Pool MySQL inizializzato: {pool_size} connessioni")
+            db_logger.info(f"[OK] Pool MySQL inizializzato: {pool_size} connessioni")
             return cls._pool
             
         except Exception as e:
@@ -125,7 +125,7 @@ class DatabaseManager:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                db_logger.info(f"🔍 Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
+                db_logger.info(f"[CHECK] Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
                 
                 temp_conn = mysql.connector.connect(**temp_config)
                 cursor = temp_conn.cursor()
@@ -133,11 +133,11 @@ class DatabaseManager:
                 # Controlla se il database esiste
                 cursor.execute("SHOW DATABASES LIKE %s", (MYSQL_DATABASE,))
                 if not cursor.fetchone():
-                    db_logger.info(f"🆕 Creazione database {MYSQL_DATABASE}...")
+                    db_logger.info(f"[OK] Creazione database {MYSQL_DATABASE}...")
                     cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                    db_logger.info(f"✅ Database {MYSQL_DATABASE} creato")
+                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} creato")
                 else:
-                    db_logger.info(f"✅ Database {MYSQL_DATABASE} già esistente")
+                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} già esistente")
                 
                 cursor.close()
                 temp_conn.close()
@@ -145,7 +145,7 @@ class DatabaseManager:
                 
             except mysql.connector.Error as e:
                 if attempt < max_retries - 1:
-                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {e}")
                     time.sleep(2)
                 else:
                     log_error_with_context(db_logger, e, "database creation")
@@ -165,7 +165,7 @@ class DatabaseManager:
             # Note: mysql.connector pools don't have explicit close method
             cls._pool = None
             cls._initialized = False
-            db_logger.info("🔒 Pool MySQL chiuso")
+            db_logger.info("[CLOSE] Pool MySQL chiuso")
     
     def _create_single_connection(self) -> Any:
         """Crea una singola connessione con retry."""
@@ -174,7 +174,7 @@ class DatabaseManager:
         
         for attempt in range(max_retries):
             try:
-                db_logger.info(f"🔄 Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
+                db_logger.info(f"[RETRY] Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
                 
                 # Assicura che il database esista
                 self._ensure_database_exists()
@@ -190,12 +190,12 @@ class DatabaseManager:
                 cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
                 cursor.close()
                 
-                db_logger.info("✅ Connessione MySQL stabilita")
+                db_logger.info("[OK] Connessione MySQL stabilita")
                 return conn
                 
             except mysql.connector.Error as e:
                 if attempt < max_retries - 1:
-                    db_logger.warning(f"⚠️ Tentativo {attempt + 1} fallito: {e}")
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {e}")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
