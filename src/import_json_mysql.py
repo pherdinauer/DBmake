@@ -70,7 +70,7 @@ MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
-JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
+JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', 'data/downloads')  # Aggiornato per Windows
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k a 75k
 
 # Ottimizzazione DINAMICA basata sulle risorse del sistema
@@ -1326,8 +1326,8 @@ def group_files_by_category(json_files):
     """
     Raggruppa i file JSON per categoria basata su pattern regex predefiniti.
     
-    Usa la mappa CATEGORIES per identificare la categoria di ogni file
-    basandosi sui pattern regex applicati al nome del file.
+    Ignora le date nel nome file (es. 20240201_, 20240401_) per raggruppare
+    file dello stesso tipo ma di periodi diversi nella stessa tabella.
     """
     # Inizializza le categorie vuote
     categorized_files = {category: [] for category in CATEGORIES.keys()}
@@ -1340,15 +1340,23 @@ def group_files_by_category(json_files):
         # Rimuovi estensione per il matching
         file_stem = file_path.stem
         
+        # RIMUOVI LE DATE dal nome file prima del pattern matching
+        # Pattern per date: YYYYMMDD_ all'inizio (es. 20240201_, 20240401_)
+        cleaned_name = re.sub(r'^\d{8}_', '', file_stem)
+        
+        # Log del cleaning per debug
+        if cleaned_name != file_stem:
+            import_logger.debug(f"Cleaned file name: '{file_stem}' -> '{cleaned_name}'")
+        
         category_found = False
         
-        # Testa ogni categoria con i suoi pattern
+        # Testa ogni categoria con i suoi pattern sul nome pulito
         for category, patterns in CATEGORIES.items():
             for pattern in patterns:
-                # Cerca il pattern nel nome del file (case insensitive)
-                if re.search(pattern, file_stem, re.IGNORECASE):
+                # Cerca il pattern nel nome del file pulito (senza date)
+                if re.search(pattern, cleaned_name, re.IGNORECASE):
                     categorized_files[category].append(json_file)
-                    import_logger.debug(f"File '{file_name}' -> categoria '{category}' (pattern: '{pattern}')")
+                    import_logger.debug(f"File '{file_name}' -> categoria '{category}' (pattern: '{pattern}' su nome pulito: '{cleaned_name}')")
                     category_found = True
                     break
             
@@ -1358,20 +1366,34 @@ def group_files_by_category(json_files):
         # Se nessun pattern ha fatto match, aggiungi agli uncategorized
         if not category_found:
             uncategorized_files.append(json_file)
-            import_logger.warning(f"File NON categorizzato: '{file_name}'")
+            import_logger.warning(f"File NON categorizzato: '{file_name}' (nome pulito: '{cleaned_name}')")
     
     # Rimuovi categorie vuote dal risultato
     final_categories = {cat: files for cat, files in categorized_files.items() if files}
     
-    # Statistiche di categorizzazione
+    # Statistiche di categorizzazione con info sul date cleaning
     total_categorized = sum(len(files) for files in final_categories.values())
-    import_logger.info(f"[CATEGORIES] Categorizzazione completata:")
+    import_logger.info(f"[CATEGORIES] Categorizzazione completata (IGNORA DATE):")
     import_logger.info(f"  - File categorizzati: {total_categorized}")
     import_logger.info(f"  - File NON categorizzati: {len(uncategorized_files)}")
     import_logger.info(f"  - Categorie attive: {len(final_categories)}")
+    import_logger.info(f"  - Date rimosse automaticamente da nomi file")
     
+    # Report per categoria con raggruppamento per data
     for category, files in final_categories.items():
-        import_logger.info(f"    * {category}: {len(files)} file")
+        # Raggruppa per data per mostrare quanti file per ogni periodo
+        date_groups = defaultdict(int)
+        for file_path in files:
+            file_name = Path(file_path).name
+            date_match = re.match(r'^(\d{8})_', file_name)
+            if date_match:
+                date = date_match.group(1)
+                date_groups[date] += 1
+            else:
+                date_groups['no_date'] += 1
+        
+        dates_info = ', '.join([f"{date}({count})" for date, count in sorted(date_groups.items())])
+        import_logger.info(f"    * {category}: {len(files)} file totali - Date: {dates_info}")
     
     if uncategorized_files:
         import_logger.warning(f"[WARN] File non categorizzati:")
