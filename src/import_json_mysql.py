@@ -181,7 +181,7 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
         'incorrect_date': r"Incorrect date value '([^']+)' for column '([^']+)'",
         'incorrect_datetime': r"Incorrect datetime value '([^']+)' for column '([^']+)'",
         'out_of_range': r"Out of range value for column '([^']+)'",
-        'data_truncated': r"Data truncated for column '([^']+)'"
+        'data_truncated': r"Data truncated for column '([^']+)'",
     }
     
     column_name = None
@@ -1550,24 +1550,40 @@ def import_all_json_files(base_path, conn):
         # Inizializza il tracker del progresso
         progress_tracker = ProgressTracker(total_files)
         
-        global table_definitions
-        table_definitions = analyze_json_structure(json_files)
+        # NUOVA LOGICA: Analisi per categoria invece di analisi globale
+        import_logger.info("[SCHEMA] Utilizzo schema ottimizzato per categoria")
+        import_logger.info("[SCHEMA] Ogni tabella avrà solo i campi presenti nei suoi JSON")
         
-        # Usa DatabaseManager per la creazione delle tabelle CON le categorie
+        # Crea un dizionario che mappa categoria -> definizioni tabella
+        category_table_definitions = {}
+        
+        for category, category_files in categories.items():
+            import_logger.info(f"[SCHEMA] Analizzando schema per categoria '{category}'")
+            
+            # Analizza solo i file di questa categoria
+            table_definitions = analyze_single_category(category, category_files)
+            category_table_definitions[category] = table_definitions
+            
+            import_logger.info(f"[SCHEMA] Categoria '{category}': {len(table_definitions)} campi specifici")
+        
+        # Crea le tabelle ottimizzate per categoria
         with DatabaseManager.get_connection() as tmp_conn:
-            create_dynamic_tables(tmp_conn, table_definitions, categories)
+            create_dynamic_tables_by_category(tmp_conn, category_table_definitions)
         
         # Inizializza il pool di connessioni centralizzato
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
         
         log_resource_optimization(import_logger)
         
-        # Processa categoria per categoria
+        # Processa categoria per categoria con schema specifico
         total_processed_files = 0
         total_processed_records = 0
         
         for category, category_files in categories.items():
             import_logger.info(f"[CATEGORIA] Processando categoria '{category}' con {len(category_files)} file")
+            
+            # Usa le definizioni specifiche per questa categoria
+            current_table_definitions = category_table_definitions[category]
             
             # Processa i file di questa categoria
             for idx, json_file in enumerate(category_files, 1):
@@ -1614,14 +1630,14 @@ def import_all_json_files(base_path, conn):
                                 
                                 # Usa BATCH_SIZE dinamico invece di chunk_size fisso
                                 if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
-                                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions, category))
+                                    file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
                                     current_chunk = []
                             except Exception as e:
                                 log_error_with_context(import_logger, e, "parsing record", file_name)
                                 continue
                                 
                     if current_chunk:
-                        file_chunks.append((current_chunk, file_name, batch_id, table_definitions, category))
+                        file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
                     
                     batch_logger.info(f"Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
                     
@@ -1929,6 +1945,391 @@ def create_category_tables(cursor, table_definitions, field_mapping, column_type
         
         db_logger.info(f"Create {tables_created} tabelle per categoria")
         return tables_created
+
+def analyze_json_structure_by_category(json_files_by_category):
+    """
+    Analizza la struttura JSON separatamente per ogni categoria.
+    Questo crea tabelle ottimizzate con solo i campi presenti in quella categoria.
+    """
+    all_table_definitions = {}
+    
+    with LogContext(analysis_logger, "analisi struttura JSON per categoria", categories=len(json_files_by_category)):
+        analysis_logger.info("Analisi INTELLIGENTE PER CATEGORIA per:")
+        analysis_logger.info("1. Tabelle ottimizzate con solo campi necessari")
+        analysis_logger.info("2. Eliminazione colonne sempre vuote")
+        analysis_logger.info("3. Schema specifico per ogni tipo di dato")
+        analysis_logger.info("4. Massima efficienza storage")
+        
+        for category, json_files in json_files_by_category.items():
+            if not json_files:
+                continue
+                
+            analysis_logger.info(f"[CATEGORIA] Analizzando '{category}' con {len(json_files)} file")
+            
+            # Analizza solo i file di questa categoria
+            category_table_definitions = analyze_single_category(category, json_files)
+            
+            # Aggiungi al risultato globale con prefisso categoria
+            for field, field_type in category_table_definitions.items():
+                all_table_definitions[f"{category}_{field}"] = field_type
+            
+            analysis_logger.info(f"[CATEGORIA] '{category}': {len(category_table_definitions)} campi specifici rilevati")
+        
+        analysis_logger.info(f"[TOTALE] Campi totali rilevati: {len(all_table_definitions)}")
+        analysis_logger.info("="*80)
+        
+    return all_table_definitions
+
+def analyze_single_category(category, json_files):
+    """Analizza la struttura JSON per una singola categoria."""
+    field_types = defaultdict(lambda: defaultdict(int))
+    field_lengths = defaultdict(int)
+    field_sample_values = defaultdict(list)
+    
+    MAX_ROWS_PER_FILE = 2000  # Ridotto per analisi più veloce per categoria
+    process = psutil.Process()
+    max_memory_bytes = USABLE_MEMORY_BYTES * 0.9
+    
+    analysis_logger.info(f"  [ANALISI] Categoria '{category}': inizio analisi di {len(json_files)} file")
+    
+    # Pattern per identificare i tipi (stesso del sistema principale)
+    patterns = {
+        # Tipi numerici precisi
+        'pure_integer': r'^\d+$',
+        'negative_integer': r'^-\d+$',
+        'pure_decimal': r'^\d+[.,]\d+$',
+        'negative_decimal': r'^-\d+[.,]\d+$',
+        'scientific': r'^\d+[.,]?\d*[eE][+-]?\d+$',
+        
+        # Valori monetari e percentuali
+        'monetary_euro': r'^€?\s*\d+([.,]\d{2})?$',
+        'monetary_dollar': r'^\$?\s*\d+([.,]\d{2})?$',
+        'percentage': r'^\d+([.,]\d+)?%$',
+        
+        # Date e tempi
+        'date_iso': r'^\d{4}-\d{2}-\d{2}$',
+        'date_european': r'^\d{2}/\d{2}/\d{4}$',
+        'date_american': r'^\d{2}/\d{2}/\d{4}$',
+        'date_italian': r'^\d{2}-\d{2}-\d{4}$',
+        'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',
+        'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',
+        'time_hhmm': r'^\d{2}:\d{2}$',
+        'time_hhmmss': r'^\d{2}:\d{2}:\d{2}$',
+        'timestamp_unix': r'^\d{10,13}$',
+        
+        # Booleani
+        'boolean_it': r'^(si|no|vero|falso)$',
+        'boolean_en': r'^(true|false|yes|no|1|0)$',
+        
+        # Codici specifici
+        'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$',
+        'partita_iva': r'^\d{11}$',
+        'cup_code': r'^[A-Z]\d{13}$',
+        'cig_code': r'^[A-Z0-9]{10}$',
+        'postal_code_it': r'^\d{5}$',
+        
+        # Email, URL, telefoni
+        'email': r'^[^@]+@[^@]+\.[^@]+$',
+        'url': r'^https?://',
+        'phone_it': r'^(\+39\s?)?(\d{2,4}[\s-]?)?\d{6,10}$',
+        
+        # Alfanumerici
+        'alphanumeric_upper': r'^[A-Z0-9]+$',
+        'alphanumeric_mixed': r'^[A-Za-z0-9]+$',
+        'code_with_dashes': r'^[A-Z0-9-]+$',
+        
+        # Testi
+        'text_short': r'^.{1,50}$',
+        'text_medium': r'^.{51,255}$',
+        'text_long': r'^.{256,}$',
+    }
+    
+    def analyze_value_type(value):
+        """Analizza un singolo valore."""
+        if value is None or value == '':
+            return 'null'
+        
+        if isinstance(value, bool):
+            return 'boolean_native'
+        if isinstance(value, int):
+            return 'integer_native'
+        if isinstance(value, float):
+            return 'decimal_native'
+        if isinstance(value, (list, dict)):
+            return 'json_native'
+            
+        value_str = str(value).strip()
+        if not value_str:
+            return 'empty'
+        
+        for pattern_name, pattern in patterns.items():
+            if re.match(pattern, value_str, re.IGNORECASE):
+                return pattern_name
+        
+        length = len(value_str)
+        if length <= 50:
+            return 'text_short'
+        elif length <= 255:
+            return 'text_medium'
+        else:
+            return 'text_long'
+    
+    def determine_mysql_type(field, type_counts, max_length, sample_values):
+        """Determina il tipo MySQL per questa categoria."""
+        total_values = sum(type_counts.values())
+        if total_values == 0:
+            return 'VARCHAR(50)'
+        
+        sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
+        primary_type = sorted_types[0][0]
+        primary_count = sorted_types[0][1]
+        primary_percentage = (primary_count / total_values) * 100
+        
+        # Logica semplificata per determinare il tipo MySQL
+        if primary_percentage >= 90:
+            if primary_type in ['integer_native', 'pure_integer', 'negative_integer']:
+                return 'INT'
+            elif primary_type in ['decimal_native', 'pure_decimal', 'negative_decimal']:
+                return 'DECIMAL(20,6)'
+            elif primary_type in ['monetary_euro', 'monetary_dollar']:
+                return 'DECIMAL(15,2)'
+            elif primary_type == 'percentage':
+                return 'DECIMAL(5,2)'
+            elif primary_type in ['date_iso', 'date_european', 'date_american', 'date_italian']:
+                return 'DATE'
+            elif primary_type in ['datetime_iso', 'datetime_european', 'timestamp_unix']:
+                return 'DATETIME'
+            elif primary_type in ['boolean_native', 'boolean_it', 'boolean_en']:
+                return 'BOOLEAN'
+            elif primary_type == 'fiscal_code':
+                return 'VARCHAR(16)'
+            elif primary_type == 'partita_iva':
+                return 'VARCHAR(11)'
+            elif primary_type == 'cup_code':
+                return 'VARCHAR(15)'
+            elif primary_type == 'cig_code':
+                return 'VARCHAR(10)'
+            elif primary_type == 'postal_code_it':
+                return 'VARCHAR(5)'
+            elif primary_type == 'email':
+                return 'VARCHAR(255)'
+            elif primary_type == 'url':
+                return 'TEXT'
+            elif primary_type == 'json_native':
+                return 'JSON'
+        
+        # Fallback basato sulla lunghezza
+        if max_length <= 50:
+            return 'VARCHAR(100)'
+        elif max_length <= 255:
+            return 'VARCHAR(500)'
+        elif max_length <= 1000:
+            return 'TEXT'
+        else:
+            return 'LONGTEXT'
+    
+    # Analizza i file di questa categoria
+    records_analyzed = 0
+    files_analyzed = 0
+    
+    for json_file in json_files:
+        files_analyzed += 1
+        file_records = 0
+        
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if file_records >= MAX_ROWS_PER_FILE:
+                        break
+                        
+                    try:
+                        record = json.loads(line.strip())
+                        file_records += 1
+                        records_analyzed += 1
+                        
+                        for field, value in record.items():
+                            field = field.lower().replace(' ', '_')
+                            
+                            value_type = analyze_value_type(value)
+                            field_types[field][value_type] += 1
+                            
+                            if len(field_sample_values[field]) < 20:  # Campioni ridotti per categoria
+                                field_sample_values[field].append(value)
+                            
+                            if isinstance(value, str):
+                                current_length = len(value)
+                                if current_length > field_lengths[field]:
+                                    field_lengths[field] = current_length
+                        
+                        # Controllo memoria ogni 1000 record
+                        if file_records % 1000 == 0:
+                            current_memory = process.memory_info().rss
+                            if current_memory > max_memory_bytes:
+                                break
+                                
+                    except Exception as e:
+                        continue
+                        
+        except Exception as e:
+            analysis_logger.warning(f"  [WARN] Errore nel file {json_file}: {e}")
+            continue
+    
+    # Crea le definizioni della tabella per questa categoria
+    table_definitions = {}
+    for field, type_counts in field_types.items():
+        mysql_type = determine_mysql_type(field, type_counts, field_lengths[field], field_sample_values[field])
+        table_definitions[field] = mysql_type
+    
+    analysis_logger.info(f"  [RESULT] Categoria '{category}': {records_analyzed:,} record analizzati, {len(table_definitions)} campi unici")
+    
+    return table_definitions
+
+def create_dynamic_tables_by_category(conn, category_table_definitions):
+    """Crea tabelle dinamiche ottimizzate con schema specifico per ogni categoria."""
+    with LogContext(db_logger, "creazione tabelle ottimizzate per categoria", categories=len(category_table_definitions)):
+        cursor = conn.cursor()
+        
+        total_tables_created = 0
+        total_fields_created = 0
+        
+        try:
+            for category, table_definitions in category_table_definitions.items():
+                if not table_definitions:
+                    db_logger.warning(f"[SKIP] Categoria '{category}' senza campi, skippo creazione tabella")
+                    continue
+                
+                # Prepara mapping dei campi specifici per questa categoria
+                field_mapping, column_types = prepare_field_mappings(table_definitions)
+                
+                # Nome della tabella per questa categoria
+                table_name = f"{category}_data"
+                
+                # Campi principali (escludi cig che è la chiave primaria)
+                main_fields = [f"{field_mapping[field]} {column_types[field]}" 
+                              for field in table_definitions.keys() 
+                              if field.lower() != 'cig']
+                
+                # Crea la tabella ottimizzata
+                create_table_sql = f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    cig VARCHAR(64),
+                    {', '.join(main_fields)},
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source_file VARCHAR(255),
+                    batch_id VARCHAR(64),
+                    PRIMARY KEY (cig, source_file, batch_id),
+                    INDEX idx_created_at (created_at),
+                    INDEX idx_source_file (source_file),
+                    INDEX idx_batch_id (batch_id),
+                    INDEX idx_cig (cig),
+                    INDEX idx_cig_source (cig, source_file),
+                    INDEX idx_cig_batch (cig, batch_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                """
+                
+                db_logger.info(f"[CREATE] Tabella ottimizzata '{table_name}' con {len(main_fields)} campi specifici")
+                cursor.execute(create_table_sql)
+                total_tables_created += 1
+                total_fields_created += len(main_fields)
+                
+                # Crea tabelle JSON separate per campi JSON di questa categoria
+                json_tables_count = 0
+                for field, def_type in table_definitions.items():
+                    if def_type == 'JSON':
+                        sanitized_field = field_mapping[field]
+                        json_table_name = f"{category}_{sanitized_field}_data"
+                        
+                        create_json_table = f"""
+                        CREATE TABLE IF NOT EXISTS {json_table_name} (
+                            cig VARCHAR(64) PRIMARY KEY,
+                            {sanitized_field}_json JSON,
+                            source_file VARCHAR(255),
+                            batch_id VARCHAR(64),
+                            INDEX idx_source_file (source_file),
+                            INDEX idx_batch_id (batch_id),
+                            INDEX idx_cig_source (cig, source_file),
+                            INDEX idx_cig_batch (cig, batch_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                        """
+                        cursor.execute(create_json_table)
+                        json_tables_count += 1
+                
+                if json_tables_count > 0:
+                    db_logger.info(f"[CREATE] {json_tables_count} tabelle JSON specifiche per categoria '{category}'")
+                
+                # Report per categoria
+                db_logger.info(f"[RESULT] Categoria '{category}': tabella ottimizzata con {len(table_definitions)} campi totali")
+            
+            # Crea tabelle metadati globali
+            create_metadata_tables_optimized(cursor, category_table_definitions)
+            
+            db_logger.info(f"[SUMMARY] Create {total_tables_created} tabelle ottimizzate con {total_fields_created} campi totali")
+            db_logger.info(f"[SUMMARY] Schema ottimizzato: ogni tabella contiene solo i campi necessari")
+            
+        finally:
+            cursor.close()
+
+def create_metadata_tables_optimized(cursor, category_table_definitions):
+    """Crea tabelle metadati ottimizzate per il sistema per categoria."""
+    with LogContext(db_logger, "creazione tabelle metadati ottimizzate"):
+        
+        # Crea tabella per tracciare i file processati (invariata)
+        create_processed_files = """
+        CREATE TABLE IF NOT EXISTS processed_files (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            file_name VARCHAR(255) UNIQUE,
+            category VARCHAR(100),
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            record_count INT,
+            status ENUM('completed', 'failed') DEFAULT 'completed',
+            error_message TEXT,
+            INDEX idx_file_name (file_name),
+            INDEX idx_category (category),
+            INDEX idx_status (status),
+            INDEX idx_processed_at (processed_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        cursor.execute(create_processed_files)
+        db_logger.info("[CREATE] Tabella processed_files ottimizzata creata")
+        
+        # Crea tabella per mapping campi per categoria
+        create_category_field_mapping = """
+        CREATE TABLE IF NOT EXISTS category_field_mapping (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            category VARCHAR(100),
+            original_name VARCHAR(255),
+            sanitized_name VARCHAR(64),
+            field_type VARCHAR(50),
+            table_name VARCHAR(100),
+            INDEX idx_category (category),
+            INDEX idx_original_name (original_name),
+            INDEX idx_sanitized_name (sanitized_name),
+            INDEX idx_table_name (table_name),
+            UNIQUE KEY unique_category_field (category, original_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        cursor.execute(create_category_field_mapping)
+        db_logger.info("[CREATE] Tabella category_field_mapping creata")
+        
+        # Inserisci il mapping per categoria
+        mapping_records = 0
+        for category, table_definitions in category_table_definitions.items():
+            table_name = f"{category}_data"
+            field_mapping, column_types = prepare_field_mappings(table_definitions)
+            
+            for field, def_type in table_definitions.items():
+                cursor.execute("""
+                    INSERT INTO category_field_mapping (category, original_name, sanitized_name, field_type, table_name)
+                    VALUES (%s, %s, %s, %s, %s) AS new_mapping
+                    ON DUPLICATE KEY UPDATE
+                        sanitized_name = new_mapping.sanitized_name,
+                        field_type = new_mapping.field_type,
+                        table_name = new_mapping.table_name
+                """, (category, field, field_mapping[field], column_types[field], table_name))
+                mapping_records += 1
+        
+        db_logger.info(f"[INSERT] Mapping campi per categoria inserito: {mapping_records} record")
+        db_logger.info("[COMPLETE] Tabelle metadati ottimizzate create")
 
 if __name__ == "__main__":
     main()
