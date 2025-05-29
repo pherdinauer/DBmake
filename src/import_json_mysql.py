@@ -29,6 +29,88 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Logger specializzati per diversi componenti
+analysis_logger = logger.getChild('analysis')
+import_logger = logger.getChild('import')
+batch_logger = logger.getChild('batch')
+memory_logger = logger.getChild('memory')
+db_logger = logger.getChild('database')
+progress_logger = logger.getChild('progress')
+
+# Helper functions per logging strutturato
+class LogContext:
+    """Context manager per logging automatico di inizio/fine operazioni."""
+    
+    def __init__(self, logger_instance, operation_name, **context):
+        self.logger = logger_instance
+        self.operation_name = operation_name
+        self.context = context
+        self.start_time = None
+    
+    def __enter__(self):
+        self.start_time = time.time()
+        context_str = " | ".join(f"{k}={v}" for k, v in self.context.items()) if self.context else ""
+        self.logger.info(f"🔄 Inizio {self.operation_name}" + (f" ({context_str})" if context_str else ""))
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        elapsed = time.time() - self.start_time
+        if exc_type is None:
+            self.logger.info(f"✅ Completato {self.operation_name} in {elapsed:.1f}s")
+        else:
+            self.logger.error(f"❌ Errore in {self.operation_name} dopo {elapsed:.1f}s: {exc_val}")
+
+def log_memory_status(logger_instance, context=""):
+    """Helper per logging status memoria."""
+    memory_info = psutil.virtual_memory()
+    used_gb = memory_info.used / (1024**3)
+    total_gb = memory_info.total / (1024**3)
+    usage_pct = memory_info.percent
+    available_gb = memory_info.available / (1024**3)
+    
+    prefix = f"[{context}] " if context else ""
+    logger_instance.info(f"💻 {prefix}RAM: {used_gb:.1f}GB/{total_gb:.1f}GB ({usage_pct:.1f}%) | Disponibile: {available_gb:.1f}GB")
+
+def log_performance_stats(logger_instance, operation, count, elapsed_time, context=""):
+    """Helper per logging statistiche performance."""
+    speed = count / elapsed_time if elapsed_time > 0 else 0
+    prefix = f"[{context}] " if context else ""
+    logger_instance.info(f"📊 {prefix}{operation}: {count:,} elementi in {elapsed_time:.1f}s ({speed:.1f} el/s)")
+
+def log_file_progress(logger_instance, current, total, file_name="", extra_info=""):
+    """Helper per logging progresso file."""
+    pct = (current / total * 100) if total > 0 else 0
+    file_info = f" - {file_name}" if file_name else ""
+    extra = f" | {extra_info}" if extra_info else ""
+    logger_instance.info(f"📁 Progresso: {current}/{total} ({pct:.1f}%){file_info}{extra}")
+
+def log_batch_progress(logger_instance, processed, total, speed=None, memory_info=None):
+    """Helper per logging progresso batch con informazioni opzionali."""
+    pct = (processed / total * 100) if total > 0 else 0
+    speed_info = f" | {speed:.0f} rec/s" if speed else ""
+    memory_info_str = f" | RAM: {memory_info}" if memory_info else ""
+    logger_instance.info(f"📦 Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
+
+def log_error_with_context(logger_instance, error, context="", operation=""):
+    """Helper per logging errori con contesto."""
+    context_str = f"[{context}] " if context else ""
+    operation_str = f" durante {operation}" if operation else ""
+    logger_instance.error(f"❌ {context_str}Errore{operation_str}: {error}")
+
+def log_resource_optimization(logger_instance):
+    """Helper per logging configurazione risorse ottimizzate."""
+    logger_instance.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
+    logger_instance.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
+    logger_instance.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
+    logger_instance.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
+    logger_instance.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
+    logger_instance.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
+    
+    current_insert_batch = calculate_dynamic_insert_batch_size()
+    current_ram = psutil.virtual_memory().available / (1024**3)
+    logger_instance.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
+
 # Carica le variabili d'ambiente
 load_dotenv()
 
@@ -503,88 +585,88 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
     if not batch:
         return
 
-    try:
-        file_name = batch[0][1]
-        
-        # Ottieni il mapping dei campi
+    file_name = batch[0][1]
+    
+    with LogContext(batch_logger, f"processing batch", 
+                   batch_size=len(batch), file=file_name, batch_id=batch_id):
         try:
-            cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
-            field_mapping = dict(cursor.fetchall())
+            # Ottieni il mapping dei campi
+            try:
+                cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
+                field_mapping = dict(cursor.fetchall())
+            except mysql.connector.Error as e:
+                if e.errno == 2006:  # MySQL server has gone away
+                    batch_logger.warning("Connessione persa, riprovo...")
+                    raise ValueError("CONNECTION_LOST")
+                raise
+            
+            start_time = time.time()
+            
+            # Elabora il batch in parallelo
+            main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
+            
+            if main_data:
+                # Prepara i campi per INSERT diretto
+                fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
+                
+                # Debug: mostra alcuni esempi di dati
+                batch_logger.info(f"Dati per INSERT diretto:")
+                batch_logger.info(f"   Campi totali: {len(fields)}")
+                batch_logger.info(f"   Record totali: {len(main_data):,}")
+                
+                # Mostra i primi 2 record per debug
+                for i, record in enumerate(main_data[:2]):
+                    batch_logger.info(f"   Record {i+1}: {len(record)} valori")
+                    for j, (field, value) in enumerate(zip(fields, record)):
+                        if 'data_' in field.lower() and j < 10:  # Solo primi 10 campi data
+                            batch_logger.info(f"     - {field}: {value} ({type(value).__name__})")
+                
+                # Inserimento diretto in MySQL (no CSV)
+                rows_affected = insert_batch_direct(cursor, main_data, 'main_data', fields)
+            
+            # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
+            if json_data:
+                def insert_json_data(field, data):
+                    try:
+                        json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
+                        insert_json = f"""
+                        INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
+                        VALUES (%s, %s, %s, %s) AS new_data
+                        ON DUPLICATE KEY UPDATE
+                            {field}_json = new_data.{field}_json,
+                            source_file = new_data.source_file,
+                            batch_id = new_data.batch_id
+                        """
+                        cursor.executemany(insert_json, json_data_with_metadata)
+                    except mysql.connector.Error as e:
+                        if e.errno == 2006:  # MySQL server has gone away
+                            batch_logger.warning("Connessione persa durante l'inserimento JSON, riprovo...")
+                            raise ValueError("CONNECTION_LOST")
+                        raise
+            
+                # Crea e avvia i thread per l'inserimento JSON
+                json_threads = []
+                for field, data in json_data.items():
+                    if data:
+                        thread = threading.Thread(target=insert_json_data, args=(field, data))
+                        thread.start()
+                        json_threads.append(thread)
+                
+                # Attendi il completamento di tutti i thread JSON
+                for thread in json_threads:
+                    thread.join()
+            
+            elapsed_time = time.time() - start_time
+            log_performance_stats(batch_logger, "Batch completato", len(batch), elapsed_time)
+            
         except mysql.connector.Error as e:
-            if e.errno == 2006:  # MySQL server has gone away
-                logger.warning("🖥️ Connessione persa, riprovo...")
-                raise ValueError("CONNECTION_LOST")
+            if e.errno == 1153:  # Packet too large
+                batch_logger.warning("Batch troppo grande, riduco la dimensione...")
+                raise ValueError("BATCH_TOO_LARGE")
             raise
-        
-        logger.info(f"⚙️  Inizio processing batch di {len(batch)} record con {NUM_THREADS} thread...")
-        start_time = time.time()
-        
-        # Elabora il batch in parallelo
-        main_data, json_data = process_batch_parallel(batch, table_definitions, field_mapping, file_name, batch_id)
-        
-        if main_data:
-            # Prepara i campi per INSERT diretto
-            fields = ['cig'] + [field_mapping[field] for field in table_definitions.keys() if field.lower() != 'cig'] + ['source_file', 'batch_id']
-            
-            # Debug: mostra alcuni esempi di dati
-            logger.info(f"📊 Debug dati per INSERT diretto:")
-            logger.info(f"   📊 Campi totali: {len(fields)}")
-            logger.info(f"   📊 Record totali: {len(main_data):,}")
-            
-            # Mostra i primi 2 record per debug
-            for i, record in enumerate(main_data[:2]):
-                logger.info(f"   📊 Record {i+1}: {len(record)} valori")
-                for j, (field, value) in enumerate(zip(fields, record)):
-                    if 'data_' in field.lower() and j < 10:  # Solo primi 10 campi data
-                        logger.info(f"     - {field}: {value} ({type(value).__name__})")
-            
-            # Inserimento diretto in MySQL (no CSV)
-            rows_affected = insert_batch_direct(cursor, main_data, 'main_data', fields)
-        
-        # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
-        if json_data:
-            def insert_json_data(field, data):
-                try:
-                    json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
-                    insert_json = f"""
-                    INSERT INTO {field}_data (cig, {field}_json, source_file, batch_id)
-                    VALUES (%s, %s, %s, %s) AS new_data
-                    ON DUPLICATE KEY UPDATE
-                        {field}_json = new_data.{field}_json,
-                        source_file = new_data.source_file,
-                        batch_id = new_data.batch_id
-                    """
-                    cursor.executemany(insert_json, json_data_with_metadata)
-                except mysql.connector.Error as e:
-                    if e.errno == 2006:  # MySQL server has gone away
-                        logger.warning("🖥️ Connessione persa durante l'inserimento JSON, riprovo...")
-                        raise ValueError("CONNECTION_LOST")
-                    raise
-        
-            # Crea e avvia i thread per l'inserimento JSON
-            json_threads = []
-            for field, data in json_data.items():
-                if data:
-                    thread = threading.Thread(target=insert_json_data, args=(field, data))
-                    thread.start()
-                    json_threads.append(thread)
-            
-            # Attendi il completamento di tutti i thread JSON
-            for thread in json_threads:
-                thread.join()
-        
-        elapsed_time = time.time() - start_time
-        speed = len(batch) / elapsed_time if elapsed_time > 0 else 0
-        logger.info(f"✅ Batch completato: {len(batch)} record in {elapsed_time:.1f}s ({speed:.1f} record/s)")
-        
-    except mysql.connector.Error as e:
-        if e.errno == 1153:  # Packet too large
-            logger.warning("\n⚠️  Batch troppo grande, riduco la dimensione...")
-            raise ValueError("BATCH_TOO_LARGE")
-        raise
-    except Exception as e:
-        logger.error(f"\n❌ Errore durante il processing del batch: {e}")
-        raise
+        except Exception as e:
+            log_error_with_context(batch_logger, e, f"batch {batch_id}", "processing")
+            raise
 
 def connect_mysql():
     max_retries = 3
@@ -699,132 +781,144 @@ def analyze_json_structure(json_files):
     field_patterns = defaultdict(set)  # Per memorizzare i pattern dei valori
     field_has_mixed = defaultdict(bool)  # Traccia se un campo ha valori misti
     
-    logger.info("🖥️ Analisi della struttura dei JSON...")
-    logger.info("Questa fase analizza la struttura dei JSON per determinare:")
-    logger.info("1. I tipi di dati per ogni campo")
-    logger.info("2. Le lunghezze massime dei campi stringa")
-    logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
-    logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
-    logger.info("5. Logica CONSERVATIVA: anche un solo valore alfanumerico = VARCHAR")
-    
-    total_files = len(json_files)
-    files_analyzed = 0
-    records_analyzed = 0
-    start_time = time.time()
-    last_progress_time = time.time()
-    progress_interval = 1.0
-    
-    # Limite righe per file per analisi veloce
-    MAX_ROWS_PER_FILE = 2000
-    
-    # Monitoraggio memoria dinamico come failsafe
-    process = psutil.Process()
-    max_memory_bytes = USABLE_MEMORY_BYTES * 0.9  # 90% del buffer disponibile per l'analisi
-    
-    logger.info(f"🖥️ Limite righe per file: {MAX_ROWS_PER_FILE:,}")
-    logger.info(f"🖥️ Memoria massima per analisi: {max_memory_bytes/1024/1024/1024:.1f}GB")
-    
-    # Campi che devono SEMPRE essere VARCHAR (blacklist)
-    ALWAYS_VARCHAR_FIELDS = {
-        'numero_gara', 'codice_gara', 'id_gara', 'numero', 'codice', 'id', 
-        'identificativo', 'riferimento', 'cup', 'cig', 'numero_lotto',
-        'codice_fiscale', 'partita_iva', 'numero_verde', 'numero_telefono'
-    }
-    
-    # Campi che devono SEMPRE essere DATE/DATETIME (whitelist)
-    ALWAYS_DATE_FIELDS = {
-        'data_creazione', 'data_pubblicazione', 'data_scadenza', 'data_aggiornamento',
-        'data_inizio', 'data_fine', 'data_inserimento', 'data_modifica',
-        'created_at', 'updated_at', 'published_at', 'expired_at'
-    }
-    
-    # Pattern migliorati per identificare meglio i tipi di campi
-    patterns = {
-        'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
-        'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
-        'date_iso': r'^\d{4}-\d{2}-\d{2}$',       # Date ISO (YYYY-MM-DD)
-        'date_european': r'^\d{2}/\d{2}/\d{4}$',  # Date europee (DD/MM/YYYY)
-        'date_american': r'^\d{2}/\d{2}/\d{4}$',  # Date americane (MM/DD/YYYY)
-        'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # DateTime ISO
-        'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',  # DateTime europeo
-        'timestamp': r'^\d{10,13}$',               # Timestamp Unix
-        'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
-        'pure_integer': r'^\d+$',                  # SOLO numeri interi puri
-        'pure_decimal': r'^\d+[.,]\d+$',          # SOLO decimali puri
-        'alphanumeric_mixed': r'^[A-Z0-9]+$',     # Alfanumerici misti (es. Z2B1FADD05)
-        'email': r'^[^@]+@[^@]+\.[^@]+$',         # Email
-        'url': r'^https?://',                      # URL
-        'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
-        'postal_code': r'^\d{5}$',                 # CAP
-        'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\d{2}$',  # Codice fiscale
-        'partita_iva': r'^\d{11}$',               # Partita IVA
-        'cup_code': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
-        'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
-    }
-    
-    def get_value_pattern_and_type(value):
-        """Determina il pattern di un valore e se è misto."""
-        if value is None:
-            return 'null', False
-        if isinstance(value, bool):
-            return 'boolean', False
-        if isinstance(value, int):
-            return 'pure_integer', False
-        if isinstance(value, float):
-            return 'pure_decimal', False
-        if isinstance(value, (list, dict)):
-            return 'json', False
+    with LogContext(analysis_logger, "analisi struttura JSON", files=len(json_files)):
+        analysis_logger.info("Analisi per determinare:")
+        analysis_logger.info("1. I tipi di dati per ogni campo")
+        analysis_logger.info("2. Le lunghezze massime dei campi stringa")
+        analysis_logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
+        analysis_logger.info("4. Limite: 2k righe per file + controllo memoria dinamico")
+        analysis_logger.info("5. Logica CONSERVATIVA: anche un solo valore alfanumerico = VARCHAR")
+        
+        total_files = len(json_files)
+        files_analyzed = 0
+        records_analyzed = 0
+        start_time = time.time()
+        last_progress_time = time.time()
+        progress_interval = 1.0
+        
+        # Limite righe per file per analisi veloce
+        MAX_ROWS_PER_FILE = 2000
+        
+        # Monitoraggio memoria dinamico come failsafe
+        process = psutil.Process()
+        max_memory_bytes = USABLE_MEMORY_BYTES * 0.9  # 90% del buffer disponibile per l'analisi
+        
+        analysis_logger.info(f"Limite righe per file: {MAX_ROWS_PER_FILE:,}")
+        log_memory_status(analysis_logger, "limite massimo analisi")
+        
+        # Campi che devono SEMPRE essere VARCHAR (blacklist)
+        ALWAYS_VARCHAR_FIELDS = {
+            'numero_gara', 'codice_gara', 'id_gara', 'numero', 'codice', 'id', 
+            'identificativo', 'riferimento', 'cup', 'cig', 'numero_lotto',
+            'codice_fiscale', 'partita_iva', 'numero_verde', 'numero_telefono'
+        }
+        
+        # Campi che devono SEMPRE essere DATE/DATETIME (whitelist)
+        ALWAYS_DATE_FIELDS = {
+            'data_creazione', 'data_pubblicazione', 'data_scadenza', 'data_aggiornamento',
+            'data_inizio', 'data_fine', 'data_inserimento', 'data_modifica',
+            'created_at', 'updated_at', 'published_at', 'expired_at'
+        }
+        
+        # Pattern migliorati per identificare meglio i tipi di campi
+        patterns = {
+            'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
+            'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
+            'date_iso': r'^\d{4}-\d{2}-\d{2}$',       # Date ISO (YYYY-MM-DD)
+            'date_european': r'^\d{2}/\d{2}/\d{4}$',  # Date europee (DD/MM/YYYY)
+            'date_american': r'^\d{2}/\d{2}/\d{4}$',  # Date americane (MM/DD/YYYY)
+            'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # DateTime ISO
+            'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',  # DateTime europeo
+            'timestamp': r'^\d{10,13}$',               # Timestamp Unix
+            'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
+            'pure_integer': r'^\d+$',                  # SOLO numeri interi puri
+            'pure_decimal': r'^\d+[.,]\d+$',          # SOLO decimali puri
+            'alphanumeric_mixed': r'^[A-Z0-9]+$',     # Alfanumerici misti (es. Z2B1FADD05)
+            'email': r'^[^@]+@[^@]+\.[^@]+$',         # Email
+            'url': r'^https?://',                      # URL
+            'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
+            'postal_code': r'^\d{5}$',                 # CAP
+            'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\d{2}$',  # Codice fiscale
+            'partita_iva': r'^\d{11}$',               # Partita IVA
+            'cup_code': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
+            'cig_code': r'^[A-Z]\d{8}[A-Z]\d{2}$'    # CIG
+        }
+        
+        def get_value_pattern_and_type(value):
+            """Determina il pattern di un valore e se è misto."""
+            if value is None:
+                return 'null', False
+            if isinstance(value, bool):
+                return 'boolean', False
+            if isinstance(value, int):
+                return 'pure_integer', False
+            if isinstance(value, float):
+                return 'pure_decimal', False
+            if isinstance(value, (list, dict)):
+                return 'json', False
+                
+            value_str = str(value).strip()
+            if not value_str:
+                return 'empty', False
+                
+            # Controlla se contiene sia lettere che numeri (MISTO)
+            has_letters = any(c.isalpha() for c in value_str)
+            has_digits = any(c.isdigit() for c in value_str)
+            is_mixed = has_letters and has_digits
             
-        value_str = str(value).strip()
-        if not value_str:
-            return 'empty', False
+            for pattern_name, pattern in patterns.items():
+                if re.match(pattern, value_str, re.IGNORECASE):
+                    return pattern_name, is_mixed
+            return 'text', has_letters or has_digits
+        
+        def check_memory_limit():
+            """Controlla se abbiamo raggiunto il limite di memoria."""
+            current_memory = process.memory_info().rss
+            return current_memory < max_memory_bytes
+        
+        def determine_field_type(field, patterns, field_has_mixed_values, values_count):
+            """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
+            field_lower = field.lower()
             
-        # Controlla se contiene sia lettere che numeri (MISTO)
-        has_letters = any(c.isalpha() for c in value_str)
-        has_digits = any(c.isdigit() for c in value_str)
-        is_mixed = has_letters and has_digits
-        
-        for pattern_name, pattern in patterns.items():
-            if re.match(pattern, value_str, re.IGNORECASE):
-                return pattern_name, is_mixed
-        return 'text', has_letters or has_digits
-    
-    def check_memory_limit():
-        """Controlla se abbiamo raggiunto il limite di memoria."""
-        current_memory = process.memory_info().rss
-        return current_memory < max_memory_bytes
-    
-    def determine_field_type(field, patterns, field_has_mixed_values, values_count):
-        """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
-        field_lower = field.lower()
-        
-        # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorità massima)
-        if field_lower in ALWAYS_DATE_FIELDS:
-            return 'DATETIME'
-        
-        # REGOLA 0.5: Campi lunghi comuni sempre TEXT (denominazioni, descrizioni, etc.)
-        ALWAYS_TEXT_KEYWORDS = [
-            'denominazione', 'descrizione', 'amministrazione', 'ragione_sociale', 
-            'oggetto', 'dettaglio', 'motivazione', 'specifiche', 'note'
-        ]
-        if any(keyword in field_lower for keyword in ALWAYS_TEXT_KEYWORDS):
-            return 'TEXT'
-        
-        # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
-        if field_lower in ALWAYS_VARCHAR_FIELDS:
-            # Dimensioni specifiche per campi noti
-            if field_lower in ['cig']:
-                return 'VARCHAR(13)'
-            elif field_lower in ['cup']:
-                return 'VARCHAR(15)'
-            elif field_lower in ['codice_fiscale']:
-                return 'VARCHAR(16)'
-            elif field_lower in ['partita_iva']:
-                return 'VARCHAR(11)'
-            elif field_lower in ['numero_verde', 'numero_telefono']:
-                return 'VARCHAR(20)'
-            else:
-                # Per altri campi della blacklist, usa dimensione basata sulla lunghezza effettiva
+            # REGOLA 0: Campi data devono SEMPRE essere DATETIME (priorità massima)
+            if field_lower in ALWAYS_DATE_FIELDS:
+                return 'DATETIME'
+            
+            # REGOLA 0.5: Campi lunghi comuni sempre TEXT (denominazioni, descrizioni, etc.)
+            ALWAYS_TEXT_KEYWORDS = [
+                'denominazione', 'descrizione', 'amministrazione', 'ragione_sociale', 
+                'oggetto', 'dettaglio', 'motivazione', 'specifiche', 'note'
+            ]
+            if any(keyword in field_lower for keyword in ALWAYS_TEXT_KEYWORDS):
+                return 'TEXT'
+            
+            # REGOLA 1: Campi nella blacklist sono SEMPRE VARCHAR (ma con dimensioni ottimizzate)
+            if field_lower in ALWAYS_VARCHAR_FIELDS:
+                # Dimensioni specifiche per campi noti
+                if field_lower in ['cig']:
+                    return 'VARCHAR(13)'
+                elif field_lower in ['cup']:
+                    return 'VARCHAR(15)'
+                elif field_lower in ['codice_fiscale']:
+                    return 'VARCHAR(16)'
+                elif field_lower in ['partita_iva']:
+                    return 'VARCHAR(11)'
+                elif field_lower in ['numero_verde', 'numero_telefono']:
+                    return 'VARCHAR(20)'
+                else:
+                    # Per altri campi della blacklist, usa dimensione basata sulla lunghezza effettiva
+                    max_length = field_lengths.get(field, 50)
+                    if max_length > 1000:
+                        return 'TEXT'
+                    elif max_length > 500:
+                        return 'VARCHAR(500)'
+                    elif max_length > 100:
+                        return 'VARCHAR(150)'
+                    else:
+                        return 'VARCHAR(100)'
+                
+            # REGOLA 2: Se il campo ha valori misti alfanumerici, è VARCHAR
+            if field_has_mixed_values:
                 max_length = field_lengths.get(field, 50)
                 if max_length > 1000:
                     return 'TEXT'
@@ -834,280 +928,196 @@ def analyze_json_structure(json_files):
                     return 'VARCHAR(150)'
                 else:
                     return 'VARCHAR(100)'
-            
-        # REGOLA 2: Se il campo ha valori misti alfanumerici, è VARCHAR
-        if field_has_mixed_values:
-            max_length = field_lengths.get(field, 50)
-            if max_length > 1000:
-                return 'TEXT'
-            elif max_length > 500:
-                return 'VARCHAR(500)'
-            elif max_length > 100:
-                return 'VARCHAR(150)'
-            else:
-                return 'VARCHAR(100)'
-            
-        # REGOLA 3: Se contiene pattern alfanumerici misti, è VARCHAR
-        if 'alphanumeric_mixed' in patterns:
-            max_length = field_lengths.get(field, 50)
-            if max_length > 1000:
-                return 'TEXT'
-            elif max_length > 500:
-                return 'VARCHAR(500)'
-            elif max_length > 100:
-                return 'VARCHAR(150)'
-            else:
-                return 'VARCHAR(100)'
-            
-        # Se il campo è vuoto o ha solo valori null, usa VARCHAR piccolo
-        if not patterns or patterns == {'null'} or patterns == {'empty'}:
-            return 'VARCHAR(50)'
-            
-        # Se il campo contiene JSON, usa il tipo JSON
-        if 'json' in patterns:
-            return 'JSON'
-            
-        # Se il campo contiene booleani, usa BOOLEAN
-        if patterns == {'boolean'}:
-            return 'BOOLEAN'
-            
-        # Se il campo contiene solo numeri interi PURI, usa INT
-        if patterns == {'pure_integer'}:
-            return 'INT'
-            
-        # Se il campo contiene numeri decimali PURI o monetari, usa DECIMAL
-        if patterns == {'pure_decimal'} or patterns == {'monetary'}:
-            return 'DECIMAL(20,2)'
-            
-        # Se il campo contiene date, usa DATE o DATETIME
-        if any(p in patterns for p in ['date_iso', 'date_european', 'date_american']):
-            return 'DATE'
-            
-        # Se il campo contiene datetime o timestamp, usa DATETIME
-        if any(p in patterns for p in ['datetime_iso', 'datetime_european', 'timestamp']):
-            return 'DATETIME'
-            
-        # Se il campo contiene percentuali, usa DECIMAL
-        if patterns == {'percentage'}:
-            return 'DECIMAL(5,2)'
-            
-        # Se il campo contiene email, usa VARCHAR
-        if patterns == {'email'}:
-            return 'VARCHAR(100)'
-            
-        # Se il campo contiene URL, usa TEXT (spesso lunghi)
-        if patterns == {'url'}:
-            return 'TEXT'
-            
-        # Se il campo contiene numeri di telefono, usa VARCHAR
-        if patterns == {'phone'}:
-            return 'VARCHAR(20)'
-            
-        # Se il campo contiene CAP, usa VARCHAR
-        if patterns == {'postal_code'}:
-            return 'VARCHAR(5)'
-            
-        # Se il campo contiene codice fiscale, usa VARCHAR
-        if patterns == {'fiscal_code'}:
-            return 'VARCHAR(16)'
-            
-        # Se il campo contiene partita IVA, usa VARCHAR
-        if patterns == {'partita_iva'}:
-            return 'VARCHAR(11)'
-            
-        # Se il campo contiene CUP, usa VARCHAR
-        if patterns == {'cup_code'}:
-            return 'VARCHAR(15)'
-            
-        # Se il campo contiene CIG, usa VARCHAR
-        if patterns == {'cig_code'}:
-            return 'VARCHAR(13)'
-            
-        # FALLBACK: Per sicurezza, usa VARCHAR con dimensione basata sulla lunghezza effettiva
-        max_length = field_lengths.get(field, 50)
-        if max_length > 1000:
-            return 'TEXT'
-        elif max_length > 500:
-            return 'VARCHAR(500)'
-        elif max_length > 200:
-            return 'VARCHAR(250)'
-        elif max_length > 100:
-            return 'VARCHAR(150)'
-        elif max_length > 50:
-            return 'VARCHAR(100)'
-        else:
-            return 'VARCHAR(50)'
-    
-    for json_file in json_files:
-        files_analyzed += 1
-        file_records = 0
-        file_start_time = time.time()
-        memory_exceeded = False
-        limit_reached = False
-        
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    try:
-                        # Limite principale: 2k righe per file
-                        if file_records >= MAX_ROWS_PER_FILE:
-                            limit_reached = True
-                            break
-                            
-                        record = json.loads(line.strip())
-                        file_records += 1
-                        records_analyzed += 1
-                        
-                        for field, value in record.items():
-                            if value is None:
-                                continue
-                                
-                            field = field.lower().replace(' ', '_')
-                            pattern, is_mixed = get_value_pattern_and_type(value)
-                            field_patterns[field].add(pattern)
-                            
-                            # Traccia se il campo ha valori misti
-                            if is_mixed:
-                                field_has_mixed[field] = True
-                            
-                            if isinstance(value, str):
-                                current_length = len(value)
-                                if current_length > field_lengths[field]:
-                                    field_lengths[field] = current_length
-                        
-                        # Controllo memoria ogni 1000 record (failsafe)
-                        if file_records % 1000 == 0:
-                            if not check_memory_limit():
-                                current_memory_gb = process.memory_info().rss / (1024**3)
-                                logger.warning(f"🖥️ Limite memoria raggiunto ({current_memory_gb:.1f}GB), passo al prossimo file")
-                                memory_exceeded = True
-                                break
-                            
-                            # Garbage collection ogni 1000 record
-                            gc.collect()
-                        
-                        current_time = time.time()
-                        if current_time - last_progress_time >= progress_interval:
-                            elapsed = current_time - file_start_time
-                            speed = file_records / elapsed if elapsed > 0 else 0
-                            total_elapsed = current_time - start_time
-                            avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
-                            current_memory_gb = process.memory_info().rss / (1024**3)
-                            
-                            logger.info(f"🖥️ Progresso: File {files_analyzed}/{total_files} | "
-                                      f"Record nel file: {file_records:,}/{MAX_ROWS_PER_FILE:,} | "
-                                      f"Velocità: {speed:.1f} record/s | "
-                                      f"Totale: {records_analyzed:,} record ({avg_speed:.1f} record/s) | "
-                                      f"RAM: {current_memory_gb:.1f}GB")
-                            
-                            last_progress_time = current_time
-                            
-                    except Exception as e:
-                        logger.error(f"🖥️ Errore nell'analisi del record nel file {json_file}: {e}")
-                        continue
-            
-            file_time = time.time() - file_start_time
-            total_time = time.time() - start_time
-            avg_speed = records_analyzed / total_time if total_time > 0 else 0
-            current_memory_gb = process.memory_info().rss / (1024**3)
-            
-            # Determina lo status del file
-            if memory_exceeded:
-                status = "🖥️ LIMITE RAM"
-            elif limit_reached:
-                status = "🖥️ LIMITE 2K"
-            else:
-                status = "🖥️"
                 
-            logger.info(f"{status} File {files_analyzed}/{total_files} completato:")
-            logger.info(f"   🖥️ Record analizzati: {file_records:,}")
-            logger.info(f"   🖥️ Tempo file: {file_time:.1f}s")
-            logger.info(f"   🖥️ Velocità media: {file_records/file_time:.1f} record/s")
-            logger.info(f"   🖥️ Progresso totale: {records_analyzed:,} record ({avg_speed:.1f} record/s)")
-            logger.info(f"   🖥️ RAM utilizzata: {current_memory_gb:.1f}GB")
-            
-            # Garbage collection dopo ogni file
-            gc.collect()
-            
-        except Exception as e:
-            logger.error(f"🖥️ Errore nell'analisi del file {json_file}: {e}")
-            continue
-    
-    # Crea le definizioni delle tabelle
-    table_definitions = {}
-    total_estimated_row_size = 0
-    field_size_breakdown = []
-    
-    for field, patterns in field_patterns.items():
-        column_def = determine_field_type(field, patterns, field_has_mixed[field], records_analyzed)
-        table_definitions[field] = column_def
+            # REGOLA 3: Se contiene pattern alfanumerici misti, è VARCHAR
+            if 'alphanumeric_mixed' in patterns:
+                max_length = field_lengths.get(field, 50)
+                if max_length > 1000:
+                    return 'TEXT'
+                elif max_length > 500:
+                    return 'VARCHAR(500)'
+                elif max_length > 100:
+                    return 'VARCHAR(150)'
+                else:
+                    return 'VARCHAR(100)'
+                
+            # Se il campo è vuoto o ha solo valori null, usa VARCHAR piccolo
+            if not patterns or patterns == {'null'} or patterns == {'empty'}:
+                return 'VARCHAR(50)'
+                
+            # Se il campo contiene JSON, usa il tipo JSON
+            if 'json' in patterns:
+                return 'JSON'
+                
+            # Se il campo contiene booleani, usa BOOLEAN
+            if patterns == {'boolean'}:
+                return 'BOOLEAN'
+                
+            # Se il campo contiene solo numeri interi PURI, usa INT
+            if patterns == {'pure_integer'}:
+                return 'INT'
+                
+            # Se il campo contiene numeri decimali PURI o monetari, usa DECIMAL
+            if patterns == {'pure_decimal'} or patterns == {'monetary'}:
+                return 'DECIMAL(20,2)'
+                
+            # Se il campo contiene date, usa DATE o DATETIME
+            if any(p in patterns for p in ['date_iso', 'date_european', 'date_american']):
+                return 'DATE'
+                
+            # Se il campo contiene datetime o timestamp, usa DATETIME
+            if any(p in patterns for p in ['datetime_iso', 'datetime_european', 'timestamp']):
+                return 'DATETIME'
+                
+            # Se il campo contiene percentuali, usa DECIMAL
+            if patterns == {'percentage'}:
+                return 'DECIMAL(5,2)'
+                
+            # Se il campo contiene email, usa VARCHAR
+            if patterns == {'email'}:
+                return 'VARCHAR(100)'
+                
+            # Se il campo contiene URL, usa TEXT (spesso lunghi)
+            if patterns == {'url'}:
+                return 'TEXT'
+                
+            # Se il campo contiene numeri di telefono, usa VARCHAR
+            if patterns == {'phone'}:
+                return 'VARCHAR(20)'
+                
+            # Se il campo contiene CAP, usa VARCHAR
+            if patterns == {'postal_code'}:
+                return 'VARCHAR(5)'
+                
+            # Se il campo contiene codice fiscale, usa VARCHAR
+            if patterns == {'fiscal_code'}:
+                return 'VARCHAR(16)'
+                
+            # Se il campo contiene partita IVA, usa VARCHAR
+            if patterns == {'partita_iva'}:
+                return 'VARCHAR(11)'
+                
+            # Se il campo contiene CUP, usa VARCHAR
+            if patterns == {'cup_code'}:
+                return 'VARCHAR(15)'
+                
+            # Se il campo contiene CIG, usa VARCHAR
+            if patterns == {'cig_code'}:
+                return 'VARCHAR(13)'
+                
+            # FALLBACK: Per sicurezza, usa VARCHAR con dimensione basata sulla lunghezza effettiva
+            max_length = field_lengths.get(field, 50)
+            if max_length > 1000:
+                return 'TEXT'
+            elif max_length > 500:
+                return 'VARCHAR(500)'
+            elif max_length > 200:
+                return 'VARCHAR(250)'
+            elif max_length > 100:
+                return 'VARCHAR(150)'
+            elif max_length > 50:
+                return 'VARCHAR(100)'
+            else:
+                return 'VARCHAR(50)'
         
-        # Calcola la dimensione stimata del campo
-        field_size = 0
-        if column_def.startswith('VARCHAR'):
-            # Estrai la dimensione dal VARCHAR
-            size_str = column_def[8:-1]  # Rimuove 'VARCHAR(' e ')'
-            field_size = int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
-        elif column_def == 'TEXT':
-            field_size = 768  # Dimensione minima per TEXT in InnoDB
-        elif column_def == 'INT':
-            field_size = 4
-        elif column_def.startswith('DECIMAL'):
-            field_size = 8
-        elif column_def == 'DATE':
-            field_size = 3
-        elif column_def == 'DATETIME':
-            field_size = 8
-        elif column_def == 'BOOLEAN':
-            field_size = 1
-        elif column_def == 'JSON':
-            field_size = 0  # I campi JSON vanno in tabelle separate
-        else:
-            field_size = 10  # Default per tipi sconosciuti
+        for json_file in json_files:
+            files_analyzed += 1
+            file_records = 0
+            file_start_time = time.time()
+            memory_exceeded = False
+            limit_reached = False
             
-        total_estimated_row_size += field_size
-        if field_size > 0:
-            field_size_breakdown.append((field, column_def, field_size))
-    
-    # Garbage collection finale
-    gc.collect()
-    
-    # Stampa un riepilogo della struttura trovata
-    final_memory_gb = process.memory_info().rss / (1024**3)
-    mysql_row_limit = 65535
-    
-    logger.info("\n🖥️ Struttura JSON analizzata:")
-    logger.info(f"   🖥️ File analizzati: {files_analyzed}/{total_files}")
-    logger.info(f"   🖥️ Record totali analizzati: {records_analyzed:,}")
-    logger.info(f"   🖥️ Media record per file: {records_analyzed/files_analyzed:.0f}")
-    logger.info(f"   🖥️ Campi trovati: {len(table_definitions)}")
-    logger.info(f"   🖥️ Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
-    logger.info(f"   🖥️ RAM finale: {final_memory_gb:.1f}GB")
-    
-    # Riepilogo ottimizzazioni dimensioni
-    logger.info(f"\n🖥️ Ottimizzazioni dimensioni tabella:")
-    logger.info(f"   🖥️ Dimensione riga stimata: {total_estimated_row_size:,} bytes")
-    logger.info(f"   🖥️ Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
-    
-    if total_estimated_row_size > mysql_row_limit:
-        logger.warning(f"   🖥️  RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
-        logger.warning(f"   🖥️  Convertendo più campi a TEXT...")
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            # Limite principale: 2k righe per file
+                            if file_records >= MAX_ROWS_PER_FILE:
+                                limit_reached = True
+                                break
+                                
+                            record = json.loads(line.strip())
+                            file_records += 1
+                            records_analyzed += 1
+                            
+                            for field, value in record.items():
+                                if value is None:
+                                    continue
+                                    
+                                field = field.lower().replace(' ', '_')
+                                pattern, is_mixed = get_value_pattern_and_type(value)
+                                field_patterns[field].add(pattern)
+                                
+                                # Traccia se il campo ha valori misti
+                                if is_mixed:
+                                    field_has_mixed[field] = True
+                                
+                                if isinstance(value, str):
+                                    current_length = len(value)
+                                    if current_length > field_lengths[field]:
+                                        field_lengths[field] = current_length
+                        
+                            # Controllo memoria ogni 1000 record (failsafe)
+                            if file_records % 1000 == 0:
+                                if not check_memory_limit():
+                                    log_memory_status(memory_logger, "limite raggiunto")
+                                    memory_exceeded = True
+                                    break
+                                
+                                # Garbage collection ogni 1000 record
+                                gc.collect()
+                            
+                            current_time = time.time()
+                            if current_time - last_progress_time >= progress_interval:
+                                elapsed = current_time - file_start_time
+                                speed = file_records / elapsed if elapsed > 0 else 0
+                                total_elapsed = current_time - start_time
+                                avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
+                                
+                                log_file_progress(progress_logger, files_analyzed, total_files, 
+                                                os.path.basename(json_file), 
+                                                f"Record: {file_records:,}/{MAX_ROWS_PER_FILE:,} | {speed:.1f} rec/s")
+                                log_performance_stats(progress_logger, "Analisi totale", records_analyzed, total_elapsed)
+                                log_memory_status(memory_logger, "analisi")
+                                
+                                last_progress_time = current_time
+                                
+                        except Exception as e:
+                            log_error_with_context(analysis_logger, e, "analisi record", f"file {json_file}")
+                            continue
+                
+                file_time = time.time() - file_start_time
+                
+                # Determina lo status del file
+                status = "🔥 LIMITE RAM" if memory_exceeded else "📋 LIMITE 2K" if limit_reached else "✅"
+                    
+                log_performance_stats(analysis_logger, f"File {status}", file_records, file_time, 
+                                    f"{files_analyzed}/{total_files}")
+                
+                # Garbage collection dopo ogni file
+                gc.collect()
+                
+            except Exception as e:
+                log_error_with_context(analysis_logger, e, f"file {json_file}", "analisi")
+                continue
         
-        # Riottimizza convertendo i campi più grandi a TEXT
-        for field, column_def in table_definitions.items():
-            if column_def.startswith('VARCHAR') and '500' in column_def:
-                table_definitions[field] = 'TEXT'
-                logger.info(f"      🖥️ {field}: {column_def} → TEXT")
-        
-        # Ricalcola la dimensione
+        # Crea le definizioni delle tabelle
+        table_definitions = {}
         total_estimated_row_size = 0
-        for field, column_def in table_definitions.items():
+        field_size_breakdown = []
+        
+        for field, patterns in field_patterns.items():
+            column_def = determine_field_type(field, patterns, field_has_mixed[field], records_analyzed)
+            table_definitions[field] = column_def
+            
+            # Calcola la dimensione stimata del campo
             field_size = 0
             if column_def.startswith('VARCHAR'):
-                size_str = column_def[8:-1]
-                field_size = int(size_str) * 3
+                # Estrai la dimensione dal VARCHAR
+                size_str = column_def[8:-1]  # Rimuove 'VARCHAR(' e ')'
+                field_size = int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
             elif column_def == 'TEXT':
-                field_size = 768  
+                field_size = 768  # Dimensione minima per TEXT in InnoDB
             elif column_def == 'INT':
                 field_size = 4
             elif column_def.startswith('DECIMAL'):
@@ -1119,30 +1129,87 @@ def analyze_json_structure(json_files):
             elif column_def == 'BOOLEAN':
                 field_size = 1
             elif column_def == 'JSON':
-                field_size = 0
+                field_size = 0  # I campi JSON vanno in tabelle separate
             else:
-                field_size = 10
+                field_size = 10  # Default per tipi sconosciuti
+                
             total_estimated_row_size += field_size
+            if field_size > 0:
+                field_size_breakdown.append((field, column_def, field_size))
         
-        logger.info(f"   🖥️ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
-    else:
-        logger.info(f"   🖥️ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
-    
-    # Mostra breakdown dei campi più grandi
-    field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
-    logger.info(f"\n🖥️ Top 10 campi per dimensione:")
-    for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
-        mixed_indicator = "🖥️" if field_has_mixed[field] else ""
-        logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
-    
-    logger.info("\nDettaglio tutti i campi:")
-    for field, def_type in table_definitions.items():
-        mixed_indicator = "🖥️" if field_has_mixed[field] else ""
-        logger.info(f"   🖥️ {field}: {def_type} {mixed_indicator}")
-        if field in field_patterns:
-            logger.info(f"      Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
-    
-    return table_definitions
+        # Garbage collection finale
+        gc.collect()
+        
+        # Stampa un riepilogo della struttura trovata
+        mysql_row_limit = 65535
+        
+        analysis_logger.info("Riepilogo analisi:")
+        log_file_progress(analysis_logger, files_analyzed, total_files, "completati")
+        log_performance_stats(analysis_logger, "Record analizzati", records_analyzed, time.time() - start_time)
+        analysis_logger.info(f"📊 Media record per file: {records_analyzed/files_analyzed:.0f}")
+        analysis_logger.info(f"📊 Campi trovati: {len(table_definitions)}")
+        analysis_logger.info(f"📊 Campi misti trovati: {sum(1 for v in field_has_mixed.values() if v)}")
+        log_memory_status(memory_logger, "finale analisi")
+        
+        # Riepilogo ottimizzazioni dimensioni
+        analysis_logger.info(f"Ottimizzazioni dimensioni tabella:")
+        analysis_logger.info(f"   📊 Dimensione riga stimata: {total_estimated_row_size:,} bytes")
+        analysis_logger.info(f"   📊 Limite MySQL InnoDB: {mysql_row_limit:,} bytes")
+        
+        if total_estimated_row_size > mysql_row_limit:
+            analysis_logger.warning(f"⚠️ RIGA TROPPO GRANDE! Supera il limite di {(total_estimated_row_size - mysql_row_limit):,} bytes")
+            analysis_logger.warning(f"⚠️ Convertendo più campi a TEXT...")
+            
+            # Riottimizza convertendo i campi più grandi a TEXT
+            for field, column_def in table_definitions.items():
+                if column_def.startswith('VARCHAR') and '500' in column_def:
+                    table_definitions[field] = 'TEXT'
+                    analysis_logger.info(f"      🔄 {field}: {column_def} → TEXT")
+            
+            # Ricalcola la dimensione
+            total_estimated_row_size = 0
+            for field, column_def in table_definitions.items():
+                field_size = 0
+                if column_def.startswith('VARCHAR'):
+                    size_str = column_def[8:-1]
+                    field_size = int(size_str) * 3
+                elif column_def == 'TEXT':
+                    field_size = 768  
+                elif column_def == 'INT':
+                    field_size = 4
+                elif column_def.startswith('DECIMAL'):
+                    field_size = 8
+                elif column_def == 'DATE':
+                    field_size = 3
+                elif column_def == 'DATETIME':
+                    field_size = 8
+                elif column_def == 'BOOLEAN':
+                    field_size = 1
+                elif column_def == 'JSON':
+                    field_size = 0
+                else:
+                    field_size = 10
+                total_estimated_row_size += field_size
+            
+            analysis_logger.info(f"   ✅ Nuova dimensione riga stimata: {total_estimated_row_size:,} bytes")
+        else:
+            analysis_logger.info(f"   ✅ Dimensione riga OK ({(mysql_row_limit - total_estimated_row_size):,} bytes di margine)")
+        
+        # Mostra breakdown dei campi più grandi
+        field_size_breakdown.sort(key=lambda x: x[2], reverse=True)
+        analysis_logger.info(f"Top 10 campi per dimensione:")
+        for i, (field, column_def, size) in enumerate(field_size_breakdown[:10]):
+            mixed_indicator = "🔀" if field_has_mixed[field] else ""
+            analysis_logger.info(f"   {i+1:2d}. {field}: {column_def} ({size} bytes) {mixed_indicator}")
+        
+        analysis_logger.info("Dettaglio tutti i campi:")
+        for field, def_type in table_definitions.items():
+            mixed_indicator = "🔀" if field_has_mixed[field] else ""
+            analysis_logger.info(f"   📋 {field}: {def_type} {mixed_indicator}")
+            if field in field_patterns:
+                analysis_logger.info(f"      Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
+        
+        return table_definitions
 
 def generate_short_alias(field_name, existing_aliases):
     """Genera un alias corto per un campo lungo."""
@@ -1196,139 +1263,146 @@ def get_column_type(field_type, length):
 
 def verify_table_structure(conn, table_name='main_data'):
     """Verifica la struttura della tabella creata."""
-    cursor = conn.cursor()
-    try:
-        cursor.execute(f"DESCRIBE {table_name}")
-        columns = cursor.fetchall()
-        
-        logger.info(f"\n🖥️ Struttura tabella {table_name}:")
-        date_columns = []
-        for column in columns:
-            field_name, field_type, is_null, key, default, extra = column
-            logger.info(f"   🖥️ {field_name}: {field_type}")
+    with LogContext(db_logger, f"verifica struttura tabella {table_name}"):
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"DESCRIBE {table_name}")
+            columns = cursor.fetchall()
             
-            # Evidenzia i campi data
-            if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
-                date_columns.append((field_name, field_type))
-        
-        if date_columns:
-            logger.info(f"\n🖥️ Campi data nella tabella:")
-            for field_name, field_type in date_columns:
-                status = "🖥️" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "🖥️"
-                logger.info(f"   🖥️ {status} {field_name}: {field_type}")
+            db_logger.info(f"Struttura tabella {table_name}:")
+            date_columns = []
+            for column in columns:
+                field_name, field_type, is_null, key, default, extra = column
+                db_logger.info(f"   📋 {field_name}: {field_type}")
                 
-    except mysql.connector.Error as e:
-        logger.error(f"🖥️ Errore nella verifica struttura tabella: {e}")
-    finally:
-        cursor.close()
+                # Evidenzia i campi data
+                if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
+                    date_columns.append((field_name, field_type))
+            
+            if date_columns:
+                db_logger.info(f"Campi data nella tabella:")
+                for field_name, field_type in date_columns:
+                    status = "✅" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "⚠️"
+                    db_logger.info(f"   {status} {field_name}: {field_type}")
+                    
+        except mysql.connector.Error as e:
+            log_error_with_context(db_logger, e, table_name, "verifica struttura")
+        finally:
+            cursor.close()
 
 def create_dynamic_tables(conn, table_definitions):
-    cursor = conn.cursor()
-    
-    # Crea un mapping tra nomi originali e nomi sanitizzati
-    existing_aliases = set()
-    field_mapping = {}
-    for field in table_definitions.keys():
-        sanitized = sanitize_field_name(field, existing_aliases)
-        field_mapping[field] = sanitized
-        existing_aliases.add(sanitized)
-    
-    # Converti i tipi di colonna in base alla lunghezza
-    column_types = {}
-    for field, def_type in table_definitions.items():
-        if def_type.startswith('VARCHAR'):
-            # Estrai la lunghezza dal tipo VARCHAR
-            length = int(def_type.split('(')[1].split(')')[0])
-            column_types[field] = get_column_type('VARCHAR', length)
-        else:
-            column_types[field] = def_type
-    
-    # Crea la tabella principale con tutti i campi
-    # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
-    main_fields = [f"{field_mapping[field]} {column_types[field]}" 
-                  for field in table_definitions.keys() 
-                  if field.lower() != 'cig']
-    
-    create_main_table = f"""
-    CREATE TABLE IF NOT EXISTS main_data (
-        cig VARCHAR(64) PRIMARY KEY,
-        {', '.join(main_fields)},
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        source_file VARCHAR(255),
-        batch_id VARCHAR(64),
-        INDEX idx_created_at (created_at),
-        INDEX idx_source_file (source_file),
-        INDEX idx_batch_id (batch_id),
-        INDEX idx_cig_source (cig, source_file),
-        INDEX idx_cig_batch (cig, batch_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-    """
-    
-    logger.info(f"🖥️ Creazione tabella main_data...")
-    logger.info(f"🖥️ Campi principali: {len(main_fields)}")
-    
-    cursor.execute(create_main_table)
-    
-    # Verifica la struttura creata
-    verify_table_structure(conn)
-    
-    # Crea tabelle separate per i campi JSON
-    for field, def_type in table_definitions.items():
-        if def_type == 'JSON':
-            sanitized_field = field_mapping[field]
-            create_json_table = f"""
-            CREATE TABLE IF NOT EXISTS {sanitized_field}_data (
-                cig VARCHAR(64) PRIMARY KEY,
-                {sanitized_field}_json JSON,
-                source_file VARCHAR(255),
-                batch_id VARCHAR(64),
-                FOREIGN KEY (cig) REFERENCES main_data(cig),
-                INDEX idx_source_file (source_file),
-                INDEX idx_batch_id (batch_id),
-                INDEX idx_cig_source (cig, source_file),
-                INDEX idx_cig_batch (cig, batch_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-            """
-            cursor.execute(create_json_table)
-    
-    # Crea tabella per tracciare i file processati
-    create_processed_files = """
-    CREATE TABLE IF NOT EXISTS processed_files (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        file_name VARCHAR(255) UNIQUE,
-        processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        record_count INT,
-        status ENUM('completed', 'failed') DEFAULT 'completed',
-        error_message TEXT,
-        INDEX idx_file_name (file_name),
-        INDEX idx_status (status),
-        INDEX idx_processed_at (processed_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-    """
-    cursor.execute(create_processed_files)
-    
-    # Salva il mapping dei campi in una tabella di metadati
-    create_field_mapping = """
-    CREATE TABLE IF NOT EXISTS field_mapping (
-        original_name VARCHAR(255) PRIMARY KEY,
-        sanitized_name VARCHAR(64),
-        field_type VARCHAR(50),
-        INDEX idx_sanitized_name (sanitized_name)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-    """
-    cursor.execute(create_field_mapping)
-    
-    # Inserisci il mapping dei campi
-    for field, def_type in table_definitions.items():
-        cursor.execute("""
-            INSERT INTO field_mapping (original_name, sanitized_name, field_type)
-            VALUES (%s, %s, %s) AS new_data
-            ON DUPLICATE KEY UPDATE
-                sanitized_name = new_data.sanitized_name,
-                field_type = new_data.field_type
-        """, (field, field_mapping[field], column_types[field]))
-    
-    cursor.close()
+    with LogContext(db_logger, "creazione tabelle dinamiche", tables=len(table_definitions)):
+        cursor = conn.cursor()
+        
+        # Crea un mapping tra nomi originali e nomi sanitizzati
+        existing_aliases = set()
+        field_mapping = {}
+        for field in table_definitions.keys():
+            sanitized = sanitize_field_name(field, existing_aliases)
+            field_mapping[field] = sanitized
+            existing_aliases.add(sanitized)
+        
+        # Converti i tipi di colonna in base alla lunghezza
+        column_types = {}
+        for field, def_type in table_definitions.items():
+            if def_type.startswith('VARCHAR'):
+                # Estrai la lunghezza dal tipo VARCHAR
+                length = int(def_type.split('(')[1].split(')')[0])
+                column_types[field] = get_column_type('VARCHAR', length)
+            else:
+                column_types[field] = def_type
+        
+        # Crea la tabella principale con tutti i campi
+        # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
+        main_fields = [f"{field_mapping[field]} {column_types[field]}" 
+                      for field in table_definitions.keys() 
+                      if field.lower() != 'cig']
+        
+        create_main_table = f"""
+        CREATE TABLE IF NOT EXISTS main_data (
+            cig VARCHAR(64) PRIMARY KEY,
+            {', '.join(main_fields)},
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            source_file VARCHAR(255),
+            batch_id VARCHAR(64),
+            INDEX idx_created_at (created_at),
+            INDEX idx_source_file (source_file),
+            INDEX idx_batch_id (batch_id),
+            INDEX idx_cig_source (cig, source_file),
+            INDEX idx_cig_batch (cig, batch_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        
+        db_logger.info(f"Creazione tabella main_data...")
+        db_logger.info(f"Campi principali: {len(main_fields)}")
+        
+        cursor.execute(create_main_table)
+        
+        # Verifica la struttura creata
+        verify_table_structure(conn)
+        
+        # Crea tabelle separate per i campi JSON
+        json_tables_created = 0
+        for field, def_type in table_definitions.items():
+            if def_type == 'JSON':
+                sanitized_field = field_mapping[field]
+                create_json_table = f"""
+                CREATE TABLE IF NOT EXISTS {sanitized_field}_data (
+                    cig VARCHAR(64) PRIMARY KEY,
+                    {sanitized_field}_json JSON,
+                    source_file VARCHAR(255),
+                    batch_id VARCHAR(64),
+                    FOREIGN KEY (cig) REFERENCES main_data(cig),
+                    INDEX idx_source_file (source_file),
+                    INDEX idx_batch_id (batch_id),
+                    INDEX idx_cig_source (cig, source_file),
+                    INDEX idx_cig_batch (cig, batch_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                """
+                cursor.execute(create_json_table)
+                json_tables_created += 1
+        
+        if json_tables_created > 0:
+            db_logger.info(f"Tabelle JSON create: {json_tables_created}")
+        
+        # Crea tabella per tracciare i file processati
+        create_processed_files = """
+        CREATE TABLE IF NOT EXISTS processed_files (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            file_name VARCHAR(255) UNIQUE,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            record_count INT,
+            status ENUM('completed', 'failed') DEFAULT 'completed',
+            error_message TEXT,
+            INDEX idx_file_name (file_name),
+            INDEX idx_status (status),
+            INDEX idx_processed_at (processed_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        cursor.execute(create_processed_files)
+        
+        # Salva il mapping dei campi in una tabella di metadati
+        create_field_mapping = """
+        CREATE TABLE IF NOT EXISTS field_mapping (
+            original_name VARCHAR(255) PRIMARY KEY,
+            sanitized_name VARCHAR(64),
+            field_type VARCHAR(50),
+            INDEX idx_sanitized_name (sanitized_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        cursor.execute(create_field_mapping)
+        
+        # Inserisci il mapping dei campi
+        for field, def_type in table_definitions.items():
+            cursor.execute("""
+                INSERT INTO field_mapping (original_name, sanitized_name, field_type)
+                VALUES (%s, %s, %s) AS new_data
+                ON DUPLICATE KEY UPDATE
+                    sanitized_name = new_data.sanitized_name,
+                    field_type = new_data.field_type
+            """, (field, field_mapping[field], column_types[field]))
+        
+        cursor.close()
 
 def is_file_processed(conn, file_name):
     cursor = conn.cursor()
@@ -1351,7 +1425,7 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         """, (file_name, record_count, status, error_message))
         conn.commit()
     except Exception as e:
-        logger.error(f"🖥️ Errore nel marcare il file come processato: {e}")
+        log_error_with_context(db_logger, e, "mark file processed", f"file {file_name}")
         conn.rollback()
     finally:
         cursor.close()
@@ -1364,9 +1438,21 @@ def find_json_files(base_path):
                 json_files.append(os.path.join(root, file))
     return json_files
 
-def process_chunk(args):
+def process_chunk_unified(args, execution_mode="sequential"):
+    """
+    Processa un chunk con logica unificata per multiprocessing e sequential.
+    
+    Args:
+        args: (chunk, file_name, batch_id, table_definitions)
+        execution_mode: "multiprocessing" o "sequential"
+    """
     chunk, file_name, batch_id, table_definitions = args
-    print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
+    
+    # Logging specifico per modalità
+    if execution_mode == "multiprocessing":
+        print(f"[Multiprocessing] Processo PID={os.getpid()} elabora chunk di {len(chunk)} record del file {file_name}")
+    else:
+        batch_logger.info(f"[Sequential] Elabora chunk di {len(chunk)} record del file {file_name}")
     
     max_retries = 3
     retry_delay = 2
@@ -1380,7 +1466,12 @@ def process_chunk(args):
                 conn.commit()
                 return  # Successo
             except Exception as e:
-                logger.error(f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
+                error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
+                if execution_mode == "multiprocessing":
+                    print(f"❌ {error_msg}")  # In multiprocessing usa print per evitare conflitti logger
+                else:
+                    log_error_with_context(batch_logger, e, "chunk processing", f"tentativo {attempt + 1}/{max_retries}")
+                
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Backoff exponenziale
@@ -1391,211 +1482,183 @@ def process_chunk(args):
                 conn.close()
         except Exception as e:
             if attempt == max_retries - 1:
-                logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
+                final_error = f"Errore nel processare chunk dopo {max_retries} tentativi: {e}"
+                if execution_mode == "multiprocessing":
+                    print(f"❌ {final_error}")
+                else:
+                    log_error_with_context(batch_logger, e, "chunk processing", f"fallimento finale dopo {max_retries} tentativi")
                 raise
 
-def import_all_json_files(base_path, conn):
-    json_files = find_json_files(base_path)
-    total_files = len(json_files)
-    logger.info(f"📁 Trovati {total_files} file JSON da importare")
-    
-    # Inizializza il tracker del progresso
-    progress_tracker = ProgressTracker(total_files)
-    
-    global table_definitions
-    table_definitions = analyze_json_structure(json_files)
-    # Usa una connessione temporanea per la creazione delle tabelle
-    tmp_conn = mysql.connector.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        charset='utf8mb4',
-        autocommit=True
-    )
-    create_dynamic_tables(tmp_conn, table_definitions)
-    tmp_conn.close()
-    # Pool di connessioni ridotto per stabilità (MONO-PROCESSO)
-    global connection_pool
-    connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-        pool_name="mypool",
-        pool_size=2,  # Solo 2 connessioni per mono-processo
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DATABASE,
-        charset='utf8mb4',
-        autocommit=True,
-        connect_timeout=180,
-        use_pure=True,
-        ssl_disabled=True,
-        get_warnings=True,
-        raise_on_warnings=True,
-        consume_results=True,
-        buffered=True,
-        raw=False,
-        use_unicode=True,
-        auth_plugin='mysql_native_password'
-    )
-    
-    logger.info("🚀 Configurazione risorse DINAMICHE ottimizzate:")
-    logger.info(f"   💻 CPU: {CPU_CORES} core → {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger.info(f"   🖥️ RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger.info(f"   🚀 RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger.info(f"   🔥 Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger.info(f"   📦 Batch size principale: {BATCH_SIZE:,}")
-    
-    # Mostra il batch size INSERT dinamico attuale
-    current_insert_batch = calculate_dynamic_insert_batch_size()
-    current_ram = psutil.virtual_memory().available / (1024**3)
-    logger.info(f"   ⚡ INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger.info(f"   🎯 Chunk size max: {MAX_CHUNK_SIZE:,}")
-    
-    # Processa file per file SEQUENZIALMENTE
-    total_processed_files = 0
-    total_processed_records = 0
-    
-    for idx, json_file in enumerate(json_files, 1):
-        file_name = os.path.basename(json_file)
-        
-        # Salta i file già processati con successo
-        conn_check = connection_pool.get_connection()
-        if is_file_processed(conn_check, file_name):
-            logger.info(f"\n⏭️  File già processato: {file_name}")
-            progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
-            conn_check.close()
-            continue
-        conn_check.close()
-        
-        # Conta i record nel file per il progresso
-        file_record_count = 0
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        file_record_count += 1
-        except Exception as e:
-            logger.error(f"❌ Errore nel conteggio record per {file_name}: {e}")
-            continue
-        
-        # Inizia il tracking del file
-        progress_tracker.start_file(file_name, file_record_count)
-        
-        batch_id = f"{int(time.time())}_{idx}"
-        chunk_size = BATCH_SIZE
-        file_chunks = []
-        current_chunk = []
-        processed_records_in_file = 0
-        
-        # Leggi il file e crea i chunk (solo per questo file)
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        current_chunk.append((record, file_name))
-                        processed_records_in_file += 1
-                        
-                        # Usa BATCH_SIZE dinamico invece di chunk_size fisso
-                        if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
-                            file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
-                            current_chunk = []
-                    except Exception as e:
-                        logger.error(f"\n❌ Errore nel parsing del record: {e}")
-                        continue
-                        
-            if current_chunk:
-                file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
-            
-            logger.info(f"📦 Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
-            
-            # Processa i chunk di questo file SEQUENZIALMENTE
-            records_completed_in_file = 0
-            if file_chunks:
-                for chunk_idx, chunk_data in enumerate(file_chunks, 1):
-                    try:
-                        chunk_records = len(chunk_data[0])
-                        logger.info(f"⚙️  Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record)")
-                        
-                        process_chunk_sequential(chunk_data)
-                        records_completed_in_file += chunk_records
-                        
-                        # Aggiorna progresso del file ogni chunk
-                        progress_tracker.update_file_progress(records_completed_in_file)
-                        
-                    except Exception as e:
-                        logger.error(f"❌ Errore nel processing chunk {chunk_idx}: {e}")
-                        # Continua con il prossimo chunk invece di fallire tutto
-                        continue
-                
-                # Marca il file come processato
-                conn_mark = connection_pool.get_connection()
-                mark_file_processed(conn_mark, file_name, processed_records_in_file)
-                conn_mark.close()
-                
-                # Completa il tracking del file
-                progress_tracker.finish_file(processed_records_in_file)
-                
-                total_processed_files += 1
-                total_processed_records += processed_records_in_file
-            
-            # Libera la memoria dei chunk di questo file
-            del file_chunks
-            del current_chunk
-            gc.collect()
-        
-        except Exception as e:
-            error_message = str(e)
-            logger.error(f"\n❌ Errore nel processing del file {file_name}: {error_message}")
-            conn_mark = connection_pool.get_connection()
-            mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
-            conn_mark.close()
-    
-    # Statistiche finali
-    final_stats = progress_tracker.get_global_stats()
-    total_time = final_stats['elapsed_time']
-    
-    logger.info("\n" + "="*80)
-    logger.info("🎉 IMPORTAZIONE COMPLETATA!")
-    logger.info(f"📁 File processati: {final_stats['processed_files']}/{final_stats['total_files']} ({final_stats['completion_pct']:.1f}%)")
-    logger.info(f"📈 Record totali: {final_stats['total_records']:,}")
-    logger.info(f"⚡ Velocità media: {final_stats['avg_speed']:.0f} record/s")
-    logger.info(f"⏱️  Tempo totale: {str(timedelta(seconds=int(total_time)))}")
-    logger.info("="*80)
+def process_chunk(args):
+    """Wrapper per multiprocessing - usa la funzione unificata."""
+    return process_chunk_unified(args, execution_mode="multiprocessing")
 
 def process_chunk_sequential(args):
-    """Processa un chunk in modo sequenziale senza multiprocessing."""
-    chunk, file_name, batch_id, table_definitions = args
-    logger.info(f"[Sequential] Elabora chunk di {len(chunk)} record del file {file_name}")
-    
-    max_retries = 3
-    retry_delay = 2
-    
-    for attempt in range(max_retries):
-        try:
-            conn = connection_pool.get_connection()
-            cursor = conn.cursor()
+    """Wrapper per sequential processing - usa la funzione unificata."""
+    return process_chunk_unified(args, execution_mode="sequential")
+
+def import_all_json_files(base_path, conn):
+    with LogContext(import_logger, "importazione completa JSON", base_path=base_path):
+        json_files = find_json_files(base_path)
+        total_files = len(json_files)
+        import_logger.info(f"Trovati {total_files} file JSON da importare")
+        
+        # Inizializza il tracker del progresso
+        progress_tracker = ProgressTracker(total_files)
+        
+        global table_definitions
+        table_definitions = analyze_json_structure(json_files)
+        
+        # Usa una connessione temporanea per la creazione delle tabelle
+        tmp_conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset='utf8mb4',
+            autocommit=True
+        )
+        create_dynamic_tables(tmp_conn, table_definitions)
+        tmp_conn.close()
+        
+        # Pool di connessioni ridotto per stabilità (MONO-PROCESSO)
+        global connection_pool
+        connection_pool = mysql.connector.pooling.MySQLConnectionPool(
+            pool_name="mypool",
+            pool_size=2,  # Solo 2 connessioni per mono-processo
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset='utf8mb4',
+            autocommit=True,
+            connect_timeout=180,
+            use_pure=True,
+            ssl_disabled=True,
+            get_warnings=True,
+            raise_on_warnings=True,
+            consume_results=True,
+            buffered=True,
+            raw=False,
+            use_unicode=True,
+            auth_plugin='mysql_native_password'
+        )
+        
+        log_resource_optimization(import_logger)
+        
+        # Processa file per file SEQUENZIALMENTE
+        total_processed_files = 0
+        total_processed_records = 0
+        
+        for idx, json_file in enumerate(json_files, 1):
+            file_name = os.path.basename(json_file)
+            
+            # Salta i file già processati con successo
+            conn_check = connection_pool.get_connection()
+            if is_file_processed(conn_check, file_name):
+                import_logger.info(f"⏭️ File già processato: {file_name}")
+                progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
+                conn_check.close()
+                continue
+            conn_check.close()
+            
+            # Conta i record nel file per il progresso
+            file_record_count = 0
             try:
-                process_batch(cursor, chunk, table_definitions, batch_id)
-                conn.commit()
-                return  # Successo
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            file_record_count += 1
             except Exception as e:
-                logger.error(f"❌ Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Backoff exponenziale
-                else:
-                    raise
-            finally:
-                cursor.close()
-                conn.close()
-        except Exception as e:
-            if attempt == max_retries - 1:
-                logger.error(f"❌ Errore nel processare chunk dopo {max_retries} tentativi: {e}")
-                raise
+                log_error_with_context(import_logger, e, "conteggio record", file_name)
+                continue
+            
+            # Inizia il tracking del file
+            progress_tracker.start_file(file_name, file_record_count)
+            
+            batch_id = f"{int(time.time())}_{idx}"
+            chunk_size = BATCH_SIZE
+            file_chunks = []
+            current_chunk = []
+            processed_records_in_file = 0
+            
+            # Leggi il file e crea i chunk (solo per questo file)
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                            current_chunk.append((record, file_name))
+                            processed_records_in_file += 1
+                            
+                            # Usa BATCH_SIZE dinamico invece di chunk_size fisso
+                            if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
+                                file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+                                current_chunk = []
+                        except Exception as e:
+                            log_error_with_context(import_logger, e, "parsing record", file_name)
+                            continue
+                            
+                if current_chunk:
+                    file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
+                
+                batch_logger.info(f"Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
+                
+                # Processa i chunk di questo file SEQUENZIALMENTE
+                records_completed_in_file = 0
+                if file_chunks:
+                    for chunk_idx, chunk_data in enumerate(file_chunks, 1):
+                        try:
+                            chunk_records = len(chunk_data[0])
+                            batch_logger.info(f"Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record)")
+                            
+                            process_chunk_sequential(chunk_data)
+                            records_completed_in_file += chunk_records
+                            
+                            # Aggiorna progresso del file ogni chunk
+                            progress_tracker.update_file_progress(records_completed_in_file)
+                            
+                        except Exception as e:
+                            log_error_with_context(batch_logger, e, f"chunk {chunk_idx}", file_name)
+                            # Continua con il prossimo chunk invece di fallire tutto
+                            continue
+                    
+                    # Marca il file come processato
+                    conn_mark = connection_pool.get_connection()
+                    mark_file_processed(conn_mark, file_name, processed_records_in_file)
+                    conn_mark.close()
+                    
+                    # Completa il tracking del file
+                    progress_tracker.finish_file(processed_records_in_file)
+                    
+                    total_processed_files += 1
+                    total_processed_records += processed_records_in_file
+                
+                # Libera la memoria dei chunk di questo file
+                del file_chunks
+                del current_chunk
+                gc.collect()
+            
+            except Exception as e:
+                error_message = str(e)
+                log_error_with_context(import_logger, e, "processing file", file_name)
+                conn_mark = connection_pool.get_connection()
+                mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
+                conn_mark.close()
+        
+        # Statistiche finali
+        final_stats = progress_tracker.get_global_stats()
+        total_time = final_stats['elapsed_time']
+        
+        import_logger.info("="*80)
+        import_logger.info("🎉 IMPORTAZIONE COMPLETATA!")
+        log_file_progress(import_logger, final_stats['processed_files'], final_stats['total_files'], "completati")
+        log_performance_stats(import_logger, "Record totali", final_stats['total_records'], total_time)
+        import_logger.info(f"⏱️ Tempo totale: {str(timedelta(seconds=int(total_time)))}")
+        import_logger.info("="*80)
 
 class ProgressTracker:
     """Traccia il progresso dell'importazione con ETA e statistiche dettagliate."""
@@ -1623,10 +1686,10 @@ class ProgressTracker:
             elapsed_total = time.time() - self.start_time
             avg_speed = self.total_records_processed / elapsed_total if elapsed_total > 0 else 0
             
-            logger.info(f"\n📁 File {self.processed_files + 1}/{self.total_files}: {file_name}")
-            logger.info(f"🎯 Record nel file: {total_records:,}")
-            logger.info(f"📊 Progresso globale: {self.processed_files}/{self.total_files} file ({self.processed_files/self.total_files*100:.1f}%)")
-            logger.info(f"⚡ Velocità media: {avg_speed:.0f} record/s")
+            progress_logger.info(f"File {self.processed_files + 1}/{self.total_files}: {file_name}")
+            progress_logger.info(f"Record nel file: {total_records:,}")
+            log_file_progress(progress_logger, self.processed_files, self.total_files, "globale")
+            log_performance_stats(progress_logger, "Velocità media", self.total_records_processed, elapsed_total)
     
     def update_file_progress(self, records_completed):
         """Aggiorna il progresso del file corrente."""
@@ -1646,8 +1709,7 @@ class ProgressTracker:
                 else:
                     file_eta = "N/A"
                 
-                logger.info(f"📈 File progresso: {records_completed:,}/{self.current_file_total_records:,} ({file_progress:.1f}%) | "
-                           f"Velocità: {file_speed:.0f} rec/s | ETA file: {file_eta}")
+                log_batch_progress(progress_logger, records_completed, self.current_file_total_records, file_speed, f"ETA: {file_eta}")
     
     def finish_file(self, records_processed):
         """Completa il tracking del file corrente."""
@@ -1675,11 +1737,11 @@ class ProgressTracker:
                 else:
                     global_eta = "N/A"
                 
-                logger.info(f"✅ File completato: {self.current_file_name}")
-                logger.info(f"📊 Record processati: {records_processed:,} in {file_time:.1f}s ({file_speed:.0f} rec/s)")
-                logger.info(f"🎯 Progresso globale: {self.processed_files}/{self.total_files} file ({self.processed_files/self.total_files*100:.1f}%)")
-                logger.info(f"📈 Record totali: {self.total_records_processed:,} ({global_avg_speed:.0f} rec/s media)")
-                logger.info(f"⏱️  ETA completamento: {global_eta} ({remaining_files} file rimanenti)")
+                progress_logger.info(f"✅ File completato: {self.current_file_name}")
+                log_performance_stats(progress_logger, "Record processati", records_processed, file_time)
+                log_file_progress(progress_logger, self.processed_files, self.total_files, "globale")
+                log_performance_stats(progress_logger, "Record totali", self.total_records_processed, total_elapsed, "media globale")
+                progress_logger.info(f"⏱️ ETA completamento: {global_eta} ({remaining_files} file rimanenti)")
                 
                 # Reset file corrente
                 self.current_file_name = None
@@ -1708,22 +1770,22 @@ def main():
         # Crea la directory dei log se non esiste
         os.makedirs('logs', exist_ok=True)
         
-        logger.info(f"🖥️ Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"🖥️ RAM totale: {TOTAL_MEMORY_GB:.2f}GB")
-        logger.info(f"🖥️ RAM usabile (buffer {MEMORY_BUFFER_RATIO*100:.0f}%): {USABLE_MEMORY_GB:.2f}GB")
-        logger.info(f"🖥️ Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
-        logger.info(f"🖥️ Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
-        
-        # Verifica lo spazio disco
-        check_disk_space()
-        
-        conn = connect_mysql()
-        import_all_json_files(JSON_BASE_PATH, conn)
-        conn.close()
-        logger.info("Tutte le connessioni chiuse.")
+        with LogContext(logger, "importazione MySQL"):
+            logger.info(f"Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            log_memory_status(memory_logger, "inizio")
+            logger.info(f"Chunk size iniziale calcolato: {INITIAL_CHUNK_SIZE}")
+            logger.info(f"Chunk size massimo calcolato: {MAX_CHUNK_SIZE}")
+            
+            # Verifica lo spazio disco
+            check_disk_space()
+            
+            conn = connect_mysql()
+            import_all_json_files(JSON_BASE_PATH, conn)
+            conn.close()
+            logger.info("Tutte le connessioni chiuse.")
     except Exception as e:
-        logger.error(f"Errore durante l'importazione in MySQL: {e}")
+        log_error_with_context(logger, e, "main", "importazione MySQL")
         raise
 
 if __name__ == "__main__":
-    main() 
+    main()
