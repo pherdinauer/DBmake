@@ -17,6 +17,7 @@ from queue import Queue
 import multiprocessing
 import csv
 import tempfile
+import platform
 
 # Configurazione logging
 logging.basicConfig(
@@ -47,9 +48,26 @@ logger.info(f"🖥️  CPU cores disponibili: {multiprocessing.cpu_count()}")
 logger.info(f"🖥️  Thread per elaborazione: {NUM_THREADS}")
 logger.info(f"🖥️  Worker process: {NUM_WORKERS} (ULTRA-conservativo per stabilità MySQL)")
 
-# Directory temporanea per i file CSV
-TEMP_DIR = '/database/tmp'
-os.makedirs(TEMP_DIR, exist_ok=True)
+# Directory temporanea per i file CSV - Linux optimized
+TEMP_DIR_PREFERRED = '/database/tmp'
+TEMP_DIR_FALLBACK = os.path.join(tempfile.gettempdir(), 'dbmake_tmp')
+
+try:
+    # Prova a creare la directory preferita
+    os.makedirs(TEMP_DIR_PREFERRED, exist_ok=True)
+    # Test di scrittura per verificare i permessi
+    test_file = os.path.join(TEMP_DIR_PREFERRED, 'test_write.tmp')
+    with open(test_file, 'w') as f:
+        f.write('test')
+    os.remove(test_file)
+    TEMP_DIR = TEMP_DIR_PREFERRED
+    logger.info(f"📁 Directory temporanea: {TEMP_DIR} ✅")
+except (OSError, PermissionError) as e:
+    logger.warning(f"⚠️ Impossibile usare {TEMP_DIR_PREFERRED}: {e}")
+    logger.info(f"🔄 Fallback a directory temporanea di sistema...")
+    os.makedirs(TEMP_DIR_FALLBACK, exist_ok=True)
+    TEMP_DIR = TEMP_DIR_FALLBACK
+    logger.info(f"📁 Directory temporanea: {TEMP_DIR} ✅")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -301,12 +319,38 @@ def write_batch_to_csv(batch_data, fields, batch_id):
     csv_file = os.path.join(TEMP_DIR, f'main_data_batch_{batch_id}.csv')
     
     try:
+        # Debug: controlla se ci sono campi data problematici
+        date_field_indices = []
+        for i, field in enumerate(fields):
+            if 'data_' in field.lower() or field.lower() in ['created_at', 'updated_at']:
+                date_field_indices.append((i, field))
+        
+        if date_field_indices:
+            logger.info(f"🗓️ Debug campi data nel batch {batch_id}:")
+            logger.info(f"   • Campi data trovati: {[f[1] for f in date_field_indices]}")
+            
+            # Mostra alcuni esempi di valori data
+            for row_idx, row in enumerate(batch_data[:3]):  # Solo primi 3 record
+                for field_idx, field_name in date_field_indices:
+                    if field_idx < len(row):
+                        value = row[field_idx]
+                        logger.info(f"   • Record {row_idx+1}, {field_name}: '{value}' (tipo: {type(value).__name__})")
+        
         with open(csv_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             # Scrivi l'header
             writer.writerow(fields)
             # Scrivi i dati
             writer.writerows(batch_data)
+        
+        # Verifica che il file sia stato creato
+        if os.path.exists(csv_file):
+            file_size = os.path.getsize(csv_file)
+            logger.info(f"✅ File CSV creato: {csv_file} ({file_size} bytes)")
+        else:
+            logger.error(f"❌ File CSV non creato: {csv_file}")
+            raise FileNotFoundError(f"File CSV non creato: {csv_file}")
+            
         return csv_file
     except Exception as e:
         logger.error(f"❌ Errore nella scrittura del file CSV: {e}")
@@ -317,15 +361,23 @@ def write_batch_to_csv(batch_data, fields, batch_id):
 def load_data_from_csv(cursor, csv_file, table_name, fields):
     """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE."""
     try:
+        # Normalizza il path per MySQL (usa sempre forward slash)
+        normalized_path = csv_file.replace('\\', '/')
+        
+        logger.info(f"📥 Caricamento dati da: {csv_file}")
+        logger.info(f"📥 Path normalizzato: {normalized_path}")
+        
         # Costruisci la query LOAD DATA
         load_data_query = f"""
-        LOAD DATA LOCAL INFILE '{csv_file}'
+        LOAD DATA LOCAL INFILE '{normalized_path}'
         INTO TABLE {table_name}
         FIELDS TERMINATED BY ',' ENCLOSED BY '"'
         LINES TERMINATED BY '\\n'
         IGNORE 1 LINES
         ({', '.join(fields)})
         """
+        
+        logger.info(f"📥 Query LOAD DATA: {load_data_query[:200]}...")
         
         # Esegui la query
         cursor.execute(load_data_query)
@@ -337,11 +389,16 @@ def load_data_from_csv(cursor, csv_file, table_name, fields):
         
     except mysql.connector.Error as e:
         logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
+        logger.error(f"❌ File: {csv_file}")
+        logger.error(f"❌ Path normalizzato: {normalized_path}")
+        logger.error(f"❌ File esiste: {os.path.exists(csv_file)}")
         raise
     finally:
         # Pulisci il file temporaneo
         try:
-            os.remove(csv_file)
+            if os.path.exists(csv_file):
+                os.remove(csv_file)
+                logger.info(f"🗑️ File temporaneo rimosso: {csv_file}")
         except Exception as e:
             logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
 
@@ -427,14 +484,15 @@ def connect_mysql():
     max_retries = 3
     retry_delay = 5  # secondi
     
-    # Imposta la directory temporanea per il processo
-    tmp_dir = '/database/tmp'
-    os.makedirs(tmp_dir, exist_ok=True)
+    # Usa la directory temporanea determinata sopra
+    tmp_dir = TEMP_DIR
     
     # Pulisci la directory temporanea
     for file in os.listdir(tmp_dir):
         try:
-            os.remove(os.path.join(tmp_dir, file))
+            file_path = os.path.join(tmp_dir, file)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
         except:
             pass
     
@@ -903,7 +961,7 @@ def analyze_json_structure(json_files):
         # Calcola la dimensione stimata del campo
         field_size = 0
         if column_def.startswith('VARCHAR'):
-            # Estrai la dimensione dal VARCHAR(n)
+            # Estrai la dimensione dal VARCHAR
             size_str = column_def[8:-1]  # Rimuove 'VARCHAR(' e ')'
             field_size = int(size_str) * 3  # UTF8MB4 usa max 3 bytes per carattere
         elif column_def == 'TEXT':
@@ -1052,6 +1110,34 @@ def get_column_type(field_type, length):
         return f'VARCHAR({length})'
     return field_type
 
+def verify_table_structure(conn, table_name='main_data'):
+    """Verifica la struttura della tabella creata."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(f"DESCRIBE {table_name}")
+        columns = cursor.fetchall()
+        
+        logger.info(f"\n🔍 Struttura tabella {table_name}:")
+        date_columns = []
+        for column in columns:
+            field_name, field_type, is_null, key, default, extra = column
+            logger.info(f"   • {field_name}: {field_type}")
+            
+            # Evidenzia i campi data
+            if 'data_' in field_name.lower() or field_name.lower() in ['created_at', 'updated_at']:
+                date_columns.append((field_name, field_type))
+        
+        if date_columns:
+            logger.info(f"\n🗓️ Campi data nella tabella:")
+            for field_name, field_type in date_columns:
+                status = "✅" if field_type.upper() in ['DATE', 'DATETIME', 'TIMESTAMP'] else "❌"
+                logger.info(f"   {status} {field_name}: {field_type}")
+                
+    except mysql.connector.Error as e:
+        logger.error(f"❌ Errore nella verifica struttura tabella: {e}")
+    finally:
+        cursor.close()
+
 def create_dynamic_tables(conn, table_definitions):
     cursor = conn.cursor()
     
@@ -1094,7 +1180,13 @@ def create_dynamic_tables(conn, table_definitions):
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
     """
     
+    logger.info(f"🏗️ Creazione tabella main_data...")
+    logger.info(f"🏗️ Campi principali: {len(main_fields)}")
+    
     cursor.execute(create_main_table)
+    
+    # Verifica la struttura creata
+    verify_table_structure(conn)
     
     # Crea tabelle separate per i campi JSON
     for field, def_type in table_definitions.items():
@@ -1218,10 +1310,81 @@ def process_chunk(args):
                 logger.error(f"Errore nel processare chunk dopo {max_retries} tentativi: {e}")
                 raise
 
+def test_mysql_file_access(conn):
+    """Testa se MySQL può accedere ai file nella directory temporanea."""
+    cursor = conn.cursor()
+    try:
+        # Crea un file di test
+        test_file = os.path.join(TEMP_DIR, 'mysql_access_test.csv')
+        with open(test_file, 'w') as f:
+            f.write('test_col\n"test_value"\n')
+        
+        # Verifica che il file esista
+        if not os.path.exists(test_file):
+            logger.error(f"❌ File di test non creato: {test_file}")
+            return False
+        
+        logger.info(f"🧪 Test accesso MySQL al file: {test_file}")
+        
+        # Crea una tabella temporanea per il test
+        cursor.execute("""
+            CREATE TEMPORARY TABLE test_load (
+                test_col VARCHAR(50)
+            )
+        """)
+        
+        # Prova LOAD DATA LOCAL INFILE
+        load_query = f"""
+            LOAD DATA LOCAL INFILE '{test_file}'
+            INTO TABLE test_load
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+            LINES TERMINATED BY '\\n'
+            IGNORE 1 LINES
+        """
+        
+        cursor.execute(load_query)
+        
+        # Verifica che i dati siano stati caricati
+        cursor.execute("SELECT COUNT(*) FROM test_load")
+        count = cursor.fetchone()[0]
+        
+        if count > 0:
+            logger.info(f"✅ Test MySQL file access: SUCCESS ({count} righe caricate)")
+            success = True
+        else:
+            logger.warning(f"⚠️ Test MySQL file access: Nessuna riga caricata")
+            success = False
+        
+        # Pulisci
+        cursor.execute("DROP TEMPORARY TABLE test_load")
+        os.remove(test_file)
+        
+        return success
+        
+    except mysql.connector.Error as e:
+        logger.error(f"❌ Test MySQL file access FAILED: {e}")
+        # Pulisci in caso di errore
+        try:
+            cursor.execute("DROP TEMPORARY TABLE IF EXISTS test_load")
+            if os.path.exists(test_file):
+                os.remove(test_file)
+        except:
+            pass
+        return False
+    finally:
+        cursor.close()
+
 def import_all_json_files(base_path, conn):
     json_files = find_json_files(base_path)
     total_files = len(json_files)
     logger.info(f"📁 Trovati {total_files} file JSON da importare")
+    
+    # Test accesso file MySQL
+    if not test_mysql_file_access(conn):
+        logger.error("❌ MySQL non può accedere ai file temporanei!")
+        logger.error("❌ Verifica configurazione secure_file_priv e local_infile")
+        return
+    
     global table_definitions
     table_definitions = analyze_json_structure(json_files)
     # Usa una connessione temporanea per la creazione delle tabelle
