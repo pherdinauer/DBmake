@@ -1342,6 +1342,9 @@ CATEGORIES = {
     "pnrr_indicatori":        [r"indicatori-pnrrpnc"],
     "pnrr_misurepremiali":    [r"misurepremiali-pnrrpnc"],
     "stazioni_appaltanti":    [r"stazioni-appaltanti"],
+    # NUOVE CATEGORIE per file non categorizzati:
+    "cup":                    [r"cup[_-]json"],
+    "smartcig_fattispecie":   [r"smartcig-tipo-fattispecie-contrattuale"],
 }
 
 def group_files_by_category(json_files):
