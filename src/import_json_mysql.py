@@ -950,12 +950,29 @@ def analyze_json_structure(json_files):
         analysis_logger.info("[ANALYSIS] Riepilogo analisi intelligente:")
         log_file_progress(analysis_logger, files_analyzed, total_files, "completati")
         log_performance_stats(analysis_logger, "Record analizzati", records_analyzed, time.time() - start_time)
-        analysis_logger.info(f"[STATS] Media record per file: {records_analyzed/files_analyzed:.0f}")
+        
+        # Gestisci il caso di nessun file analizzato (evita divisione per zero)
+        if files_analyzed > 0:
+            analysis_logger.info(f"[STATS] Media record per file: {records_analyzed/files_analyzed:.0f}")
+        else:
+            analysis_logger.warning(f"[STATS] Nessun file analizzato - impossibile calcolare statistiche")
+        
         analysis_logger.info(f"[STATS] Campi rilevati: {len(table_definitions)}")
         analysis_logger.info(f"[STATS] Dimensione riga stimata: {total_estimated_row_size:,} bytes")
         log_memory_status(memory_logger, "finale analisi")
         
-        # Verifica limite MySQL
+        # Se non ci sono file, crea una definizione tabella minimale per evitare errori
+        if not table_definitions:
+            analysis_logger.warning(f"[FALLBACK] Nessun campo rilevato, creo struttura tabella minimale")
+            table_definitions = {
+                'cig': 'VARCHAR(20)',
+                'data_creazione': 'DATETIME', 
+                'oggetto': 'TEXT',
+                'importo': 'DECIMAL(15,2)'
+            }
+            analysis_logger.info(f"[FALLBACK] Creata struttura base con {len(table_definitions)} campi essenziali")
+        
+        # Verifica limite MySQL solo se abbiamo dati
         if total_estimated_row_size > mysql_row_limit:
             analysis_logger.warning(f"[WARN] RIGA TROPPO GRANDE! Supera il limite MySQL di {(total_estimated_row_size - mysql_row_limit):,} bytes")
             # Auto-ottimizzazione: converti campi grandi a TEXT
@@ -969,14 +986,17 @@ def analyze_json_structure(json_files):
             if optimized_count > 0:
                 analysis_logger.info(f"[AUTO-FIX] Ottimizzati {optimized_count} campi per rispettare i limiti MySQL")
         
-        # Report dettagliato per categoria
-        analysis_logger.info("[REPORT] Analisi per campo:")
-        field_analysis_report.sort(key=lambda x: x[4], reverse=True)  # Ordina per dimensione
-        for field, mysql_type, total_values, primary_type, size in field_analysis_report[:20]:  # Top 20
-            analysis_logger.info(f"  {field}: {mysql_type} ({total_values:,} valori, tipo: {primary_type}, {size}B)")
-        
-        if len(field_analysis_report) > 20:
-            analysis_logger.info(f"  ... e altri {len(field_analysis_report) - 20} campi")
+        # Report dettagliato per categoria solo se abbiamo dati
+        if field_analysis_report:
+            analysis_logger.info("[REPORT] Analisi per campo:")
+            field_analysis_report.sort(key=lambda x: x[4], reverse=True)  # Ordina per dimensione
+            for field, mysql_type, total_values, primary_type, size in field_analysis_report[:20]:  # Top 20
+                analysis_logger.info(f"  {field}: {mysql_type} ({total_values:,} valori, tipo: {primary_type}, {size}B)")
+            
+            if len(field_analysis_report) > 20:
+                analysis_logger.info(f"  ... e altri {len(field_analysis_report) - 20} campi")
+        else:
+            analysis_logger.info("[REPORT] Nessun campo da analizzare - utilizzata struttura fallback")
         
         analysis_logger.info("="*80)
         
@@ -1507,6 +1527,20 @@ def import_all_json_files(base_path, conn):
         total_files = len(json_files)
         
         import_logger.info(f"Trovati {total_files} file JSON da importare in {len(categories)} categorie")
+        
+        # Gestisci il caso di nessun file trovato
+        if total_files == 0:
+            import_logger.warning(f"[WARN] Nessun file JSON trovato in {base_path}")
+            import_logger.info(f"[INFO] Controlla che la directory contenga file .json")
+            import_logger.info(f"[INFO] Path utilizzato: {os.path.abspath(base_path)}")
+            return  # Esce senza errore
+        
+        # Gestisci il caso di nessuna categoria trovata
+        if len(categories) == 0:
+            import_logger.warning(f"[WARN] Nessuna categoria riconosciuta dai {total_files} file trovati")
+            import_logger.info(f"[INFO] I pattern regex potrebbero non matchare i nomi dei file")
+            import_logger.info(f"[INFO] Usa modalità --test per verificare la categorizzazione")
+            return  # Esce senza errore
         
         # Inizializza il tracker del progresso
         progress_tracker = ProgressTracker(total_files)
