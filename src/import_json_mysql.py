@@ -17,6 +17,7 @@ from queue import Queue
 import multiprocessing
 import platform
 import re
+from pathlib import Path
 
 # Configurazione logging
 logging.basicConfig(
@@ -739,40 +740,48 @@ def connect_mysql():
                 raise
 
 def check_disk_space():
-    """Verifica lo spazio disponibile su disco."""
+    """Verifica lo spazio disponibile su disco usando pathlib."""
     try:
         # Verifica lo spazio su /database
-        database_stats = os.statvfs('/database')
-        database_free_gb = (database_stats.f_bavail * database_stats.f_frsize) / (1024**3)
+        database_path = Path('/database')
+        if database_path.exists():
+            database_stats = os.statvfs(str(database_path))
+            database_free_gb = (database_stats.f_bavail * database_stats.f_frsize) / (1024**3)
+        else:
+            database_free_gb = 0
         
         # Verifica lo spazio su /tmp
-        tmp_stats = os.statvfs('/tmp')
-        tmp_free_gb = (tmp_stats.f_bavail * tmp_stats.f_frsize) / (1024**3)
+        tmp_path = Path('/tmp')
+        if tmp_path.exists():
+            tmp_stats = os.statvfs(str(tmp_path))
+            tmp_free_gb = (tmp_stats.f_bavail * tmp_stats.f_frsize) / (1024**3)
+        else:
+            tmp_free_gb = 0
         
         # Verifica lo spazio su /database/tmp
-        tmp_dir = '/database/tmp'
-        if os.path.exists(tmp_dir):
-            tmp_dir_stats = os.statvfs(tmp_dir)
+        tmp_dir_path = Path('/database/tmp')
+        if tmp_dir_path.exists():
+            tmp_dir_stats = os.statvfs(str(tmp_dir_path))
             tmp_dir_free_gb = (tmp_dir_stats.f_bavail * tmp_dir_stats.f_frsize) / (1024**3)
         else:
             tmp_dir_free_gb = 0
         
-        logger.info("\n🖥️ Spazio disco disponibile:")
-        logger.info(f"   🖥️ /database: {database_free_gb:.1f}GB")
-        logger.info(f"   🖥️ /tmp: {tmp_free_gb:.1f}GB")
-        logger.info(f"   🖥️ {tmp_dir}: {tmp_dir_free_gb:.1f}GB")
+        logger.info("Spazio disco disponibile:")
+        logger.info(f"   📁 {database_path}: {database_free_gb:.1f}GB")
+        logger.info(f"   📁 {tmp_path}: {tmp_free_gb:.1f}GB")
+        logger.info(f"   📁 {tmp_dir_path}: {tmp_dir_free_gb:.1f}GB")
         
         # Avvisa se lo spazio è basso
         if database_free_gb < 10:
-            logger.warning("🖥️ Spazio disponibile su /database è basso!")
+            logger.warning(f"⚠️ Spazio disponibile su {database_path} è basso!")
         if tmp_free_gb < 1:
-            logger.warning("🖥️ Spazio disponibile su /tmp è basso!")
+            logger.warning(f"⚠️ Spazio disponibile su {tmp_path} è basso!")
         if tmp_dir_free_gb < 1:
-            logger.warning(f"🖥️ Spazio disponibile su {tmp_dir} è basso!")
+            logger.warning(f"⚠️ Spazio disponibile su {tmp_dir_path} è basso!")
             
         return database_free_gb, tmp_free_gb, tmp_dir_free_gb
     except Exception as e:
-        logger.error(f"🖥️ Errore nel controllo dello spazio disco: {e}")
+        logger.error(f"❌ Errore nel controllo dello spazio disco: {e}")
         return None, None, None
 
 def analyze_json_structure(json_files):
@@ -1075,7 +1084,7 @@ def analyze_json_structure(json_files):
                                 avg_speed = records_analyzed / total_elapsed if total_elapsed > 0 else 0
                                 
                                 log_file_progress(progress_logger, files_analyzed, total_files, 
-                                                os.path.basename(json_file), 
+                                                Path(json_file).name, 
                                                 f"Record: {file_records:,}/{MAX_ROWS_PER_FILE:,} | {speed:.1f} rec/s")
                                 log_performance_stats(progress_logger, "Analisi totale", records_analyzed, total_elapsed)
                                 log_memory_status(memory_logger, "analisi")
@@ -1290,29 +1299,9 @@ def verify_table_structure(conn, table_name='main_data'):
         finally:
             cursor.close()
 
-def create_dynamic_tables(conn, table_definitions):
-    with LogContext(db_logger, "creazione tabelle dinamiche", tables=len(table_definitions)):
-        cursor = conn.cursor()
-        
-        # Crea un mapping tra nomi originali e nomi sanitizzati
-        existing_aliases = set()
-        field_mapping = {}
-        for field in table_definitions.keys():
-            sanitized = sanitize_field_name(field, existing_aliases)
-            field_mapping[field] = sanitized
-            existing_aliases.add(sanitized)
-        
-        # Converti i tipi di colonna in base alla lunghezza
-        column_types = {}
-        for field, def_type in table_definitions.items():
-            if def_type.startswith('VARCHAR'):
-                # Estrai la lunghezza dal tipo VARCHAR
-                length = int(def_type.split('(')[1].split(')')[0])
-                column_types[field] = get_column_type('VARCHAR', length)
-            else:
-                column_types[field] = def_type
-        
-        # Crea la tabella principale con tutti i campi
+def create_main_table(cursor, table_definitions, field_mapping, column_types):
+    """Crea la tabella principale con tutti i campi non-JSON."""
+    with LogContext(db_logger, "creazione tabella principale"):
         # Escludi il campo 'cig' dalla lista dei campi normali poiché è già la chiave primaria
         main_fields = [f"{field_mapping[field]} {column_types[field]}" 
                       for field in table_definitions.keys() 
@@ -1333,18 +1322,16 @@ def create_dynamic_tables(conn, table_definitions):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
         """
         
-        db_logger.info(f"Creazione tabella main_data...")
-        db_logger.info(f"Campi principali: {len(main_fields)}")
-        
+        db_logger.info(f"Creazione tabella main_data con {len(main_fields)} campi principali")
         cursor.execute(create_main_table)
-        
-        # Verifica la struttura creata
-        verify_table_structure(conn)
-        
-        # Crea tabelle separate per i campi JSON
-        json_tables_created = 0
-        for field, def_type in table_definitions.items():
-            if def_type == 'JSON':
+
+def create_json_tables(cursor, table_definitions, field_mapping):
+    """Crea le tabelle separate per i campi JSON."""
+    json_tables_created = 0
+    
+    for field, def_type in table_definitions.items():
+        if def_type == 'JSON':
+            with LogContext(db_logger, f"creazione tabella JSON per campo {field}"):
                 sanitized_field = field_mapping[field]
                 create_json_table = f"""
                 CREATE TABLE IF NOT EXISTS {sanitized_field}_data (
@@ -1361,10 +1348,15 @@ def create_dynamic_tables(conn, table_definitions):
                 """
                 cursor.execute(create_json_table)
                 json_tables_created += 1
-        
-        if json_tables_created > 0:
-            db_logger.info(f"Tabelle JSON create: {json_tables_created}")
-        
+    
+    if json_tables_created > 0:
+        db_logger.info(f"Tabelle JSON create: {json_tables_created}")
+    
+    return json_tables_created
+
+def create_metadata_tables(cursor, table_definitions, field_mapping, column_types):
+    """Crea le tabelle di metadati per tracking e mapping."""
+    with LogContext(db_logger, "creazione tabelle metadati"):
         # Crea tabella per tracciare i file processati
         create_processed_files = """
         CREATE TABLE IF NOT EXISTS processed_files (
@@ -1380,6 +1372,7 @@ def create_dynamic_tables(conn, table_definitions):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
         """
         cursor.execute(create_processed_files)
+        db_logger.info("Tabella processed_files creata")
         
         # Salva il mapping dei campi in una tabella di metadati
         create_field_mapping = """
@@ -1391,8 +1384,10 @@ def create_dynamic_tables(conn, table_definitions):
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
         """
         cursor.execute(create_field_mapping)
+        db_logger.info("Tabella field_mapping creata")
         
         # Inserisci il mapping dei campi
+        mapping_records = 0
         for field, def_type in table_definitions.items():
             cursor.execute("""
                 INSERT INTO field_mapping (original_name, sanitized_name, field_type)
@@ -1401,8 +1396,61 @@ def create_dynamic_tables(conn, table_definitions):
                     sanitized_name = new_data.sanitized_name,
                     field_type = new_data.field_type
             """, (field, field_mapping[field], column_types[field]))
+            mapping_records += 1
         
-        cursor.close()
+        db_logger.info(f"Mapping campi inserito: {mapping_records} record")
+
+def prepare_field_mappings(table_definitions):
+    """Prepara i mapping dei campi e i tipi di colonna."""
+    with LogContext(db_logger, "preparazione mapping campi", fields=len(table_definitions)):
+        # Crea un mapping tra nomi originali e nomi sanitizzati
+        existing_aliases = set()
+        field_mapping = {}
+        for field in table_definitions.keys():
+            sanitized = sanitize_field_name(field, existing_aliases)
+            field_mapping[field] = sanitized
+            existing_aliases.add(sanitized)
+        
+        # Converti i tipi di colonna in base alla lunghezza
+        column_types = {}
+        for field, def_type in table_definitions.items():
+            if def_type.startswith('VARCHAR'):
+                # Estrai la lunghezza dal tipo VARCHAR
+                length = int(def_type.split('(')[1].split(')')[0])
+                column_types[field] = get_column_type('VARCHAR', length)
+            else:
+                column_types[field] = def_type
+        
+        db_logger.info(f"Field mapping preparato: {len(field_mapping)} campi")
+        db_logger.info(f"Column types preparati: {len(column_types)} tipi")
+        
+        return field_mapping, column_types
+
+def create_dynamic_tables(conn, table_definitions):
+    """Crea tutte le tabelle dinamiche necessarie per l'importazione."""
+    with LogContext(db_logger, "creazione tabelle dinamiche", tables=len(table_definitions)):
+        cursor = conn.cursor()
+        
+        try:
+            # 1. Prepara mapping dei campi e tipi di colonna
+            field_mapping, column_types = prepare_field_mappings(table_definitions)
+            
+            # 2. Crea la tabella principale
+            create_main_table(cursor, table_definitions, field_mapping, column_types)
+            
+            # 3. Verifica la struttura creata
+            verify_table_structure(conn)
+            
+            # 4. Crea tabelle separate per i campi JSON
+            json_tables_count = create_json_tables(cursor, table_definitions, field_mapping)
+            
+            # 5. Crea tabelle di metadati
+            create_metadata_tables(cursor, table_definitions, field_mapping, column_types)
+            
+            db_logger.info(f"Creazione completata: 1 tabella principale, {json_tables_count} tabelle JSON, 2 tabelle metadati")
+            
+        finally:
+            cursor.close()
 
 def is_file_processed(conn, file_name):
     cursor = conn.cursor()
@@ -1431,12 +1479,25 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         cursor.close()
 
 def find_json_files(base_path):
-    json_files = []
-    for root, _, files in os.walk(base_path):
-        for file in files:
-            if file.endswith('.json'):
-                json_files.append(os.path.join(root, file))
-    return json_files
+    """Trova tutti i file JSON nella directory e sottodirectory usando pathlib."""
+    base_dir = Path(base_path)
+    
+    if not base_dir.exists():
+        import_logger.warning(f"Directory non trovata: {base_path}")
+        return []
+    
+    if not base_dir.is_dir():
+        import_logger.warning(f"Il percorso non è una directory: {base_path}")
+        return []
+    
+    # Usa rglob per ricerca ricorsiva di tutti i file .json
+    json_files = list(base_dir.rglob("*.json"))
+    
+    # Converte i Path objects in stringhe per compatibilità con il resto del codice
+    json_file_paths = [str(json_file) for json_file in json_files]
+    
+    import_logger.info(f"Trovati {len(json_file_paths)} file JSON in {base_path}")
+    return json_file_paths
 
 def process_chunk_unified(args, execution_mode="sequential"):
     """
@@ -1551,7 +1612,7 @@ def import_all_json_files(base_path, conn):
         total_processed_records = 0
         
         for idx, json_file in enumerate(json_files, 1):
-            file_name = os.path.basename(json_file)
+            file_name = Path(json_file).name
             
             # Salta i file già processati con successo
             conn_check = connection_pool.get_connection()
@@ -1767,8 +1828,9 @@ class ProgressTracker:
 
 def main():
     try:
-        # Crea la directory dei log se non esiste
-        os.makedirs('logs', exist_ok=True)
+        # Crea la directory dei log se non esiste usando pathlib
+        logs_dir = Path('logs')
+        logs_dir.mkdir(exist_ok=True)
         
         with LogContext(logger, "importazione MySQL"):
             logger.info(f"Inizio importazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
