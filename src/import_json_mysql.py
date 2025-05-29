@@ -497,26 +497,142 @@ def check_disk_space():
 def analyze_json_structure(json_files):
     field_types = defaultdict(lambda: defaultdict(int))
     field_lengths = defaultdict(int)
+    field_patterns = defaultdict(set)  # Per memorizzare i pattern dei valori
     
     logger.info("🔍 Analisi della struttura dei JSON...")
     logger.info("Questa fase analizza la struttura dei JSON per determinare:")
     logger.info("1. I tipi di dati per ogni campo")
     logger.info("2. Le lunghezze massime dei campi stringa")
-    logger.info("3. I campi JSON annidati")
+    logger.info("3. I pattern dei valori per determinare il tipo più appropriato")
     
     total_files = len(json_files)
     files_analyzed = 0
     records_analyzed = 0
     start_time = time.time()
     last_progress_time = time.time()
-    progress_interval = 1.0  # Aggiorna il progresso ogni secondo
+    progress_interval = 1.0
     
     # Ottimizzazione: campiona solo una parte dei record per l'analisi
     SAMPLE_SIZE = 10000  # Numero di record da analizzare per file
     current_sample = 0
     
-    # Lista di campi che dovrebbero essere numerici
-    numeric_fields = ['importo', 'prezzo', 'costo', 'valore', 'somma', 'totale', 'quantita', 'numero']
+    # Pattern per identificare i tipi di campi
+    patterns = {
+        'monetary': r'^[€$]?\s*\d+([.,]\d{2})?$',  # Valori monetari
+        'percentage': r'^\d+([.,]\d+)?%$',         # Percentuali
+        'date': r'^\d{4}-\d{2}-\d{2}$',           # Date ISO
+        'datetime': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',  # Date e orari
+        'boolean': r'^(true|false|yes|no|si|no|1|0)$',  # Booleani
+        'integer': r'^\d+$',                       # Numeri interi
+        'decimal': r'^\d+([.,]\d+)?$',             # Numeri decimali
+        'alphanumeric': r'^[A-Za-z0-9]+$',        # Alfanumerici
+        'identifier': r'^[A-Za-z0-9_-]+$',        # Identificatori
+        'email': r'^[^@]+@[^@]+\.[^@]+$',         # Email
+        'url': r'^https?://',                      # URL
+        'phone': r'^\+?\d{8,15}$',                # Numeri di telefono
+        'postal_code': r'^\d{5}$',                 # CAP
+        'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$',  # Codice fiscale
+        'partita_iva': r'^\d{11}$',               # Partita IVA
+        'cup': r'^[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}[A-Z]\d{2}$',  # CUP
+        'cig': r'^[A-Z]\d{8}[A-Z]\d{2}$'         # CIG
+    }
+    
+    import re
+    
+    def get_value_pattern(value):
+        """Determina il pattern di un valore."""
+        if value is None:
+            return 'null'
+        if isinstance(value, bool):
+            return 'boolean'
+        if isinstance(value, int):
+            return 'integer'
+        if isinstance(value, float):
+            return 'decimal'
+        if isinstance(value, (list, dict)):
+            return 'json'
+            
+        value_str = str(value).strip()
+        if not value_str:
+            return 'empty'
+            
+        for pattern_name, pattern in patterns.items():
+            if re.match(pattern, value_str, re.IGNORECASE):
+                return pattern_name
+        return 'text'
+    
+    def determine_field_type(field, patterns, values_count):
+        """Determina il tipo più appropriato per un campo basato sui suoi pattern."""
+        # Se il campo è vuoto o ha solo valori null, usa VARCHAR
+        if not patterns or patterns == {'null'} or patterns == {'empty'}:
+            return 'VARCHAR(255)'
+            
+        # Se il campo contiene JSON, usa il tipo JSON
+        if 'json' in patterns:
+            return 'JSON'
+            
+        # Se il campo contiene booleani, usa BOOLEAN
+        if patterns == {'boolean'}:
+            return 'BOOLEAN'
+            
+        # Se il campo contiene solo numeri interi, usa INT
+        if patterns == {'integer'}:
+            return 'INT'
+            
+        # Se il campo contiene numeri decimali o monetari, usa DECIMAL
+        if {'decimal', 'monetary'} & patterns:
+            return 'DECIMAL(20,2)'
+            
+        # Se il campo contiene date, usa DATE
+        if patterns == {'date'}:
+            return 'DATE'
+            
+        # Se il campo contiene datetime, usa DATETIME
+        if patterns == {'datetime'}:
+            return 'DATETIME'
+            
+        # Se il campo contiene percentuali, usa DECIMAL
+        if patterns == {'percentage'}:
+            return 'DECIMAL(5,2)'
+            
+        # Se il campo contiene solo identificatori o alfanumerici, usa VARCHAR
+        if patterns <= {'identifier', 'alphanumeric'}:
+            return 'VARCHAR(64)'
+            
+        # Se il campo contiene email, usa VARCHAR
+        if patterns == {'email'}:
+            return 'VARCHAR(255)'
+            
+        # Se il campo contiene URL, usa VARCHAR
+        if patterns == {'url'}:
+            return 'VARCHAR(512)'
+            
+        # Se il campo contiene numeri di telefono, usa VARCHAR
+        if patterns == {'phone'}:
+            return 'VARCHAR(20)'
+            
+        # Se il campo contiene CAP, usa VARCHAR
+        if patterns == {'postal_code'}:
+            return 'VARCHAR(5)'
+            
+        # Se il campo contiene codice fiscale, usa VARCHAR
+        if patterns == {'fiscal_code'}:
+            return 'VARCHAR(16)'
+            
+        # Se il campo contiene partita IVA, usa VARCHAR
+        if patterns == {'partita_iva'}:
+            return 'VARCHAR(11)'
+            
+        # Se il campo contiene CUP, usa VARCHAR
+        if patterns == {'cup'}:
+            return 'VARCHAR(15)'
+            
+        # Se il campo contiene CIG, usa VARCHAR
+        if patterns == {'cig'}:
+            return 'VARCHAR(13)'
+            
+        # Per tutti gli altri casi, usa VARCHAR con lunghezza appropriata
+        return 'VARCHAR(255)'
     
     for json_file in json_files:
         files_analyzed += 1
@@ -528,7 +644,6 @@ def analyze_json_structure(json_files):
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     try:
-                        # Ottimizzazione: analizza solo un campione dei record
                         if current_sample >= SAMPLE_SIZE:
                             break
                             
@@ -537,40 +652,19 @@ def analyze_json_structure(json_files):
                         records_analyzed += 1
                         current_sample += 1
                         
-                        # Analisi ottimizzata dei campi
                         for field, value in record.items():
                             if value is None:
                                 continue
-                            
-                            # Normalizza i nomi dei campi
+                                
                             field = field.lower().replace(' ', '_')
+                            pattern = get_value_pattern(value)
+                            field_patterns[field].add(pattern)
                             
-                            # Determina il tipo di campo (versione ottimizzata)
-                            if isinstance(value, bool):
-                                field_types[field]['BOOLEAN'] += 1
-                            elif isinstance(value, int):
-                                field_types[field]['INT'] += 1
-                            elif isinstance(value, float):
-                                field_types[field]['DOUBLE'] += 1
-                            elif isinstance(value, str):
-                                # Check if the field name suggests it should be numeric
-                                if any(numeric_term in field for numeric_term in numeric_fields):
-                                    try:
-                                        # Try to convert to float
-                                        float(''.join(c for c in value if c.isdigit() or c in '.-'))
-                                        field_types[field]['DOUBLE'] += 1
-                                    except (ValueError, TypeError):
-                                        field_types[field]['VARCHAR'] += 1
-                                else:
-                                    field_types[field]['VARCHAR'] += 1
-                                # Ottimizzazione: aggiorna la lunghezza massima solo se necessario
+                            if isinstance(value, str):
                                 current_length = len(value)
                                 if current_length > field_lengths[field]:
                                     field_lengths[field] = current_length
-                            elif isinstance(value, (list, dict)):
-                                field_types[field]['JSON'] += 1
                         
-                        # Aggiorna il progresso ogni secondo
                         current_time = time.time()
                         if current_time - last_progress_time >= progress_interval:
                             elapsed = current_time - file_start_time
@@ -589,7 +683,6 @@ def analyze_json_structure(json_files):
                         logger.error(f"⚠️ Errore nell'analisi del record nel file {json_file}: {e}")
                         continue
             
-            # Log alla fine di ogni file
             file_time = time.time() - file_start_time
             total_time = time.time() - start_time
             avg_speed = records_analyzed / total_time if total_time > 0 else 0
@@ -606,29 +699,8 @@ def analyze_json_structure(json_files):
     
     # Crea le definizioni delle tabelle
     table_definitions = {}
-    for field, types in field_types.items():
-        # Determina il tipo più comune
-        most_common_type = max(types.items(), key=lambda x: x[1])[0]
-        
-        # Crea la definizione della colonna
-        if most_common_type == 'VARCHAR':
-            length = min(field_lengths[field] * 2, 16383)  # Limita la lunghezza massima
-            column_def = f"VARCHAR({length})"
-        elif most_common_type == 'INT':
-            column_def = "INT"
-        elif most_common_type == 'DOUBLE':
-            # Use DECIMAL for monetary values to avoid floating-point precision issues
-            if any(numeric_term in field for numeric_term in numeric_fields):
-                column_def = "DECIMAL(20,2)"
-            else:
-                column_def = "DOUBLE"
-        elif most_common_type == 'BOOLEAN':
-            column_def = "BOOLEAN"
-        elif most_common_type == 'JSON':
-            column_def = "JSON"
-        else:
-            column_def = "TEXT"
-        
+    for field, patterns in field_patterns.items():
+        column_def = determine_field_type(field, patterns, records_analyzed)
         table_definitions[field] = column_def
     
     # Stampa un riepilogo della struttura trovata
@@ -639,6 +711,8 @@ def analyze_json_structure(json_files):
     logger.info("\nDettaglio campi:")
     for field, def_type in table_definitions.items():
         logger.info(f"   • {field}: {def_type}")
+        if field in field_patterns:
+            logger.info(f"     Pattern trovati: {', '.join(sorted(field_patterns[field]))}")
     
     return table_definitions
 
