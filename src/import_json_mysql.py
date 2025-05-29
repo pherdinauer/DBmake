@@ -70,7 +70,7 @@ MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
-JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', 'data/downloads')  # Aggiornato per Windows
+JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')  # Ripristinato percorso originale
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k a 75k
 
 # Ottimizzazione DINAMICA basata sulle risorse del sistema
