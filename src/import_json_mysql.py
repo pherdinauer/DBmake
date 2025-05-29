@@ -56,15 +56,15 @@ USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size dinamico in base alla RAM
-CHUNK_SIZE_INIT_RATIO = 0.05   # Aumentato al 5% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.15    # Aumentato al 15% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.02   # Ridotto al 2% della RAM usabile
+CHUNK_SIZE_MAX_RATIO = 0.05    # Ridotto al 5% della RAM usabile
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
 INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
 MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
 
-# Limita il chunk size massimo a 20000 record per sfruttare meglio la RAM
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 20000)
+# Limita il chunk size massimo a 50000 record per evitare problemi di connessione
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 50000)
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -254,176 +254,203 @@ def write_batch_to_csv(batch_data, fields, batch_id, is_first_batch=False):
 
 def load_data_from_csv(cursor, csv_file, table_name, fields):
     """Carica i dati dal file CSV nel database usando LOAD DATA LOCAL INFILE."""
-    try:
-        # Verifica che il file esista e sia leggibile
-        if not os.path.exists(csv_file):
-            raise FileNotFoundError(f"File CSV non trovato: {csv_file}")
-        
-        if not os.access(csv_file, os.R_OK):
-            raise PermissionError(f"Permessi di lettura mancanti per il file: {csv_file}")
-        
-        # Verifica che il file non sia vuoto
-        file_size = os.path.getsize(csv_file)
-        if file_size == 0:
-            logger.warning(f"⚠️ File CSV vuoto: {csv_file}")
-            return
-        
-        # Stima il numero di righe nel file CSV
-        logger.info(f"📊 Preparazione caricamento CSV:")
-        logger.info(f"   • File: {os.path.basename(csv_file)}")
-        logger.info(f"   • Dimensione: {file_size / 1024 / 1024:.1f} MB")
-        
-        # Conta le righe nel file CSV per il monitoraggio
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            total_lines = sum(1 for _ in f) - 1  # -1 per escludere l'header
-        logger.info(f"   • Righe da importare: {total_lines:,}")
-        
-        # Ottieni il numero di righe attuali nella tabella
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-        initial_count = cursor.fetchone()[0]
-        
-        # Costruisci la query LOAD DATA con gestione degli errori
-        load_data_query = f"""
-        LOAD DATA LOCAL INFILE '{csv_file}'
-        INTO TABLE {table_name}
-        FIELDS TERMINATED BY ',' ENCLOSED BY '"'
-        LINES TERMINATED BY '\\n'
-        IGNORE 1 LINES
-        ({', '.join(fields)})
-        """
-        
-        # Variabili per il monitoraggio del progresso
-        import threading
-        import time
-        
-        progress_stop = threading.Event()
-        
-        def monitor_progress():
-            """Monitora il progresso del caricamento controllando il numero di righe nella tabella."""
-            last_count = initial_count
-            start_time = time.time()
-            
-            while not progress_stop.is_set():
-                try:
-                    # Crea un nuovo cursore per il monitoraggio (per evitare conflitti)
-                    monitor_cursor = cursor._connection.cursor()
-                    monitor_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-                    current_count = monitor_cursor.fetchone()[0]
-                    monitor_cursor.close()
-                    
-                    imported_rows = current_count - initial_count
-                    if imported_rows > 0:
-                        progress_percent = min(100, (imported_rows / total_lines) * 100)
-                        elapsed_time = time.time() - start_time
-                        speed = imported_rows / elapsed_time if elapsed_time > 0 else 0
-                        eta_seconds = (total_lines - imported_rows) / speed if speed > 0 else 0
-                        
-                        logger.info(f"📈 Progresso caricamento CSV: {imported_rows:,}/{total_lines:,} righe "
-                                  f"({progress_percent:.1f}%) - {speed:.0f} righe/s - "
-                                  f"ETA: {int(eta_seconds//60)}:{int(eta_seconds%60):02d}")
-                    
-                    last_count = current_count
-                    time.sleep(2)  # Controlla ogni 2 secondi
-                    
-                except Exception as e:
-                    # Ignora errori di monitoraggio per non interrompere il caricamento principale
-                    pass
-        
-        # Avvia il monitoraggio del progresso
-        progress_thread = threading.Thread(target=monitor_progress, daemon=True)
-        progress_thread.start()
-        
-        # Esegui la query con gestione degli errori
+    max_retries = 3
+    retry_delay = 5  # secondi
+    
+    for attempt in range(max_retries):
         try:
-            logger.info(f"🚀 Inizio caricamento CSV nel database...")
-            start_time = time.time()
+            # Verifica che il file esista e sia leggibile
+            if not os.path.exists(csv_file):
+                raise FileNotFoundError(f"File CSV non trovato: {csv_file}")
             
-            cursor.execute(load_data_query)
-            cursor.execute("SELECT ROW_COUNT()")
-            rows_affected = cursor.fetchone()[0]
+            if not os.access(csv_file, os.R_OK):
+                raise PermissionError(f"Permessi di lettura mancanti per il file: {csv_file}")
             
-            # Ferma il monitoraggio del progresso
-            progress_stop.set()
-            progress_thread.join(timeout=1)
+            # Verifica che il file non sia vuoto
+            file_size = os.path.getsize(csv_file)
+            if file_size == 0:
+                logger.warning(f"⚠️ File CSV vuoto: {csv_file}")
+                return
             
-            elapsed_time = time.time() - start_time
-            speed = rows_affected / elapsed_time if elapsed_time > 0 else 0
+            # Stima il numero di righe nel file CSV
+            logger.info(f"📊 Preparazione caricamento CSV:")
+            logger.info(f"   • File: {os.path.basename(csv_file)}")
+            logger.info(f"   • Dimensione: {file_size / 1024 / 1024:.1f} MB")
             
-            logger.info(f"✅ Caricamento completato!")
-            logger.info(f"   • Righe importate: {rows_affected:,}")
-            logger.info(f"   • Tempo: {elapsed_time:.1f}s")
-            logger.info(f"   • Velocità: {speed:.0f} righe/s")
+            # Conta le righe nel file CSV per il monitoraggio
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                total_lines = sum(1 for _ in f) - 1  # -1 per escludere l'header
+            logger.info(f"   • Righe da importare: {total_lines:,}")
             
-        except mysql.connector.Error as e:
-            # Ferma il monitoraggio in caso di errore
-            progress_stop.set()
-            progress_thread.join(timeout=1)
+            # Ottieni il numero di righe attuali nella tabella
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            initial_count = cursor.fetchone()[0]
             
-            if e.errno == 1148:  # The used command is not allowed with this MySQL version
-                logger.error("❌ LOAD DATA LOCAL INFILE non è abilitato nel server MySQL")
-                logger.info("⚠️ Verifica che il server MySQL sia configurato con --local-infile=1")
-                raise
-            elif e.errno == 1261:  # Row doesn't contain data for all columns
-                logger.error("❌ Errore nel formato dei dati: alcune righe non contengono tutti i campi richiesti")
-                raise
-            elif e.errno == 1265:  # Data truncated
-                logger.warning("⚠️ Errore di troncamento dati, provo con modalità permissiva...")
-                # Salva la modalità SQL corrente
-                cursor.execute("SELECT @@sql_mode")
-                original_sql_mode = cursor.fetchone()[0]
+            # Imposta timeout più lunghi per il caricamento
+            cursor.execute("SET SESSION wait_timeout=28800")  # 8 ore
+            cursor.execute("SET SESSION interactive_timeout=28800")  # 8 ore
+            cursor.execute("SET SESSION net_read_timeout=3600")  # 1 ora
+            cursor.execute("SET SESSION net_write_timeout=3600")  # 1 ora
+            
+            # Costruisci la query LOAD DATA con gestione degli errori
+            load_data_query = f"""
+            LOAD DATA LOCAL INFILE '{csv_file}'
+            INTO TABLE {table_name}
+            FIELDS TERMINATED BY ',' ENCLOSED BY '"'
+            LINES TERMINATED BY '\\n'
+            IGNORE 1 LINES
+            ({', '.join(fields)})
+            """
+            
+            # Variabili per il monitoraggio del progresso
+            import threading
+            import time
+            
+            progress_stop = threading.Event()
+            
+            def monitor_progress():
+                """Monitora il progresso del caricamento controllando il numero di righe nella tabella."""
+                last_count = initial_count
+                start_time = time.time()
                 
-                try:
-                    # Imposta una modalità SQL più permissiva (compatibile con MySQL 8.0+)
-                    cursor.execute("SET sql_mode = 'ALLOW_INVALID_DATES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'")
-                    
-                    # Riavvia il monitoraggio del progresso
-                    progress_stop.clear()
-                    progress_thread = threading.Thread(target=monitor_progress, daemon=True)
-                    progress_thread.start()
-                    
-                    # Riprova il caricamento
-                    logger.info(f"🔄 Riprovo caricamento con modalità permissiva...")
-                    start_time = time.time()
-                    
-                    cursor.execute(load_data_query)
-                    cursor.execute("SELECT ROW_COUNT()")
-                    rows_affected = cursor.fetchone()[0]
-                    
-                    # Ferma il monitoraggio del progresso
-                    progress_stop.set()
-                    progress_thread.join(timeout=1)
-                    
-                    elapsed_time = time.time() - start_time
-                    speed = rows_affected / elapsed_time if elapsed_time > 0 else 0
-                    
-                    logger.info(f"✅ Caricamento completato (modalità permissiva)!")
-                    logger.info(f"   • Righe importate: {rows_affected:,}")
-                    logger.info(f"   • Tempo: {elapsed_time:.1f}s")
-                    logger.info(f"   • Velocità: {speed:.0f} righe/s")
-                    
-                    # Ripristina la modalità SQL originale
-                    cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
-                    
-                except Exception as retry_error:
-                    # Ferma il monitoraggio e ripristina la modalità SQL originale anche in caso di errore
-                    progress_stop.set()
-                    progress_thread.join(timeout=1)
-                    cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
-                    logger.error(f"❌ Errore anche con modalità permissiva: {retry_error}")
+                while not progress_stop.is_set():
+                    try:
+                        # Crea un nuovo cursore per il monitoraggio (per evitare conflitti)
+                        monitor_cursor = cursor._connection.cursor()
+                        monitor_cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                        current_count = monitor_cursor.fetchone()[0]
+                        monitor_cursor.close()
+                        
+                        imported_rows = current_count - initial_count
+                        if imported_rows > 0:
+                            progress_percent = min(100, (imported_rows / total_lines) * 100)
+                            elapsed_time = time.time() - start_time
+                            speed = imported_rows / elapsed_time if elapsed_time > 0 else 0
+                            eta_seconds = (total_lines - imported_rows) / speed if speed > 0 else 0
+                            
+                            logger.info(f"📈 Progresso caricamento CSV: {imported_rows:,}/{total_lines:,} righe "
+                                      f"({progress_percent:.1f}%) - {speed:.0f} righe/s - "
+                                      f"ETA: {int(eta_seconds//60)}:{int(eta_seconds%60):02d}")
+                        
+                        last_count = current_count
+                        time.sleep(2)  # Controlla ogni 2 secondi
+                        
+                    except Exception as e:
+                        # Ignora errori di monitoraggio per non interrompere il caricamento principale
+                        pass
+            
+            # Avvia il monitoraggio del progresso
+            progress_thread = threading.Thread(target=monitor_progress, daemon=True)
+            progress_thread.start()
+            
+            # Esegui la query con gestione degli errori
+            try:
+                logger.info(f"🚀 Inizio caricamento CSV nel database...")
+                start_time = time.time()
+                
+                cursor.execute(load_data_query)
+                cursor.execute("SELECT ROW_COUNT()")
+                rows_affected = cursor.fetchone()[0]
+                
+                # Ferma il monitoraggio del progresso
+                progress_stop.set()
+                progress_thread.join(timeout=1)
+                
+                elapsed_time = time.time() - start_time
+                speed = rows_affected / elapsed_time if elapsed_time > 0 else 0
+                
+                logger.info(f"✅ Caricamento completato!")
+                logger.info(f"   • Righe importate: {rows_affected:,}")
+                logger.info(f"   • Tempo: {elapsed_time:.1f}s")
+                logger.info(f"   • Velocità: {speed:.0f} righe/s")
+                return  # Caricamento completato con successo
+                
+            except mysql.connector.Error as e:
+                # Ferma il monitoraggio in caso di errore
+                progress_stop.set()
+                progress_thread.join(timeout=1)
+                
+                if e.errno == 1148:  # The used command is not allowed with this MySQL version
+                    logger.error("❌ LOAD DATA LOCAL INFILE non è abilitato nel server MySQL")
+                    logger.info("⚠️ Verifica che il server MySQL sia configurato con --local-infile=1")
                     raise
-            else:
-                raise
-        
-    except Exception as e:
-        logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
-        raise
-    finally:
-        # Pulisci il file temporaneo
-        try:
-            if os.path.exists(csv_file):
-                os.remove(csv_file)
+                elif e.errno == 1261:  # Row doesn't contain data for all columns
+                    logger.error("❌ Errore nel formato dei dati: alcune righe non contengono tutti i campi richiesti")
+                    raise
+                elif e.errno == 1265:  # Data truncated
+                    logger.warning("⚠️ Errore di troncamento dati, provo con modalità permissiva...")
+                    # Salva la modalità SQL corrente
+                    cursor.execute("SELECT @@sql_mode")
+                    original_sql_mode = cursor.fetchone()[0]
+                    
+                    try:
+                        # Imposta una modalità SQL più permissiva
+                        cursor.execute("SET sql_mode = 'ALLOW_INVALID_DATES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'")
+                        
+                        # Riavvia il monitoraggio del progresso
+                        progress_stop.clear()
+                        progress_thread = threading.Thread(target=monitor_progress, daemon=True)
+                        progress_thread.start()
+                        
+                        # Riprova il caricamento
+                        logger.info(f"🔄 Riprovo caricamento con modalità permissiva...")
+                        start_time = time.time()
+                        
+                        cursor.execute(load_data_query)
+                        cursor.execute("SELECT ROW_COUNT()")
+                        rows_affected = cursor.fetchone()[0]
+                        
+                        # Ferma il monitoraggio del progresso
+                        progress_stop.set()
+                        progress_thread.join(timeout=1)
+                        
+                        elapsed_time = time.time() - start_time
+                        speed = rows_affected / elapsed_time if elapsed_time > 0 else 0
+                        
+                        logger.info(f"✅ Caricamento completato (modalità permissiva)!")
+                        logger.info(f"   • Righe importate: {rows_affected:,}")
+                        logger.info(f"   • Tempo: {elapsed_time:.1f}s")
+                        logger.info(f"   • Velocità: {speed:.0f} righe/s")
+                        
+                        # Ripristina la modalità SQL originale
+                        cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
+                        return  # Caricamento completato con successo
+                        
+                    except Exception as retry_error:
+                        # Ferma il monitoraggio e ripristina la modalità SQL originale anche in caso di errore
+                        progress_stop.set()
+                        progress_thread.join(timeout=1)
+                        cursor.execute(f"SET sql_mode = '{original_sql_mode}'")
+                        logger.error(f"❌ Errore anche con modalità permissiva: {retry_error}")
+                        raise
+                elif e.errno in (2006, 2013, 2055):  # Lost connection, Connection lost, Broken pipe
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Connessione persa durante il caricamento (tentativo {attempt + 1}/{max_retries})")
+                        logger.info(f"🔄 Riprovo tra {retry_delay} secondi...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error("❌ Impossibile completare il caricamento dopo tutti i tentativi")
+                        raise
+                else:
+                    raise
+            
         except Exception as e:
-            logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ Errore durante il caricamento (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.info(f"🔄 Riprovo tra {retry_delay} secondi...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                logger.error(f"❌ Errore durante il caricamento dei dati: {e}")
+                raise
+        finally:
+            # Pulisci il file temporaneo
+            try:
+                if os.path.exists(csv_file):
+                    os.remove(csv_file)
+            except Exception as e:
+                logger.warning(f"⚠️ Impossibile rimuovere il file temporaneo {csv_file}: {e}")
 
 def process_batch(cursor, batch, table_definitions, batch_id):
     if not batch:
