@@ -38,7 +38,7 @@ MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')
-BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 25000))  # Ridotto da 75k a 25k
+BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k a 75k
 
 # Ottimizzazione DINAMICA basata sulle risorse del sistema
 CPU_CORES = multiprocessing.cpu_count()
@@ -47,7 +47,7 @@ NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti MySQL, ma thread aggress
 logger.info(f"🖥️  CPU cores disponibili: {CPU_CORES}")
 logger.info(f"🚀  Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
 logger.info(f"🖥️  Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilità)")
-logger.info(f"🚀  Batch size: {BATCH_SIZE:,} (ridotto per stabilità MySQL)")
+logger.info(f"🚀  Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -57,15 +57,15 @@ USABLE_MEMORY_BYTES = int(TOTAL_MEMORY_BYTES * (1 - MEMORY_BUFFER_RATIO))
 USABLE_MEMORY_GB = USABLE_MEMORY_BYTES / (1024 ** 3)
 
 # Chunk size più aggressivo con più RAM
-CHUNK_SIZE_INIT_RATIO = 0.05   # 5% della RAM usabile
-CHUNK_SIZE_MAX_RATIO = 0.15    # 15% della RAM usabile
+CHUNK_SIZE_INIT_RATIO = 0.10   # 10% della RAM usabile (raddoppiato)
+CHUNK_SIZE_MAX_RATIO = 0.25    # 25% della RAM usabile (aumentato)
 AVG_RECORD_SIZE_BYTES = 2 * 1024  # Stimiamo 2KB per record
-INITIAL_CHUNK_SIZE = max(1000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+INITIAL_CHUNK_SIZE = max(5000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
 MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
-MIN_CHUNK_SIZE = 1000  # Minimo 1000 record
+MIN_CHUNK_SIZE = 5000  # Aumentato da 1000 a 5000
 
-# Chunk size massimo aumentato per migliori performance
-MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 75000)
+# Chunk size massimo MOLTO più aggressivo
+MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 150000)  # Aumentato da 75k a 150k
 
 class MemoryMonitor:
     def __init__(self, max_memory_bytes):
@@ -320,28 +320,36 @@ class AdaptiveBatchSizer:
         self.current_batch_size = initial_batch_size
         self.target_ram_usage = target_ram_usage
         self.performance_history = []
-        self.adjustment_factor = 1.2  # Moltiplicatore per aumenti
-        self.min_batch = 1000
-        self.max_batch = 50000
+        self.adjustment_factor = 1.5  # Moltiplicatore AGGRESSIVO per aumenti (era 1.2)
+        self.min_batch = 5000  # Aumentato da 1000
+        self.max_batch = 100000  # Aumentato da 50000 per essere SUPER AGGRESSIVO
         
     def adjust_batch_size(self, current_ram_usage, processing_speed):
         """Aggiusta il batch size basato su utilizzo RAM e performance."""
         self.performance_history.append((current_ram_usage, processing_speed))
         
         # Se abbiamo abbastanza storia, adatta il batch size
-        if len(self.performance_history) >= 3:
-            avg_ram_usage = sum(h[0] for h in self.performance_history[-3:]) / 3
+        if len(self.performance_history) >= 2:  # Reagisce più velocemente (era 3)
+            avg_ram_usage = sum(h[0] for h in self.performance_history[-2:]) / 2
             
-            # Se RAM sottoutilizzata (< 70% del target), aumenta batch size
-            if avg_ram_usage < (self.target_ram_usage * 0.70):
+            # Se RAM MOLTO sottoutilizzata (< 50% del target), aumenta DRASTICAMENTE
+            if avg_ram_usage < (self.target_ram_usage * 0.50):
+                new_batch_size = min(self.max_batch, int(self.current_batch_size * 2.0))  # Raddoppia!
+                if new_batch_size > self.current_batch_size:
+                    logger.info(f"🚀🚀 SUPER AUTO-TUNE: Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
+                               f"(RAM molto sottoutilizzata: {avg_ram_usage*100:.1f}%)")
+                    self.current_batch_size = new_batch_size
+                    
+            # Se RAM sottoutilizzata (< 65% del target), aumenta aggressivamente
+            elif avg_ram_usage < (self.target_ram_usage * 0.65):
                 new_batch_size = min(self.max_batch, int(self.current_batch_size * self.adjustment_factor))
                 if new_batch_size > self.current_batch_size:
-                    logger.info(f"🚀 AUTO-TUNE: Batch size aumentato da {self.current_batch_size:,} a {new_batch_size:,} "
+                    logger.info(f"🚀 AUTO-TUNE AGGRESSIVO: Batch size aumentato da {self.current_batch_size:,} a {new_batch_size:,} "
                                f"(RAM sottoutilizzata: {avg_ram_usage*100:.1f}%)")
                     self.current_batch_size = new_batch_size
                     
-            # Se RAM eccessivamente utilizzata (> 85% del target), diminuisci batch size
-            elif avg_ram_usage > (self.target_ram_usage * 0.85):
+            # Se RAM eccessivamente utilizzata (> 90% del target), diminuisci
+            elif avg_ram_usage > (self.target_ram_usage * 0.90):
                 new_batch_size = max(self.min_batch, int(self.current_batch_size / self.adjustment_factor))
                 if new_batch_size < self.current_batch_size:
                     logger.warning(f"⚠️ AUTO-TUNE: Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
@@ -351,43 +359,45 @@ class AdaptiveBatchSizer:
         return self.current_batch_size
 
 def calculate_dynamic_insert_batch_size():
-    """Calcola dinamicamente il batch size per INSERT basato su utilizzo RAM aggressivo (80%)."""
+    """Calcola dinamicamente il batch size per INSERT basato su utilizzo RAM SUPER AGGRESSIVO (80-90%)."""
     # Memoria totale e utilizzata
     memory_info = psutil.virtual_memory()
     total_memory = memory_info.total
     available_memory = memory_info.available
     used_memory = memory_info.used
     
-    # Target: utilizzare l'80% della RAM totale (20% buffer di sicurezza)
-    target_memory_usage = total_memory * 0.8
+    # Target SUPER AGGRESSIVO: utilizzare fino al 85% della RAM totale (15% buffer di sicurezza)
+    target_memory_usage = total_memory * 0.85  # Era 0.8, ora 0.85
     current_usage_pct = used_memory / total_memory
     available_for_batch = target_memory_usage - used_memory
     
     # Stima grossolana: 1 record = ~2KB in memoria durante elaborazione
     estimated_record_size_bytes = 2 * 1024
     
-    # Calcola batch size aggressivo basato su memoria disponibile
+    # Calcola batch size SUPER AGGRESSIVO basato su memoria disponibile
     if available_for_batch > 0:
         max_batch_from_memory = int(available_for_batch / estimated_record_size_bytes)
         
-        # Limiti di sicurezza
-        min_batch = 1000   # Minimo assoluto
-        max_batch = 50000  # Massimo assoluto per evitare problemi MySQL
+        # Limiti di sicurezza AUMENTATI
+        min_batch = 5000   # Aumentato da 1000
+        max_batch = 100000  # Aumentato da 50000 per essere SUPER AGGRESSIVO
         
-        # Batch size progressivo basato su utilizzo attuale
-        if current_usage_pct < 0.5:      # < 50% RAM usata → batch aggressivo
-            batch_size = min(max_batch, max(10000, max_batch_from_memory))
-        elif current_usage_pct < 0.65:   # 50-65% RAM usata → batch medio-alto
-            batch_size = min(20000, max(5000, max_batch_from_memory // 2))
-        elif current_usage_pct < 0.75:   # 65-75% RAM usata → batch medio
-            batch_size = min(10000, max(3000, max_batch_from_memory // 4))
-        else:                            # > 75% RAM usata → batch conservativo
-            batch_size = min(5000, max(min_batch, max_batch_from_memory // 8))
+        # Batch size MOLTO PIÙ AGGRESSIVO basato su utilizzo attuale
+        if current_usage_pct < 0.3:      # < 30% RAM usata → batch MASSICCIO
+            batch_size = min(max_batch, max(50000, max_batch_from_memory))
+        elif current_usage_pct < 0.5:   # 30-50% RAM usata → batch molto alto
+            batch_size = min(80000, max(25000, max_batch_from_memory // 2))
+        elif current_usage_pct < 0.65:  # 50-65% RAM usata → batch alto
+            batch_size = min(60000, max(15000, max_batch_from_memory // 3))
+        elif current_usage_pct < 0.75:  # 65-75% RAM usata → batch medio-alto
+            batch_size = min(40000, max(10000, max_batch_from_memory // 4))
+        else:                            # > 75% RAM usata → batch medio
+            batch_size = min(20000, max(min_batch, max_batch_from_memory // 6))
             
         return max(min_batch, min(batch_size, max_batch))
     else:
-        # Se già oltre l'80%, usa batch piccolissimo
-        return 1000
+        # Se già oltre l'85%, usa batch ridotto ma non troppo piccolo
+        return 10000  # Era 1000, ora 10000
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV."""
@@ -1489,7 +1499,8 @@ def import_all_json_files(base_path, conn):
                         current_chunk.append((record, file_name))
                         processed_records_in_file += 1
                         
-                        if len(current_chunk) >= chunk_size:
+                        # Usa BATCH_SIZE dinamico invece di chunk_size fisso
+                        if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
                             file_chunks.append((current_chunk, file_name, batch_id, table_definitions))
                             current_chunk = []
                     except Exception as e:
