@@ -143,13 +143,31 @@ class RecordProcessor:
             field_lower = field.lower().replace(' ', '_')
             value = record.get(field_lower)
             
-            if def_type.startswith('VARCHAR') and len(str(value) if value else '') > 1000:
-                value = str(value)[:1000]
+            # Handle numeric fields
+            if def_type in ['DOUBLE', 'DECIMAL'] and value is not None:
+                try:
+                    # Remove any non-numeric characters except decimal point and minus sign
+                    if isinstance(value, str):
+                        value = ''.join(c for c in value if c.isdigit() or c in '.-')
+                    value = float(value) if value else None
+                except (ValueError, TypeError):
+                    value = None
             
-            if def_type == 'JSON' and value is not None:
+            # Handle VARCHAR fields
+            elif def_type.startswith('VARCHAR'):
+                if value is not None:
+                    value = str(value)
+                    if len(value) > 1000:
+                        value = value[:1000]
+                else:
+                    value = None
+            
+            # Handle JSON fields
+            elif def_type == 'JSON' and value is not None:
                 with self.lock:
                     self.json_data[self.field_mapping[field]].append((cig, json.dumps(value)))
                 value = None
+            
             main_values.append(value)
         
         main_values.extend([self.file_name, self.batch_id])
