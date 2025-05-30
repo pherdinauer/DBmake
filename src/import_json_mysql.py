@@ -536,15 +536,36 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
     with LogContext(batch_logger, f"processing batch", 
                    batch_size=len(batch), file=file_name, batch_id=batch_id, category=category, table=table_name):
         try:
-            # Ottieni il mapping dei campi
+            # Ottieni il mapping dei campi per questa categoria specifica
             try:
-                cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
-                field_mapping = dict(cursor.fetchall())
+                if category:
+                    # Usa la tabella category_field_mapping per le categorie
+                    cursor.execute("""
+                        SELECT original_name, sanitized_name 
+                        FROM category_field_mapping 
+                        WHERE category = %s
+                    """, (category,))
+                    field_mapping = dict(cursor.fetchall())
+                    
+                    # Se non troviamo mapping per questa categoria, crea un mapping base
+                    if not field_mapping:
+                        batch_logger.warning(f"Nessun mapping trovato per categoria '{category}', uso mapping diretto")
+                        field_mapping = {field: field.lower().replace(' ', '_') for field in table_definitions.keys()}
+                else:
+                    # Fallback per tabella field_mapping generica (per compatibilità)
+                    cursor.execute("SELECT original_name, sanitized_name FROM field_mapping")
+                    field_mapping = dict(cursor.fetchall())
+                    
             except mysql.connector.Error as e:
                 if e.errno == 2006:  # MySQL server has gone away
                     batch_logger.warning("Connessione persa, riprovo...")
                     raise ValueError("CONNECTION_LOST")
-                raise
+                elif e.errno == 1146:  # Table doesn't exist
+                    batch_logger.warning(f"Tabella mapping non trovata, creo mapping diretto per categoria '{category}'")
+                    # Crea un mapping diretto come fallback
+                    field_mapping = {field: field.lower().replace(' ', '_') for field in table_definitions.keys()}
+                else:
+                    raise
             
             start_time = time.time()
             
@@ -2392,9 +2413,35 @@ def create_dynamic_tables_by_category(conn, category_table_definitions):
             # Crea tabelle metadati globali
             create_metadata_tables_optimized(cursor, category_table_definitions)
             
+            # COMMIT ESPLICITO per assicurarsi che le tabelle siano create prima di iniziare il processing
+            conn.commit()
+            db_logger.info("[COMMIT] Tutte le tabelle e metadati salvati nel database")
+            
+            # VERIFICA che le tabelle metadati esistano e contengano dati
+            try:
+                cursor.execute("SELECT COUNT(*) FROM category_field_mapping")
+                mapping_count = cursor.fetchone()[0]
+                db_logger.info(f"[VERIFY] Tabella category_field_mapping contiene {mapping_count} record")
+                
+                cursor.execute("SHOW TABLES LIKE '%_data'")
+                data_tables = cursor.fetchall()
+                db_logger.info(f"[VERIFY] Trovate {len(data_tables)} tabelle dati: {[table[0] for table in data_tables]}")
+                
+                if mapping_count == 0:
+                    db_logger.warning("[WARN] La tabella category_field_mapping è vuota!")
+                else:
+                    db_logger.info("[VERIFY] Verifica completata con successo")
+                    
+            except Exception as verify_error:
+                db_logger.error(f"[ERROR] Errore durante verifica tabelle: {verify_error}")
+            
             db_logger.info(f"[SUMMARY] Create {total_tables_created} tabelle ottimizzate con {total_fields_created} campi totali")
             db_logger.info(f"[SUMMARY] Schema ottimizzato: ogni tabella contiene solo i campi necessari")
             
+        except Exception as e:
+            db_logger.error(f"[ERROR] Errore durante creazione tabelle: {e}")
+            conn.rollback()
+            raise
         finally:
             cursor.close()
 
