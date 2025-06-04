@@ -73,14 +73,59 @@ MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
 JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')  # Ripristinato percorso originale
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k a 75k
 
-# Ottimizzazione DINAMICA basata sulle risorse del sistema
+# Configurazione dinamica delle risorse
+import multiprocessing
+import psutil
+
+# Configurazioni sistema
 CPU_CORES = multiprocessing.cpu_count()
-NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
-NUM_WORKERS = 1   # MONO-PROCESSO per evitare conflitti MySQL, ma thread aggressivi
-logger.info(f"[CPU] CPU cores disponibili: {CPU_CORES}")
-logger.info(f"[THREAD] Thread per elaborazione: {NUM_THREADS} (dinamico: {CPU_CORES}-1)")
-logger.info(f"[PROC] Worker process: {NUM_WORKERS} (MONO-PROCESSO per stabilita)")
-logger.info(f"[BATCH] Batch size: {BATCH_SIZE:,} (aumentato per sfruttare RAM)")
+TOTAL_RAM_GB = psutil.virtual_memory().total / (1024**3)
+
+# RILEVAMENTO AUTOMATICO HIGH-PERFORMANCE
+def detect_high_performance_capability():
+    """Rileva automaticamente se il sistema può gestire la modalità high-performance"""
+    cpu_capable = CPU_CORES >= 8  # Almeno 8 core
+    ram_capable = TOTAL_RAM_GB >= 12  # Almeno 12GB RAM
+    load_capable = True  # Assumiamo sempre ok per ora
+    
+    if cpu_capable and ram_capable:
+        logger.info(f"🚀 AUTO-DETECT: Sistema potente rilevato!")
+        logger.info(f"   CPU: {CPU_CORES} core ✅")
+        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB ✅")
+        return True
+    else:
+        logger.info(f"🏃 AUTO-DETECT: Sistema standard rilevato")
+        logger.info(f"   CPU: {CPU_CORES} core {'✅' if cpu_capable else '❌'}")
+        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB {'✅' if ram_capable else '❌'}")
+        return False
+
+# MODALITÀ AUTOMATICA - sempre al massimo delle performance disponibili
+HIGH_PERFORMANCE_MODE = detect_high_performance_capability()
+
+if HIGH_PERFORMANCE_MODE:
+    # Configurazione AGGRESSIVA per server potenti
+    NUM_THREADS = CPU_CORES * 2        # Sfrutta hyperthreading
+    NUM_WORKERS = min(4, CPU_CORES // 2)  # Multi-processo controllato
+    INITIAL_CHUNK_SIZE = 200_000       # Chunk molto più grandi
+    MAX_CHUNK_SIZE = 500_000           # Limite massimo aumentato
+    INSERT_BATCH_SIZE_MULTIPLIER = 3   # Batch MySQL più grandi
+    CONNECTION_POOL_SIZE = NUM_WORKERS + 2  # Pool connessioni più ampio
+    logger.info("💪 MODALITÀ HIGH-PERFORMANCE AUTO-ATTIVATA!")
+    logger.info(f"   CPU: {CPU_CORES} core → {NUM_THREADS} thread aggressivi")
+    logger.info(f"   Workers: {NUM_WORKERS} processi paralleli")
+    logger.info(f"   Chunk: {INITIAL_CHUNK_SIZE:,} iniziale, max {MAX_CHUNK_SIZE:,}")
+    logger.info(f"   INSERT batch: 3x più grandi (fino a 3M record)")
+else:
+    # Configurazione standard ottimizzata
+    NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
+    NUM_WORKERS = 1   # MONO-PROCESSO per sistemi standard
+    INITIAL_CHUNK_SIZE = calculate_initial_chunk_size()
+    MAX_CHUNK_SIZE = calculate_max_chunk_size()
+    INSERT_BATCH_SIZE_MULTIPLIER = 1
+    CONNECTION_POOL_SIZE = 2
+    logger.info("🏃 MODALITÀ STANDARD AUTO-ATTIVATA")
+    logger.info(f"   CPU: {CPU_CORES} core → {NUM_THREADS} thread")
+    logger.info(f"   Configurazione ottimizzata per sistema standard")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
 TOTAL_MEMORY_BYTES = psutil.virtual_memory().total
@@ -394,45 +439,29 @@ class AdaptiveBatchSizer:
         return self.current_batch_size
 
 def calculate_dynamic_insert_batch_size():
-    """Calcola dinamicamente il batch size per INSERT basato su utilizzo RAM MASSIMO (85-90%)."""
-    # Memoria totale e utilizzata
-    memory_info = psutil.virtual_memory()
-    total_memory = memory_info.total
-    available_memory = memory_info.available
-    used_memory = memory_info.used
+    """
+    Calcola dinamicamente la dimensione del batch per INSERT MySQL
+    basandosi sulla RAM disponibile e sulla modalità operativa.
+    """
+    # Memoria disponibile in GB
+    available_memory_gb = USABLE_MEMORY_GB
     
-    # Target MASSIMO: utilizzare fino al 90% della RAM totale (10% buffer di sicurezza)
-    target_memory_usage = total_memory * 0.90  # Era 0.85, ora 0.90!
-    current_usage_pct = used_memory / total_memory
-    available_for_batch = target_memory_usage - used_memory
-    
-    # Stima grossolana: 1 record = ~2KB in memoria durante elaborazione
-    estimated_record_size_bytes = 2 * 1024
-    
-    # Calcola batch size MASSIMO AGGRESSIVO basato su memoria disponibile
-    if available_for_batch > 0:
-        max_batch_from_memory = int(available_for_batch / estimated_record_size_bytes)
-        
-        # Limiti di sicurezza ESTREMI
-        min_batch = 10000   # Aumentato da 5000
-        max_batch = 1000000  # MASSIMO UN MILIONE! (era 300000)
-        
-        # Batch size ESTREMO basato su utilizzo attuale
-        if current_usage_pct < 0.3:      # < 30% RAM usata -> batch MOSTRUOSO
-            batch_size = min(max_batch, max(500000, max_batch_from_memory))
-        elif current_usage_pct < 0.5:   # 30-50% RAM usata -> batch gigantesco
-            batch_size = min(800000, max(400000, max_batch_from_memory // 2))
-        elif current_usage_pct < 0.65:  # 50-65% RAM usata -> batch massiccio
-            batch_size = min(600000, max(300000, max_batch_from_memory // 3))
-        elif current_usage_pct < 0.75:  # 65-75% RAM usata -> batch molto alto
-            batch_size = min(400000, max(200000, max_batch_from_memory // 4))
-        else:                            # > 75% RAM usata -> batch alto
-            batch_size = min(200000, max(min_batch, max_batch_from_memory // 6))
-            
-        return max(min_batch, min(batch_size, max_batch))
+    # Calcolo base del batch size
+    if available_memory_gb >= 12:
+        base_batch_size = 1_000_000
+    elif available_memory_gb >= 8:
+        base_batch_size = 750_000
+    elif available_memory_gb >= 4:
+        base_batch_size = 500_000
     else:
-        # Se già oltre il 90%, usa batch ridotto ma ancora alto
-        return 100000  # Era 50000, ora 100000
+        base_batch_size = 250_000
+    
+    # Applica il moltiplicatore per la modalità high-performance
+    final_batch_size = int(base_batch_size * INSERT_BATCH_SIZE_MULTIPLIER)
+    
+    logger.info(f"[DYNAMIC] INSERT batch size: {final_batch_size:,} (base: {base_batch_size:,}, multiplier: {INSERT_BATCH_SIZE_MULTIPLIER}x)")
+    
+    return final_batch_size
 
 def insert_batch_direct(cursor, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL senza passare per CSV con adattamento dinamico."""
@@ -1669,6 +1698,10 @@ def import_all_json_files(base_path, conn):
         
         import_logger.info(f"Trovati {total_files} file JSON da importare in {len(categories)} categorie")
         
+        # Mostra la modalità di analisi schema selezionata
+        import_logger.info(f"[SCHEMA] Modalità analisi: {SCHEMA_ANALYSIS_MODE.upper()}")
+        import_logger.info(f"[SCHEMA] Parametri: {SCHEMA_MAX_ROWS_PER_FILE} righe/file, {SCHEMA_MAX_FILES_PER_CATEGORY} file/categoria, {SCHEMA_MAX_SAMPLES_PER_FIELD} campioni/campo")
+        
         # Gestisci il caso di nessun file trovato
         if total_files == 0:
             import_logger.warning(f"[WARN] Nessun file JSON trovato in {base_path}")
@@ -2156,9 +2189,11 @@ def analyze_single_category(category, json_files):
     field_lengths = defaultdict(int)
     field_sample_values = defaultdict(list)
     
-    # PARAMETRI OTTIMIZZATI PER VELOCITÀ
-    MAX_ROWS_PER_FILE = 50  # DRASTICAMENTE RIDOTTO da 2000 a 50 per velocità
-    MAX_FILES_PER_CATEGORY = 10  # Limita anche il numero di file analizzati
+    # USA PARAMETRI CONFIGURABILI PER VELOCITÀ
+    MAX_ROWS_PER_FILE = SCHEMA_MAX_ROWS_PER_FILE
+    MAX_FILES_PER_CATEGORY = SCHEMA_MAX_FILES_PER_CATEGORY
+    MAX_SAMPLES_PER_FIELD = SCHEMA_MAX_SAMPLES_PER_FIELD
+    
     process = psutil.Process()
     max_memory_bytes = USABLE_MEMORY_BYTES * 0.9
     
@@ -2170,7 +2205,7 @@ def analyze_single_category(category, json_files):
         files_to_analyze = [json_files[i] for i in range(0, len(json_files), step)][:MAX_FILES_PER_CATEGORY]
         analysis_logger.info(f"  [SAMPLE] Categoria '{category}': campiono {len(files_to_analyze)} file su {len(json_files)} totali")
     
-    analysis_logger.info(f"  [ANALISI] Categoria '{category}': inizio analisi VELOCE di {len(files_to_analyze)} file (max {MAX_ROWS_PER_FILE} righe/file)")
+    analysis_logger.info(f"  [ANALISI] Categoria '{category}' [{SCHEMA_ANALYSIS_MODE.upper()}]: {len(files_to_analyze)} file, max {MAX_ROWS_PER_FILE} righe/file")
     
     # Pattern per identificare i tipi (stesso del sistema principale)
     patterns = {
@@ -2334,7 +2369,7 @@ def analyze_single_category(category, json_files):
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if file_records >= MAX_ROWS_PER_FILE:  # LIMITE MOLTO BASSO
+                    if file_records >= MAX_ROWS_PER_FILE:  # LIMITE CONFIGURABILE
                         break
                         
                     try:
@@ -2348,8 +2383,8 @@ def analyze_single_category(category, json_files):
                             value_type = analyze_value_type(value)
                             field_types[field][value_type] += 1
                             
-                            # Campioni ancora più ridotti per velocità
-                            if len(field_sample_values[field]) < 10:  # Ridotto da 20 a 10
+                            # Campioni configurabili per velocità
+                            if len(field_sample_values[field]) < MAX_SAMPLES_PER_FIELD:
                                 field_sample_values[field].append(value)
                             
                             if isinstance(value, str):
