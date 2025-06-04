@@ -176,10 +176,31 @@ def log_batch_progress(logger_instance: logging.Logger, processed: int, total: i
     logger_instance.info(f"[BATCH] Batch: {processed:,}/{total:,} ({pct:.1f}%){speed_info}{memory_info_str}")
 
 def log_error_with_context(logger_instance: logging.Logger, error: Exception, context: str = "", operation: str = "") -> None:
-    """Helper per logging errori con contesto."""
+    """Log an error with additional context and operation information."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
+
+    actual_error_type_name = type(error).__name__
+    # Robust check for InterfaceError
+    is_interface_error = (
+        actual_error_type_name == 'MySQLInterfaceError' or
+        actual_error_type_name == 'InterfaceError' or
+        hasattr(error, '__module__') and error.__module__.startswith('mysql.connector') and 'InterfaceError' in actual_error_type_name
+    )
+
+    # Debug log to see what type is being processed
+    logger_instance.info(f"DEBUG log_error_with_context (import_json_mysql): Processing error of type '{actual_error_type_name}', detected as InterfaceError: {is_interface_error}")
+
+    if is_interface_error:
+        errno = getattr(error, 'errno', 'N/A')
+        sqlstate = getattr(error, 'sqlstate', 'N/A')
+        safe_error_message = (
+            f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). "
+            f"Operation failed. Original message details suppressed due to formatting issues." 
+        )
+        logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {safe_error_message}")
+    else:
+        logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 def log_resource_optimization(logger_instance: logging.Logger) -> None:
     """Helper per logging configurazione risorse ottimizzate."""
