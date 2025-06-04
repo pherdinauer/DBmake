@@ -58,6 +58,22 @@ if [ ! -d ".git" ]; then
     exit 1
 fi
 
+# Assicurati di essere sul branch MULTITAB
+echo -e "${YELLOW}🔄 Verifica e checkout branch MULTITAB...${NC}"
+current_branch=$(git branch --show-current)
+if [ "$current_branch" != "MULTITAB" ]; then
+    echo -e "${YELLOW}📋 Branch attuale: $current_branch${NC}"
+    echo -e "${YELLOW}🔄 Switching al branch MULTITAB...${NC}"
+    if git checkout MULTITAB; then
+        echo -e "${GREEN}✅ Checkout su branch MULTITAB completato${NC}"
+    else
+        echo -e "${RED}❌ Errore nel checkout su branch MULTITAB${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}✅ Già sul branch MULTITAB${NC}"
+fi
+
 # Gestione delle modifiche locali
 echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
 if git diff --quiet 2>/dev/null; then
@@ -68,9 +84,16 @@ else
 fi
 
 # Aggiornamento repository
-echo -e "${YELLOW}🔄 Aggiornamento repository...${NC}"
-if git pull; then
-    echo -e "${GREEN}✅ Repository aggiornato con successo${NC}"
+echo -e "${YELLOW}🔄 Aggiornamento repository dal branch MULTITAB...${NC}"
+if git pull origin MULTITAB; then
+    echo -e "${GREEN}✅ Repository aggiornato con successo dal branch MULTITAB${NC}"
+    
+    # Verifica finale che siamo ancora sul branch MULTITAB
+    final_branch=$(git branch --show-current)
+    if [ "$final_branch" != "MULTITAB" ]; then
+        echo -e "${YELLOW}⚠️ Branch cambiato durante il pull, ritorno a MULTITAB...${NC}"
+        git checkout MULTITAB
+    fi
     
     # Ripristino modifiche locali se presenti
     if git stash list | grep -q "Modifiche locali"; then
@@ -161,12 +184,13 @@ chmod -R 755 .
 show_menu() {
     clear
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
-    echo -e "║                         CIG Database Management Tool                            ║"
+    echo -e "║                    CIG Database Management Tool - AUTO-TURBO                   ║"
+    echo -e "║                           Branch: MULTITAB (Ottimizzato)                       ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
     echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
-    echo -e "${YELLOW}3)${NC} Importa direttamente i JSON in MySQL"
+    echo -e "${YELLOW}3)${NC} 🚀 Auto-Turbo MySQL Import (Consigliato)"
     echo -e "${YELLOW}4)${NC} Cerca CIG nel database"
     echo -e "${YELLOW}5)${NC} Esci"
     echo
@@ -198,12 +222,14 @@ generate_mysql_sql() {
 
 # Funzione per import diretto in MySQL
 import_to_mysql() {
-    echo -e "${YELLOW}Importazione diretta dei JSON in MySQL...${NC}"
+    echo -e "${YELLOW}🚀 Avvio Auto-Turbo MySQL Import...${NC}"
+    echo -e "${GREEN}💪 Modalità HIGH-PERFORMANCE con rilevamento automatico risorse${NC}"
+    echo -e "${GREEN}⚡ Ottimizzazioni: multi-thread, batch dinamici, schema intelligente${NC}"
     python src/import_json_mysql.py
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Importazione completata con successo!${NC}"
+        echo -e "${GREEN}🎉 Auto-Turbo Import completato con successo!${NC}"
     else
-        echo -e "${RED}Errore durante l'importazione in MySQL.${NC}"
+        echo -e "${RED}❌ Errore durante l'Auto-Turbo Import.${NC}"
     fi
 }
 
