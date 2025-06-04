@@ -25,7 +25,13 @@ def log_error_with_context(logger_instance: logging.Logger, error: Exception, co
     """Helper per logging errori con contesto."""
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
-    logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
+    
+    # Check for the problematic InterfaceError
+    if isinstance(error, mysql.connector.errors.InterfaceError):
+        safe_error_message = f"A MySQL InterfaceError (errno: {getattr(error, 'errno', 'N/A')}) occurred. Original message suppressed due to formatting issues."
+        logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {safe_error_message}")
+    else:
+        logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 
 class DatabaseManager:
