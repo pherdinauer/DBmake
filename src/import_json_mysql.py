@@ -1772,8 +1772,7 @@ def import_all_json_files(base_path, conn):
             import_logger.info(f"[SCHEMA] Categoria '{category}': {len(table_definitions)} campi specifici")
         
         # Crea le tabelle ottimizzate per categoria
-        with DatabaseManager.get_connection() as tmp_conn:
-            create_dynamic_tables_by_category(tmp_conn, category_table_definitions)
+        create_dynamic_tables_by_category(category_table_definitions)
         
         # Inizializza il pool di connessioni centralizzato
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
@@ -2488,7 +2487,7 @@ def analyze_single_category(category, json_files):
     
     return table_definitions
 
-def create_dynamic_tables_by_category(conn, category_table_definitions):
+def create_dynamic_tables_by_category(category_table_definitions):
     """Crea tabelle dinamiche ottimizzate con schema specifico per ogni categoria usando connessioni robuste."""
     with LogContext(db_logger, "creazione tabelle ottimizzate per categoria", categories=len(category_table_definitions)):
         
