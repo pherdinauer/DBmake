@@ -146,7 +146,8 @@ class DatabaseManager:
                 return  # Successo, esci dalla funzione
                 
             except mysql.connector.Error as e:
-                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {str(e)}"
+                err_msg_text = str(e.args[0]) if e.args else str(e)
+                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
@@ -154,7 +155,11 @@ class DatabaseManager:
                     db_logger.error(f"[ERROR] Errore durante la creazione del database: {error_msg}")
                     raise
             except Exception as e:
-                error_msg = f"Errore generico: {str(e)}"
+                if isinstance(e, mysql.connector.Error):
+                    err_text = str(e.args[0]) if e.args else str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_text}"
+                else:
+                    error_msg = f"Errore generico: {str(e)}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
@@ -225,7 +230,8 @@ class DatabaseManager:
                 return conn
                 
             except mysql.connector.Error as e:
-                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {str(e)}"
+                err_msg_text = str(e.args[0]) if e.args else str(e)
+                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
@@ -234,7 +240,11 @@ class DatabaseManager:
                     db_logger.error(f"[ERROR] Connessione fallita dopo {max_retries} tentativi: {error_msg}")
                     raise
             except Exception as e:
-                error_msg = f"Errore generico: {str(e)}"
+                if isinstance(e, mysql.connector.Error):
+                    err_text = str(e.args[0]) if e.args else str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_text}"
+                else:
+                    error_msg = f"Errore generico: {str(e)}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
