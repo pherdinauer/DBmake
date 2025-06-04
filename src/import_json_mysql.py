@@ -1812,7 +1812,7 @@ def import_all_json_files(base_path, conn):
                 
                 # Salta i file già processati con successo
                 with DatabaseManager.get_pooled_connection() as conn_check:
-                    if is_file_processed(conn_check, file_name):
+                    if is_file_processed(conn_check.connection, file_name):
                         import_logger.info(f"[OK] File già processato: {file_name}")
                         progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
                         continue
@@ -1883,7 +1883,7 @@ def import_all_json_files(base_path, conn):
                         
                         # Marca il file come processato
                         with DatabaseManager.get_pooled_connection() as conn_mark:
-                            mark_file_processed(conn_mark, file_name, processed_records_in_file)
+                            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
                         
                         # Completa il tracking del file
                         progress_tracker.finish_file(processed_records_in_file)
@@ -1900,7 +1900,7 @@ def import_all_json_files(base_path, conn):
                     error_message = str(e)
                     log_error_with_context(import_logger, e, "processing file", file_name)
                     with DatabaseManager.get_pooled_connection() as conn_mark:
-                        mark_file_processed(conn_mark, file_name, processed_records_in_file, 'failed', error_message)
+                        mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', error_message)
         
         # Statistiche finali
         final_stats = progress_tracker.get_global_stats()
