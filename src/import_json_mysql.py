@@ -1687,11 +1687,12 @@ def process_chunk_unified(args, execution_mode="sequential"):
     for attempt in range(max_retries):
         try:
             # Usa DatabaseManager per ottenere connessione dal pool
-            with DatabaseManager.get_pooled_connection() as conn:
-                cursor = conn.cursor()
+            with DatabaseManager.get_pooled_connection() as db_manager:
+                # Fix: Access the connection attribute to get the raw MySQL connection
+                cursor = db_manager.connection.cursor()
                 try:
                     process_batch(cursor, chunk, table_definitions, batch_id, category=category)
-                    conn.commit()
+                    db_manager.connection.commit()
                     return  # Successo
                 except Exception as e:
                     error_msg = f"Errore nel processare chunk (tentativo {attempt + 1}/{max_retries}): {e}"
