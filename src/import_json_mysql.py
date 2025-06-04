@@ -260,7 +260,11 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
             if error_type_name == 'out_of_range':
                 column_name = match.group(1)
                 problematic_value = "out_of_range"
+            elif error_type_name == 'data_truncated':
+                column_name = match.group(1)
+                problematic_value = "data_truncated"
             else:
+                # For patterns with two groups (value, column)
                 problematic_value = match.group(1)
                 column_name = match.group(2)
             error_type = error_type_name
