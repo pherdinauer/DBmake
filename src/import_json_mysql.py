@@ -394,9 +394,19 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
             elif e.errno == 1366:
                 adapted = handle_type_compatibility_error(cursor, str(e), table_name)
             
-            # Errore 1265: Data truncated
+            # Errore 1265: Data truncated (IL PIÙ COMUNE)
             elif e.errno == 1265:
                 adapted = handle_type_compatibility_error(cursor, str(e), table_name)
+                
+                # STRATEGIA SPECIALE per importo_aggiudicazione che continua a fallire
+                if "importo_aggiudicazione" in str(e):
+                    logger.warning(f"[SPECIAL] Problema ricorrente con importo_aggiudicazione, forzo conversione a TEXT")
+                    try:
+                        cursor.execute(f"ALTER TABLE {table_name} MODIFY COLUMN importo_aggiudicazione TEXT")
+                        logger.info(f"[FORCE-FIX] Colonna importo_aggiudicazione convertita a TEXT")
+                        adapted = True
+                    except Exception as alter_error:
+                        logger.error(f"[FORCE-FIX] Errore nella conversione forzata: {alter_error}")
             
             # Altri errori specifici che possono essere adattati
             elif "Incorrect" in str(e) or "Data truncated" in str(e):
@@ -410,10 +420,17 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
                 # Se non riusciamo ad adattare, e siamo all'ultimo tentativo, rilancia l'errore
                 if attempt == max_retries - 1:
                     logger.error(f"[FAIL] Impossibile adattare la struttura dopo {max_retries} tentativi")
-                    raise
+                    # INVECE DI FALLIRE COMPLETAMENTE, ritorna False per permettere di saltare questo mini-batch
+                    return False
                 else:
                     # Aspetta un po' prima di riprovare
                     time.sleep(1)
+        
+        except Exception as e:
+            logger.error(f"[UNEXPECTED] Errore inaspettato nel tentativo {attempt + 1}: {e}")
+            if attempt == max_retries - 1:
+                return False
+            time.sleep(1)
     
     return False
 
@@ -503,16 +520,61 @@ def calculate_dynamic_insert_batch_size():
     
     return final_batch_size
 
+def proactive_schema_fixes(cursor, table_name):
+    """Applica fix proattivi per colonne che spesso causano problemi."""
+    try:
+        # Fix comuni per colonne problematiche dell'ANAC
+        common_fixes = [
+            ("importo_aggiudicazione", "TEXT", "Importi possono essere molto vari e lunghi"),
+            ("importo_lotto", "TEXT", "Importi lotto spesso problematici"),
+            ("importo_totale", "TEXT", "Importi totali vari"),
+            ("descrizione", "LONGTEXT", "Descrizioni possono essere molto lunghe"),
+            ("oggetto", "LONGTEXT", "Oggetti possono essere molto lunghi"),
+            ("ragione_sociale", "TEXT", "Ragioni sociali varie"),
+            ("denominazione", "TEXT", "Denominazioni varie"),
+            ("codice_fiscale", "VARCHAR(16)", "Codici fiscali standard"),
+            ("partita_iva", "VARCHAR(11)", "Partite IVA standard"),
+            ("cig", "VARCHAR(20)", "CIG possono variare"),
+            ("cup", "VARCHAR(20)", "CUP possono variare"),
+        ]
+        
+        # Ottieni la lista delle colonne esistenti
+        cursor.execute(f"SHOW COLUMNS FROM {table_name}")
+        existing_columns = {row[0] for row in cursor.fetchall()}
+        
+        fixes_applied = 0
+        for column_name, new_type, reason in common_fixes:
+            if column_name in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} {new_type}")
+                    logger.info(f"[PROACTIVE] {table_name}.{column_name} → {new_type} ({reason})")
+                    fixes_applied += 1
+                except Exception as e:
+                    # Non loggare errori per fix proattivi, potrebbero essere normali
+                    pass
+        
+        if fixes_applied > 0:
+            logger.info(f"[PROACTIVE] Applicati {fixes_applied} fix proattivi per {table_name}")
+        
+        return fixes_applied
+        
+    except Exception as e:
+        logger.debug(f"[PROACTIVE] Errore in fix proattivi per {table_name}: {e}")
+        return 0
+
 def insert_batch_direct(cursor, main_data, table_name, fields):
-    """Inserisce i dati direttamente in MySQL senza passare per CSV con adattamento dinamico."""
+    """Inserisce i dati direttamente in MySQL con scrittura progressiva robusta."""
     if not main_data:
         return 0
-        
-    # Calcola batch size dinamico iniziale basato su utilizzo RAM aggressivo
-    initial_batch_size = calculate_dynamic_insert_batch_size()
     
-    # Inizializza l'adaptive batch sizer
-    batch_sizer = AdaptiveBatchSizer(initial_batch_size, target_ram_usage=0.8)
+    # APPLICA FIX PROATTIVI PRIMA DI INIZIARE
+    proactive_fixes = proactive_schema_fixes(cursor, table_name)
+    if proactive_fixes > 0:
+        logger.info(f"[SCHEMA] Applicati {proactive_fixes} fix proattivi per prevenire errori")
+        
+    # SCRITTURA PROGRESSIVA: mini-batch da 1000 record per commit frequenti
+    MINI_BATCH_SIZE = 1000  # Dimensione mini-batch per scrittura sicura
+    COMMIT_FREQUENCY = 5    # Commit ogni 5 mini-batch (= ogni 5k record)
     
     # Statistiche RAM dettagliate
     memory_info = psutil.virtual_memory()
@@ -520,78 +582,92 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     used_ram_gb = memory_info.used / (1024**3)
     available_ram_gb = memory_info.available / (1024**3)
     usage_pct = memory_info.percent
-    target_usage_pct = 80.0
     
-    logger.info(f"[INSERT] Inserimento INTELLIGENTE di {len(main_data):,} record in {table_name}")
-    logger.info(f"[INSERT] Batch size aggressivo iniziale: {initial_batch_size:,}")
-    logger.info(f"[RAM] RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | "
-               f"Target: {target_usage_pct:.0f}% | Disponibile: {available_ram_gb:.1f}GB")
+    logger.info(f"[INSERT] SCRITTURA PROGRESSIVA di {len(main_data):,} record in {table_name}")
+    logger.info(f"[INSERT] Mini-batch: {MINI_BATCH_SIZE:,} record | Commit ogni: {COMMIT_FREQUENCY * MINI_BATCH_SIZE:,} record")
+    logger.info(f"[RAM] RAM: {used_ram_gb:.1f}GB/{total_ram_gb:.1f}GB utilizzata ({usage_pct:.1f}%) | Disponibile: {available_ram_gb:.1f}GB")
     
     rows_inserted = 0
+    mini_batches_processed = 0
+    mini_batches_failed = 0
     
     # Prepara la query INSERT
     placeholders = ', '.join(['%s'] * len(fields))
     insert_query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
     
     insert_start_time = time.time()
-    adaptation_count = 0  # Contatore di adattamenti automatici
+    last_commit_time = time.time()
     
     try:
-        # Processa i dati in batch con dimensioni adattive
+        # Processa i dati in mini-batch con commit frequenti
         i = 0
         while i < len(main_data):
-            # Ottieni il batch size corrente (può essere cambiato dall'adaptive sizer)
-            current_batch_size = batch_sizer.current_batch_size
+            mini_batch_start_time = time.time()
+            mini_batch = main_data[i:i + MINI_BATCH_SIZE]
+            mini_batch_size = len(mini_batch)
+            mini_batches_processed += 1
             
-            batch_start_time = time.time()
-            batch = main_data[i:i + current_batch_size]
-            
-            # Usa il sistema di inserimento adattivo intelligente
-            success = adaptive_insert_with_retry(cursor, insert_query, batch, table_name)
-            
-            if success:
-                rows_inserted += len(batch)
+            try:
+                # Usa il sistema di inserimento adattivo per questo mini-batch
+                success = adaptive_insert_with_retry(cursor, insert_query, mini_batch, table_name, max_retries=2)
                 
-                batch_time = time.time() - batch_start_time
-                batch_speed = len(batch) / batch_time if batch_time > 0 else 0
-                current_ram_usage = psutil.virtual_memory().percent / 100.0
-                
-                # Auto-tuning del batch size basato su performance
-                new_batch_size = batch_sizer.adjust_batch_size(current_ram_usage, batch_speed)
-                
-                # Log progresso ogni 10k righe con statistiche performance e RAM
-                if rows_inserted % 10000 == 0:
-                    elapsed_total = time.time() - insert_start_time
-                    avg_speed = rows_inserted / elapsed_total if elapsed_total > 0 else 0
-                    current_ram = psutil.virtual_memory().used / (1024**3)
-                    current_usage = psutil.virtual_memory().percent
+                if success:
+                    rows_inserted += mini_batch_size
                     
-                    logger.info(f"[PROGRESS] INSERT: {rows_inserted:,}/{len(main_data):,} righe | "
-                              f"Batch: {batch_speed:.0f} rec/s | Media: {avg_speed:.0f} rec/s | "
-                              f"RAM: {current_ram:.1f}GB ({current_usage:.1f}%) | Batch size: {current_batch_size:,}")
-            else:
-                logger.error(f"[FAIL] Inserimento batch fallito dopo adattamenti automatici")
-                break
+                    # COMMIT FREQUENTE: ogni N mini-batch
+                    if mini_batches_processed % COMMIT_FREQUENCY == 0:
+                        cursor.connection.commit()
+                        commit_time = time.time() - last_commit_time
+                        last_commit_time = time.time()
+                        
+                        logger.info(f"[COMMIT] Salvati {rows_inserted:,} record ({mini_batches_processed} mini-batch) in {commit_time:.1f}s")
+                    
+                    # Log progresso ogni 10 mini-batch
+                    if mini_batches_processed % 10 == 0:
+                        elapsed_total = time.time() - insert_start_time
+                        avg_speed = rows_inserted / elapsed_total if elapsed_total > 0 else 0
+                        progress_pct = (i + mini_batch_size) / len(main_data) * 100
+                        
+                        logger.info(f"[PROGRESS] {progress_pct:.1f}% - {rows_inserted:,}/{len(main_data):,} record | "
+                                  f"Velocità: {avg_speed:.0f} rec/s | Falliti: {mini_batches_failed} mini-batch")
+                else:
+                    mini_batches_failed += 1
+                    logger.warning(f"[SKIP] Mini-batch {mini_batches_processed} fallito ({mini_batch_size:,} record), continuo con il prossimo")
+                    
+            except Exception as e:
+                mini_batches_failed += 1
+                logger.error(f"[ERROR] Errore in mini-batch {mini_batches_processed}: {e}")
+                # Continua con il prossimo mini-batch invece di fallire tutto
+                continue
             
-            i += current_batch_size
+            i += MINI_BATCH_SIZE
+        
+        # COMMIT FINALE per gli ultimi record
+        cursor.connection.commit()
         
         total_time = time.time() - insert_start_time
         avg_speed = rows_inserted / total_time if total_time > 0 else 0
         final_ram_gb = psutil.virtual_memory().used / (1024**3)
         final_usage_pct = psutil.virtual_memory().percent
-        final_batch_size = batch_sizer.current_batch_size
+        success_rate = (mini_batches_processed - mini_batches_failed) / mini_batches_processed * 100 if mini_batches_processed > 0 else 0
         
-        logger.info(f"[COMPLETE] INSERT intelligente completato: {rows_inserted:,} righe totali")
-        logger.info(f"[PERF] Performance: {avg_speed:.0f} rec/s in {total_time:.1f}s | "
-                   f"Batch size finale: {final_batch_size:,} | RAM finale: {final_ram_gb:.1f}GB ({final_usage_pct:.1f}%)")
-        
-        if adaptation_count > 0:
-            logger.info(f"[ADAPT] Sistema adattivo: {adaptation_count} modifiche automatiche alla struttura")
+        logger.info(f"[COMPLETE] SCRITTURA PROGRESSIVA completata!")
+        logger.info(f"[STATS] Record inseriti: {rows_inserted:,}/{len(main_data):,} ({(rows_inserted/len(main_data)*100):.1f}%)")
+        logger.info(f"[STATS] Mini-batch: {mini_batches_processed} totali, {mini_batches_failed} falliti (successo: {success_rate:.1f}%)")
+        logger.info(f"[PERF] Velocità media: {avg_speed:.0f} rec/s in {total_time:.1f}s")
+        logger.info(f"[RAM] RAM finale: {final_ram_gb:.1f}GB ({final_usage_pct:.1f}%)")
         
         return rows_inserted
         
     except Exception as e:
-        logger.error(f"[ERROR] Errore in INSERT intelligente: {e}")
+        # Commit finale anche in caso di errore per salvare quello che si può
+        try:
+            cursor.connection.commit()
+            logger.info(f"[RECOVERY] Commit di emergenza eseguito: {rows_inserted:,} record salvati")
+        except:
+            pass
+        
+        logger.error(f"[ERROR] Errore in SCRITTURA PROGRESSIVA: {e}")
         raise
 
 def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None, category=None):
