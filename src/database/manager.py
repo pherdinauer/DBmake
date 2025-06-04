@@ -424,7 +424,7 @@ class DatabaseManager:
             # Il test della connessione è già incluso in _create_single_connection
             # Non serve rifarlo qui
             db_logger.info("[ENTER] Connessione validata e pronta per l'uso")
-            return self.connection
+            return self  # Return the DatabaseManager instance, not the raw connection
                 
         except Exception as e:
             # Log dettagliato dell'errore
