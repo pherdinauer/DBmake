@@ -280,13 +280,23 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
     
     for attempt in range(max_retries):
         try:
-            # Tenta l'inserimento normale
+            # Per la prima volta, prova INSERT normale
+            current_query = query
+            
+            # Se è un retry per duplicati, usa direttamente INSERT IGNORE
+            if attempt > 0 and "INSERT INTO" in query:
+                current_query = query.replace("INSERT INTO", "INSERT IGNORE INTO", 1)
+                logger.info(f"[RETRY-IGNORE] Tentativo {attempt + 1}: uso INSERT IGNORE per evitare duplicati")
+            
+            # Tenta l'inserimento
             if isinstance(data, list) and len(data) > 0:
-                cursor.executemany(query, data)
+                cursor.executemany(current_query, data)
             else:
-                cursor.execute(query, data)
+                cursor.execute(current_query, data)
             
             # Se arriviamo qui, l'inserimento è riuscito
+            if attempt > 0:
+                logger.info(f"[SUCCESS] Inserimento riuscito al tentativo {attempt + 1}")
             return True
             
         except mysql.connector.Error as e:
@@ -302,19 +312,10 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
             elif e.errno == 1062:
                 adapted = handle_duplicate_key_error(cursor, str(e), table_name)
                 if adapted:
-                    # Converti la query da INSERT a INSERT IGNORE
-                    if query.startswith("INSERT INTO"):
-                        ignore_query = query.replace("INSERT INTO", "INSERT IGNORE INTO", 1)
-                        logger.info(f"[RETRY] Uso INSERT IGNORE per saltare duplicati")
-                        try:
-                            if isinstance(data, list) and len(data) > 0:
-                                cursor.executemany(ignore_query, data)
-                            else:
-                                cursor.execute(ignore_query, data)
-                            return True
-                        except Exception as ignore_error:
-                            logger.error(f"[ERROR] Anche INSERT IGNORE ha fallito: {ignore_error}")
-                            adapted = False
+                    # Converti la query da INSERT a INSERT IGNORE per il prossimo tentativo
+                    logger.info(f"[ADAPT] Prossimo tentativo userà INSERT IGNORE per gestire duplicati")
+                    # Non riproviamo subito, lasciamo che il loop principale riprovi
+                    continue
             
             # Errore 1264: Out of range value
             elif e.errno == 1264:
@@ -2020,6 +2021,27 @@ def main():
         
         return  # Esce senza fare l'importazione
     
+    # Modalità cleanup se viene passato il parametro --cleanup
+    if len(sys.argv) > 1 and sys.argv[1] == '--cleanup':
+        try:
+            with LogContext(logger, "pulizia tabelle problematiche"):
+                logger.info(f"[CLEANUP MODE] Inizio pulizia: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Trova le categorie esistenti
+                json_files = find_json_files(JSON_BASE_PATH)
+                categories = group_files_by_category(json_files)
+                
+                with DatabaseManager.get_connection() as conn:
+                    clean_problematic_tables(conn, categories.keys())
+                
+                logger.info(f"[CLEANUP] Pulizia completata!")
+                
+        except Exception as e:
+            log_error_with_context(logger, e, "pulizia tabelle")
+            raise
+        
+        return  # Esce dopo la pulizia
+    
     # Modalità normale (importazione completa)
     try:
         with LogContext(logger, "importazione MySQL"):
@@ -2030,6 +2052,18 @@ def main():
         
         # Verifica lo spazio disco
         check_disk_space()
+        
+        # Pulizia preventiva automatica delle tabelle problematiche
+        try:
+            json_files = find_json_files(JSON_BASE_PATH)
+            categories = group_files_by_category(json_files)
+            
+            logger.info("[AUTO-CLEANUP] Verifica e pulizia preventiva tabelle...")
+            with DatabaseManager.get_connection() as conn:
+                clean_problematic_tables(conn, categories.keys())
+        except Exception as cleanup_error:
+            logger.warning(f"[AUTO-CLEANUP] Errore durante pulizia preventiva: {cleanup_error}")
+            # Non bloccare l'importazione per errori di pulizia
         
         # Usa DatabaseManager per la connessione principale
         with DatabaseManager.get_connection() as conn:
@@ -2059,18 +2093,19 @@ def create_category_tables(cursor, table_definitions, field_mapping, column_type
             
             create_table_sql = f"""
             CREATE TABLE IF NOT EXISTS {table_name} (
-                cig VARCHAR(64),
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                cig VARCHAR(64) NOT NULL,
                 {', '.join(main_fields)},
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 source_file VARCHAR(255),
                 batch_id VARCHAR(64),
-                PRIMARY KEY (cig, source_file, batch_id),
+                INDEX idx_cig (cig),
                 INDEX idx_created_at (created_at),
                 INDEX idx_source_file (source_file),
                 INDEX idx_batch_id (batch_id),
-                INDEX idx_cig (cig),
                 INDEX idx_cig_source (cig, source_file),
-                INDEX idx_cig_batch (cig, batch_id)
+                INDEX idx_cig_batch (cig, batch_id),
+                INDEX idx_cig_source_batch (cig, source_file, batch_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
             """
             
@@ -2343,6 +2378,12 @@ def create_dynamic_tables_by_category(conn, category_table_definitions):
         total_fields_created = 0
         
         try:
+            # Prima verifica e migra le tabelle esistenti se necessario
+            categories = list(category_table_definitions.keys())
+            for category in categories:
+                table_name = f"{category}_data"
+                check_and_update_table_structure(cursor, table_name, {category: True})
+            
             for category, table_definitions in category_table_definitions.items():
                 if not table_definitions:
                     db_logger.warning(f"[SKIP] Categoria '{category}' senza campi, skippo creazione tabella")
@@ -2362,18 +2403,19 @@ def create_dynamic_tables_by_category(conn, category_table_definitions):
                 # Crea la tabella ottimizzata
                 create_table_sql = f"""
                 CREATE TABLE IF NOT EXISTS {table_name} (
-                    cig VARCHAR(64),
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    cig VARCHAR(64) NOT NULL,
                     {', '.join(main_fields)},
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     source_file VARCHAR(255),
                     batch_id VARCHAR(64),
-                    PRIMARY KEY (cig, source_file, batch_id),
+                    INDEX idx_cig (cig),
                     INDEX idx_created_at (created_at),
                     INDEX idx_source_file (source_file),
                     INDEX idx_batch_id (batch_id),
-                    INDEX idx_cig (cig),
                     INDEX idx_cig_source (cig, source_file),
-                    INDEX idx_cig_batch (cig, batch_id)
+                    INDEX idx_cig_batch (cig, batch_id),
+                    INDEX idx_cig_source_batch (cig, source_file, batch_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
                 """
                 
@@ -2506,6 +2548,172 @@ def create_metadata_tables_optimized(cursor, category_table_definitions):
         
         db_logger.info(f"[INSERT] Mapping campi per categoria inserito: {mapping_records} record")
         db_logger.info("[COMPLETE] Tabelle metadati ottimizzate create")
+
+def check_and_update_table_structure(cursor, table_name, categories):
+    """Verifica e aggiorna la struttura delle tabelle esistenti se necessario."""
+    try:
+        # Verifica se la tabella esiste
+        cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+        if not cursor.fetchone():
+            return  # Tabella non esiste, sarà creata normalmente
+        
+        # Verifica la struttura attuale
+        cursor.execute(f"SHOW CREATE TABLE {table_name}")
+        create_table_result = cursor.fetchone()
+        if not create_table_result:
+            return
+        
+        create_table_sql = create_table_result[1]
+        
+        # Se la tabella ha la vecchia struttura con PRIMARY KEY (cig, source_file, batch_id)
+        if "PRIMARY KEY (`cig`,`source_file`,`batch_id`)" in create_table_sql:
+            db_logger.warning(f"[MIGRATE] Tabella {table_name} ha la vecchia struttura, la aggiorno...")
+            
+            # Crea una tabella temporanea con la nuova struttura
+            temp_table_name = f"{table_name}_temp"
+            
+            # Trova la categoria corrispondente per questa tabella
+            category = table_name.replace('_data', '')
+            if category in categories:
+                db_logger.info(f"[MIGRATE] Creazione tabella temporanea {temp_table_name}")
+                
+                # Ottieni i campi dalla tabella esistente (esclusi id, cig, created_at, source_file, batch_id)
+                cursor.execute(f"DESCRIBE {table_name}")
+                existing_columns = cursor.fetchall()
+                
+                main_fields = []
+                for column in existing_columns:
+                    column_name = column[0]
+                    column_type = column[1]
+                    
+                    # Salta i campi di sistema
+                    if column_name not in ['cig', 'created_at', 'source_file', 'batch_id']:
+                        main_fields.append(f"{column_name} {column_type}")
+                
+                # Crea la tabella temporanea con la nuova struttura
+                create_temp_table_sql = f"""
+                CREATE TABLE {temp_table_name} (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    cig VARCHAR(64) NOT NULL,
+                    {', '.join(main_fields)},
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source_file VARCHAR(255),
+                    batch_id VARCHAR(64),
+                    INDEX idx_cig (cig),
+                    INDEX idx_created_at (created_at),
+                    INDEX idx_source_file (source_file),
+                    INDEX idx_batch_id (batch_id),
+                    INDEX idx_cig_source (cig, source_file),
+                    INDEX idx_cig_batch (cig, batch_id),
+                    INDEX idx_cig_source_batch (cig, source_file, batch_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                """
+                
+                cursor.execute(create_temp_table_sql)
+                
+                # Copia i dati dalla tabella vecchia alla nuova (rimuovendo duplicati)
+                field_list = ', '.join([col[0] for col in existing_columns if col[0] != 'id'])
+                
+                db_logger.info(f"[MIGRATE] Copia dati da {table_name} a {temp_table_name} (rimuovendo duplicati)")
+                copy_data_sql = f"""
+                INSERT INTO {temp_table_name} ({field_list})
+                SELECT {field_list}
+                FROM {table_name}
+                GROUP BY cig, source_file, batch_id
+                """
+                
+                cursor.execute(copy_data_sql)
+                copied_rows = cursor.rowcount
+                
+                # Rinomina le tabelle
+                db_logger.info(f"[MIGRATE] Sostituisco {table_name} con la nuova struttura")
+                cursor.execute(f"DROP TABLE {table_name}")
+                cursor.execute(f"RENAME TABLE {temp_table_name} TO {table_name}")
+                
+                db_logger.info(f"[SUCCESS] Migrazione completata per {table_name}: {copied_rows} righe migrate")
+            
+    except Exception as e:
+        db_logger.error(f"[ERROR] Errore durante aggiornamento struttura {table_name}: {e}")
+        # In caso di errore, elimina la tabella temporanea se esiste
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {table_name}_temp")
+        except:
+            pass
+
+def clean_problematic_tables(conn, categories):
+    """Pulisce le tabelle problematiche con duplicati e permette un restart pulito."""
+    cursor = conn.cursor()
+    
+    try:
+        db_logger.info("[CLEANUP] Inizio pulizia tabelle problematiche...")
+        
+        for category in categories:
+            table_name = f"{category}_data"
+            
+            try:
+                # Verifica se la tabella esiste
+                cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+                if not cursor.fetchone():
+                    continue
+                
+                # Verifica se ci sono duplicati nella tabella
+                cursor.execute(f"""
+                    SELECT cig, source_file, batch_id, COUNT(*) as count
+                    FROM {table_name} 
+                    GROUP BY cig, source_file, batch_id 
+                    HAVING COUNT(*) > 1 
+                    LIMIT 1
+                """)
+                
+                duplicate_found = cursor.fetchone()
+                
+                if duplicate_found:
+                    db_logger.warning(f"[CLEANUP] Trovati duplicati in {table_name}, la ricreo...")
+                    
+                    # Salva la struttura della tabella
+                    cursor.execute(f"SHOW CREATE TABLE {table_name}")
+                    create_table_result = cursor.fetchone()
+                    if create_table_result:
+                        create_table_sql = create_table_result[1]
+                        
+                        # Se ha la vecchia struttura, la elimina completamente
+                        if "PRIMARY KEY (`cig`,`source_file`,`batch_id`)" in create_table_sql:
+                            db_logger.info(f"[CLEANUP] Eliminazione completa di {table_name} (struttura obsoleta)")
+                            cursor.execute(f"DROP TABLE {table_name}")
+                        else:
+                            # Se ha la nuova struttura, rimuove solo i duplicati
+                            db_logger.info(f"[CLEANUP] Rimozione duplicati da {table_name}")
+                            cursor.execute(f"""
+                                CREATE TABLE {table_name}_temp AS 
+                                SELECT * FROM {table_name} 
+                                GROUP BY cig, source_file, batch_id
+                            """)
+                            cursor.execute(f"DROP TABLE {table_name}")
+                            cursor.execute(f"RENAME TABLE {table_name}_temp TO {table_name}")
+                else:
+                    db_logger.info(f"[OK] Nessun duplicato trovato in {table_name}")
+                    
+            except Exception as e:
+                db_logger.error(f"[ERROR] Errore durante pulizia di {table_name}: {e}")
+                continue
+        
+        # Pulizia anche delle tabelle di tracking per permettere re-import
+        db_logger.info("[CLEANUP] Pulizia tabella processed_files per permettere re-import...")
+        try:
+            cursor.execute("DELETE FROM processed_files WHERE status = 'failed'")
+            failed_files_removed = cursor.rowcount
+            db_logger.info(f"[CLEANUP] Rimossi {failed_files_removed} file falliti dalla lista processed")
+        except Exception as e:
+            db_logger.warning(f"[CLEANUP] Errore durante pulizia processed_files: {e}")
+        
+        conn.commit()
+        db_logger.info("[CLEANUP] Pulizia completata con successo")
+        
+    except Exception as e:
+        db_logger.error(f"[ERROR] Errore durante pulizia globale: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
 
 if __name__ == "__main__":
     main()
