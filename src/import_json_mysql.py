@@ -394,47 +394,63 @@ def adaptive_insert_with_retry(cursor, query, data, table_name, max_retries=3):
     return False
 
 class AdaptiveBatchSizer:
-    """Gestisce il batch size adattivo basato sull'utilizzo RAM real-time."""
+    """Gestisce dinamicamente la dimensione del batch basandosi sull'utilizzo della RAM."""
     
-    def __init__(self, initial_batch_size, target_ram_usage=0.8):
+    def __init__(self, initial_batch_size, target_ram_usage=None):
+        self.initial_batch_size = initial_batch_size
         self.current_batch_size = initial_batch_size
-        self.target_ram_usage = target_ram_usage
-        self.performance_history = []
-        self.adjustment_factor = 2.0  # Moltiplicatore MOLTO AGGRESSIVO (era 1.5)
-        self.min_batch = 10000  # Aumentato da 5000
-        self.max_batch = 1000000  # MASSIMO UN MILIONE! (era 300000)
+        self.target_ram_usage = target_ram_usage or TARGET_RAM_USAGE  # Usa il target dinamico
+        self.adjustments = 0
         
     def adjust_batch_size(self, current_ram_usage, processing_speed):
-        """Aggiusta il batch size basato su utilizzo RAM e performance."""
-        self.performance_history.append((current_ram_usage, processing_speed))
+        """
+        Aggiusta il batch size basandosi su utilizzo RAM e velocità di processing.
         
-        # Se abbiamo abbastanza storia, adatta il batch size
-        if len(self.performance_history) >= 1:  # Reagisce IMMEDIATAMENTE
-            avg_ram_usage = current_ram_usage  # Usa valore corrente, non media
+        Args:
+            current_ram_usage: Percentuale di RAM utilizzata (0.0-1.0)
+            processing_speed: Record processati al secondo
+        """
+        # Calcola un average rolling delle ultime 3 misurazioni
+        if not hasattr(self, 'ram_history'):
+            self.ram_history = []
+        
+        self.ram_history.append(current_ram_usage)
+        if len(self.ram_history) > 3:
+            self.ram_history.pop(0)
             
-            # Se RAM MOLTO sottoutilizzata (< 60% del target), aumenta DRASTICAMENTE
-            if avg_ram_usage < (self.target_ram_usage * 0.60):
-                new_batch_size = min(self.max_batch, int(self.current_batch_size * 3.0))  # TRIPLICA!
-                if new_batch_size > self.current_batch_size:
-                    logger.info(f"[MEGA-TUNE] Batch size TRIPLICATO da {self.current_batch_size:,} a {new_batch_size:,} "
-                               f"(RAM SPRECATA: {avg_ram_usage*100:.1f}% vs target {self.target_ram_usage*100:.0f}%)")
-                    self.current_batch_size = new_batch_size
-                    
-            # Se RAM sottoutilizzata (< 75% del target), aumenta aggressivamente
-            elif avg_ram_usage < (self.target_ram_usage * 0.75):
-                new_batch_size = min(self.max_batch, int(self.current_batch_size * self.adjustment_factor))
-                if new_batch_size > self.current_batch_size:
-                    logger.info(f"[SUPER-TUNE] Batch size RADDOPPIATO da {self.current_batch_size:,} a {new_batch_size:,} "
-                               f"(RAM sottoutilizzata: {avg_ram_usage*100:.1f}%)")
-                    self.current_batch_size = new_batch_size
-                    
-            # Se RAM eccessivamente utilizzata (> 90% del target), diminuisci
-            elif avg_ram_usage > (self.target_ram_usage * 0.90):
-                new_batch_size = max(self.min_batch, int(self.current_batch_size / 1.5))
-                if new_batch_size < self.current_batch_size:
-                    logger.warning(f"[AUTO-TUNE] Batch size ridotto da {self.current_batch_size:,} a {new_batch_size:,} "
-                                  f"(RAM sovraccarica: {avg_ram_usage*100:.1f}%)")
-                    self.current_batch_size = new_batch_size
+        avg_ram_usage = sum(self.ram_history) / len(self.ram_history)
+        
+        old_batch_size = self.current_batch_size
+        
+        # Strategia AGGRESSIVA per HIGH-PERFORMANCE
+        if HIGH_PERFORMANCE_MODE:
+            # In modalità HIGH-PERFORMANCE siamo più aggressivi
+            if avg_ram_usage < (self.target_ram_usage * 0.70):  # < 63% per HP mode
+                # Sotto il target, aumenta aggressivamente
+                self.current_batch_size = min(int(self.current_batch_size * 1.5), 5_000_000)
+            elif avg_ram_usage < (self.target_ram_usage * 0.85):  # < 76.5% per HP mode
+                # Vicino al target, aumenta moderatamente
+                self.current_batch_size = min(int(self.current_batch_size * 1.2), 3_000_000)
+            elif avg_ram_usage > (self.target_ram_usage * 0.95):  # > 85.5% per HP mode
+                # Troppo vicino al limite, riduci
+                self.current_batch_size = max(int(self.current_batch_size * 0.8), 50_000)
+        else:
+            # Strategia standard ottimizzata
+            if avg_ram_usage < (self.target_ram_usage * 0.60):  # < 48% per standard
+                # Sotto il target, aumenta aggressivamente
+                self.current_batch_size = min(int(self.current_batch_size * 1.3), 2_000_000)
+            elif avg_ram_usage < (self.target_ram_usage * 0.75):  # < 60% per standard
+                # Vicino al target, aumenta moderatamente
+                self.current_batch_size = min(int(self.current_batch_size * 1.1), 1_500_000)
+            elif avg_ram_usage > (self.target_ram_usage * 0.90):  # > 72% per standard
+                # Troppo vicino al limite, riduci
+                self.current_batch_size = max(int(self.current_batch_size * 0.85), 25_000)
+        
+        if old_batch_size != self.current_batch_size:
+            self.adjustments += 1
+            mode_icon = "💪" if HIGH_PERFORMANCE_MODE else "🏃"
+            logger.info(f"{mode_icon} [ADAPT] Batch size: {old_batch_size:,} → {self.current_batch_size:,} "
+                       f"(RAM: {avg_ram_usage:.1%}, target: {self.target_ram_usage:.1%})")
         
         return self.current_batch_size
 

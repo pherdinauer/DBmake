@@ -161,12 +161,12 @@ chmod -R 755 .
 show_menu() {
     clear
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
-    echo -e "║                         CIG Database Management Tool                            ║"
+    echo -e "║                    CIG Database Management Tool - Auto-Turbo                   ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
     echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
-    echo -e "${YELLOW}3)${NC} Importa direttamente i JSON in MySQL"
+    echo -e "${YELLOW}3)${NC} 🚀 Auto-Turbo MySQL Import (rilevamento automatico performance)"
     echo -e "${YELLOW}4)${NC} Cerca CIG nel database"
     echo -e "${YELLOW}5)${NC} Esci"
     echo
@@ -198,12 +198,107 @@ generate_mysql_sql() {
 
 # Funzione per import diretto in MySQL
 import_to_mysql() {
-    echo -e "${YELLOW}Importazione diretta dei JSON in MySQL...${NC}"
-    python src/import_json_mysql.py
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Importazione completata con successo!${NC}"
+    echo -e "${YELLOW}🤖 Auto-Turbo MySQL Import (rilevamento automatico performance)...${NC}"
+    
+    # Auto-detect risorse sistema
+    echo -e "${YELLOW}🔍 Rilevamento automatico risorse sistema...${NC}"
+    
+    # Rileva CPU cores
+    if command -v nproc &> /dev/null; then
+        CPU_CORES=$(nproc)
+        echo -e "${GREEN}   🔥 CPU cores rilevati: $CPU_CORES${NC}"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        CPU_CORES=$(sysctl -n hw.ncpu)
+        echo -e "${GREEN}   🔥 CPU cores rilevati: $CPU_CORES (macOS)${NC}"
     else
-        echo -e "${RED}Errore durante l'importazione in MySQL.${NC}"
+        CPU_CORES=4
+        echo -e "${YELLOW}   ⚠️  CPU non rilevabile, assumo: $CPU_CORES${NC}"
+    fi
+    
+    # Rileva RAM
+    if command -v free &> /dev/null; then
+        RAM_GB=$(free -g | awk '/^Mem:/{print $2}')
+        echo -e "${GREEN}   💾 RAM totale rilevata: ${RAM_GB}GB${NC}"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        RAM_BYTES=$(sysctl -n hw.memsize)
+        RAM_GB=$((RAM_BYTES / 1024 / 1024 / 1024))
+        echo -e "${GREEN}   💾 RAM totale rilevata: ${RAM_GB}GB (macOS)${NC}"
+    else
+        RAM_GB=8
+        echo -e "${YELLOW}   ⚠️  RAM non rilevabile, assumo: ${RAM_GB}GB${NC}"
+    fi
+    
+    # Load average (se disponibile)
+    if command -v uptime &> /dev/null; then
+        LOAD=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+        echo -e "${GREEN}   📊 Load average: $LOAD${NC}"
+    fi
+    
+    echo
+    
+    # Auto-detect modalità performance
+    if [[ $CPU_CORES -ge 8 && $RAM_GB -ge 12 ]]; then
+        MODE="HIGH-PERFORMANCE"
+        ICON="💪"
+        export SCHEMA_ANALYSIS_MODE="ultra-fast"
+        echo -e "${GREEN}$ICON MODALITÀ AUTO-RILEVATA: $MODE${NC}"
+        echo -e "${GREEN}   ⚡ Sistema potente → Performance massime!${NC}"
+        echo -e "${GREEN}   🚀 CPU: Hyperthreading attivo ($CPU_CORES × 2 thread)${NC}"
+        echo -e "${GREEN}   📦 Chunk: 200K-500K record${NC}"
+        echo -e "${GREEN}   💾 INSERT: Batch triplicati (fino a 3M)${NC}"
+        echo -e "${GREEN}   🔗 MySQL: Multi-processo + pool esteso${NC}"
+    else
+        MODE="STANDARD OTTIMIZZATO"
+        ICON="🏃"
+        export SCHEMA_ANALYSIS_MODE="fast"
+        echo -e "${YELLOW}$ICON MODALITÀ AUTO-RILEVATA: $MODE${NC}"
+        echo -e "${YELLOW}   ✨ Sistema standard → Configurazione ottimizzata!${NC}"
+        echo -e "${YELLOW}   🔥 CPU: Thread aggressivi ($CPU_CORES thread)${NC}"
+        echo -e "${YELLOW}   📦 Chunk: Dinamici basati su RAM${NC}"
+        echo -e "${YELLOW}   💾 INSERT: Batch ottimizzati${NC}"
+    fi
+    
+    echo
+    echo -e "${YELLOW}🚀 Avvio import automatico...${NC}"
+    echo -e "${YELLOW}📊 Modalità: $ICON $MODE${NC}"
+    echo -e "${YELLOW}⏹️  Interruzione: Ctrl+C${NC}"
+    echo
+    
+    # Timer
+    START_TIME=$(date +%s)
+    
+    # Esecuzione con auto-turbo
+    python src/import_json_mysql.py
+    
+    # Calcolo tempo e risultato
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    
+    echo
+    echo -e "${YELLOW}⏱️  TEMPO TOTALE: $((DURATION / 60))m $((DURATION % 60))s${NC}"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 IMPORT AUTO-TURBO COMPLETATO!${NC}"
+        echo -e "${GREEN}✅ $MODE ha funzionato perfettamente!${NC}"
+        echo -e "${GREEN}📈 Performance: $((DURATION / 60))min per l'elaborazione${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'importazione in MySQL.${NC}"
+        echo -e "${YELLOW}💡 Verifica i log per maggiori dettagli${NC}"
+        
+        # Offri auto-fix se c'è errore
+        echo
+        echo -e "${YELLOW}🔧 Vuoi provare l'auto-fix per tabelle duplicate? (s/N): ${NC}"
+        read -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Ss]$ ]]; then
+            echo -e "${YELLOW}🔧 Esecuzione auto-fix...${NC}"
+            python -m src.fix_duplicate_keys --force
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✅ Auto-fix completato! Riprova l'import.${NC}"
+            else
+                echo -e "${RED}❌ Auto-fix fallito.${NC}"
+            fi
+        fi
     fi
 }
 
