@@ -6,8 +6,10 @@ import os
 import time
 import logging
 import mysql.connector
+from mysql.connector import pooling, errorcode
 from typing import Dict, List, Tuple, Any, Optional, Union, Set, DefaultDict
 from dotenv import load_dotenv
+from contextlib import contextmanager
 
 # Carica le variabili d'ambiente
 load_dotenv()
@@ -380,8 +382,81 @@ class DatabaseManager:
                     except:
                         pass
     
+    def _test_connection(self) -> bool:
+        """Testa se la connessione è ancora valida."""
+        if not self.connection:
+            db_logger.info("[TEST_CONNECTION] Connessione non presente")
+            return False
+        
+        try:
+            # Test più robusto della connessione
+            if hasattr(self.connection, 'is_connected'):
+                is_conn_status = self.connection.is_connected()
+                db_logger.info(f"[TEST_CONNECTION] is_connected() = {is_conn_status}")
+                if not is_conn_status:
+                    return False
+            
+            # Test con query semplice
+            db_logger.info("[TEST_CONNECTION] Creazione cursor per test...")
+            cursor = self.connection.cursor()
+            
+            db_logger.info("[TEST_CONNECTION] Esecuzione SELECT 1...")
+            cursor.execute("SELECT 1")
+            
+            db_logger.info("[TEST_CONNECTION] Fetch del risultato...")
+            result = cursor.fetchone()
+            
+            db_logger.info(f"[TEST_CONNECTION] Risultato query: {result}")
+            cursor.close()
+            
+            # Verifica che il risultato sia corretto
+            is_valid = result is not None and result[0] == 1
+            db_logger.info(f"[TEST_CONNECTION] Test completato: {is_valid}")
+            return is_valid
+            
+        except Exception as e:
+            db_logger.info(f"[TEST_CONNECTION] Test fallito con eccezione: {type(e).__name__}: {e}")
+            return False
+    
+    def _reconnect_if_needed(self) -> bool:
+        """Riconnette automaticamente se la connessione è persa."""
+        if self._test_connection():
+            return True
+        
+        db_logger.warning("[RECONNECT] Connessione persa, tentativo di riconnessione...")
+        
+        for attempt in range(self.max_reconnect_attempts):
+            try:
+                # Chiudi la connessione esistente se presente
+                if self.connection:
+                    try:
+                        self.connection.close()
+                    except:
+                        pass
+                    self.connection = None
+                
+                # Pausa prima di riconnettere
+                if attempt > 0:
+                    time.sleep(self.reconnect_delay)
+                
+                # Crea nuova connessione
+                self.connection = self._create_single_connection()
+                
+                # Test immediato della nuova connessione
+                if self._test_connection():
+                    db_logger.info(f"[RECONNECT] Riconnessione riuscita al tentativo {attempt + 1}")
+                    return True
+                else:
+                    db_logger.warning(f"[RECONNECT] Connessione creata ma test fallito (tentativo {attempt + 1})")
+                    
+            except Exception as e:
+                db_logger.warning(f"[RECONNECT] Tentativo {attempt + 1} fallito: {e}")
+                
+        db_logger.error("[RECONNECT] Impossibile ristabilire la connessione dopo tutti i tentativi")
+        return False
+    
     def __enter__(self) -> Any:
-        """Context manager entry con riconnessione automatica."""
+        """Context manager entry con riconnessione automatica e test robusto."""
         try:
             if self.use_pool:
                 if not self._pool:
@@ -392,15 +467,44 @@ class DatabaseManager:
                 self.connection = self._create_single_connection()
                 db_logger.info("[ENTER] Connessione diretta stabilita")
                 
-            # Test immediato della connessione
-            if not self._test_connection():
-                raise mysql.connector.Error("Connessione non valida dopo la creazione")
-                
-            return self.connection
+            # Test della connessione con retry integrato
+            max_test_attempts = 3
+            for test_attempt in range(max_test_attempts):
+                if self._test_connection():
+                    db_logger.debug(f"[ENTER] Test connessione riuscito (tentativo {test_attempt + 1})")
+                    return self.connection
+                else:
+                    db_logger.warning(f"[ENTER] Test connessione fallito (tentativo {test_attempt + 1}/{max_test_attempts})")
+                    
+                    if test_attempt < max_test_attempts - 1:
+                        # Riprova a creare la connessione
+                        try:
+                            if self.connection:
+                                self.connection.close()
+                        except:
+                            pass
+                        
+                        time.sleep(1)  # Pausa breve
+                        self.connection = self._create_single_connection()
+                        db_logger.info(f"[ENTER] Ricreo connessione per test (tentativo {test_attempt + 2})")
             
+            # Se tutti i test falliscono, solleva un'eccezione più specifica
+            raise mysql.connector.Error("Impossibile stabilire una connessione MySQL valida dopo multipli tentativi")
+                
         except Exception as e:
-            log_error_with_context(db_logger, e, "database connection", "enter context")
-            raise
+            # Log dettagliato dell'errore
+            error_msg = f"Errore durante stabilimento connessione: {e}"
+            db_logger.error(f"[ENTER] {error_msg}")
+            
+            # Pulizia in caso di errore
+            if self.connection:
+                try:
+                    self.connection.close()
+                except:
+                    pass
+                self.connection = None
+            
+            raise mysql.connector.Error(error_msg)
     
     def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         """Context manager exit."""
@@ -426,53 +530,6 @@ class DatabaseManager:
     def get_pooled_connection() -> 'DatabaseManager':
         """Factory method per connessione dal pool."""
         return DatabaseManager(use_pool=True)
-    
-    def _test_connection(self) -> bool:
-        """Testa se la connessione è ancora valida."""
-        if not self.connection:
-            return False
-        
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-            cursor.close()
-            return True
-        except (mysql.connector.Error, AttributeError):
-            return False
-    
-    def _reconnect_if_needed(self) -> bool:
-        """Riconnette automaticamente se la connessione è persa."""
-        if self._test_connection():
-            return True
-        
-        db_logger.warning("[RECONNECT] Connessione persa, tentativo di riconnessione...")
-        
-        for attempt in range(self.max_reconnect_attempts):
-            try:
-                if self.connection:
-                    try:
-                        self.connection.close()
-                    except:
-                        pass  # Ignora errori di chiusura
-                
-                time.sleep(self.reconnect_delay * attempt)  # Backoff progressivo
-                
-                if self.use_pool and self._pool:
-                    self.connection = self._pool.get_connection()
-                    db_logger.info(f"[RECONNECT] Riconnessione dal pool riuscita (tentativo {attempt + 1})")
-                else:
-                    self.connection = self._create_single_connection()
-                    db_logger.info(f"[RECONNECT] Riconnessione diretta riuscita (tentativo {attempt + 1})")
-                
-                return True
-                
-            except Exception as e:
-                db_logger.warning(f"[RECONNECT] Tentativo {attempt + 1} fallito: {e}")
-                continue
-        
-        db_logger.error("[RECONNECT] Riconnessione fallita dopo tutti i tentativi")
-        return False
     
     def execute_with_retry(self, query: str, params: Optional[tuple] = None, fetch: bool = False) -> Any:
         """Esegue una query con riconnessione automatica in caso di errore."""
