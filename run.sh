@@ -222,10 +222,11 @@ generate_mysql_sql() {
 
 # Funzione per import diretto in MySQL
 import_to_mysql() {
-    echo -e "${YELLOW}🚀 Avvio Auto-Turbo MySQL Import...${NC}"
+    echo -e "${YELLOW}🚀 Avvio Auto-Turbo MySQL Import con gestione errori robusta...${NC}"
     echo -e "${GREEN}💪 Modalità HIGH-PERFORMANCE con rilevamento automatico risorse${NC}"
     echo -e "${GREEN}⚡ Ottimizzazioni: multi-thread, batch dinamici, schema intelligente${NC}"
-    python src/import_json_mysql.py
+    echo -e "${GREEN}🛡️ Gestione robusta di MySQLInterfaceError${NC}"
+    python src/mysql_import_wrapper.py
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}🎉 Auto-Turbo Import completato con successo!${NC}"
     else
