@@ -52,7 +52,7 @@ def log_error_with_context(logger_instance: logging.Logger, error: Exception, co
 class DatabaseManager:
     """
     Context Manager centralizzato per tutte le operazioni di database.
-    Gestisce connessioni singole, pool di connessioni e configurazione MySQL.
+    Gestisce connessioni singole, pool di connessioni e configurazione MySQL con riconnessione automatica.
     """
     
     _pool: Optional[Any] = None
@@ -63,8 +63,10 @@ class DatabaseManager:
         self.use_pool = use_pool
         self.pool_size = pool_size
         self.connection: Optional[Any] = None
+        self.max_reconnect_attempts = 3
+        self.reconnect_delay = 2  # secondi
         
-        # Configurazione MySQL standard
+        # Configurazione MySQL ottimizzata per operazioni lunghe
         self.config: Dict[str, Any] = {
             'host': MYSQL_HOST,
             'user': MYSQL_USER,
@@ -72,16 +74,20 @@ class DatabaseManager:
             'database': MYSQL_DATABASE,
             'charset': 'utf8mb4',
             'autocommit': True,
-            'connect_timeout': 180,
+            'connect_timeout': 300,  # Aumentato a 5 minuti
             'use_pure': True,
             'ssl_disabled': True,
-            'get_warnings': True,
-            'raise_on_warnings': True,
+            'get_warnings': False,  # Disabilitato per evitare problemi di configurazione
+            'raise_on_warnings': False,  # Disabilitato per evitare problemi di configurazione
             'consume_results': True,
             'buffered': True,
             'raw': False,
             'use_unicode': True,
-            'auth_plugin': 'mysql_native_password'
+            'auth_plugin': 'mysql_native_password',
+            # Aggiunte per stabilità connessione
+            'connection_timeout': 300,  # 5 minuti
+            'autocommit': True,
+            'sql_mode': '',  # Mode SQL più permissivo
         }
     
     @classmethod
@@ -375,12 +381,26 @@ class DatabaseManager:
                         pass
     
     def __enter__(self) -> Any:
-        """Context manager entry."""
-        if self.use_pool:
-            self.connection = self.get_pool_connection()
-        else:
-            self.connection = self._create_single_connection()
-        return self.connection
+        """Context manager entry con riconnessione automatica."""
+        try:
+            if self.use_pool:
+                if not self._pool:
+                    self.initialize_pool(self.pool_size)
+                self.connection = self.get_pool_connection()
+                db_logger.info("[ENTER] Connessione dal pool stabilita")
+            else:
+                self.connection = self._create_single_connection()
+                db_logger.info("[ENTER] Connessione diretta stabilita")
+                
+            # Test immediato della connessione
+            if not self._test_connection():
+                raise mysql.connector.Error("Connessione non valida dopo la creazione")
+                
+            return self.connection
+            
+        except Exception as e:
+            log_error_with_context(db_logger, e, "database connection", "enter context")
+            raise
     
     def __exit__(self, exc_type: Optional[type], exc_val: Optional[Exception], exc_tb: Optional[Any]) -> None:
         """Context manager exit."""
@@ -405,4 +425,92 @@ class DatabaseManager:
     @staticmethod
     def get_pooled_connection() -> 'DatabaseManager':
         """Factory method per connessione dal pool."""
-        return DatabaseManager(use_pool=True) 
+        return DatabaseManager(use_pool=True)
+    
+    def _test_connection(self) -> bool:
+        """Testa se la connessione è ancora valida."""
+        if not self.connection:
+            return False
+        
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            return True
+        except (mysql.connector.Error, AttributeError):
+            return False
+    
+    def _reconnect_if_needed(self) -> bool:
+        """Riconnette automaticamente se la connessione è persa."""
+        if self._test_connection():
+            return True
+        
+        db_logger.warning("[RECONNECT] Connessione persa, tentativo di riconnessione...")
+        
+        for attempt in range(self.max_reconnect_attempts):
+            try:
+                if self.connection:
+                    try:
+                        self.connection.close()
+                    except:
+                        pass  # Ignora errori di chiusura
+                
+                time.sleep(self.reconnect_delay * attempt)  # Backoff progressivo
+                
+                if self.use_pool and self._pool:
+                    self.connection = self._pool.get_connection()
+                    db_logger.info(f"[RECONNECT] Riconnessione dal pool riuscita (tentativo {attempt + 1})")
+                else:
+                    self.connection = self._create_single_connection()
+                    db_logger.info(f"[RECONNECT] Riconnessione diretta riuscita (tentativo {attempt + 1})")
+                
+                return True
+                
+            except Exception as e:
+                db_logger.warning(f"[RECONNECT] Tentativo {attempt + 1} fallito: {e}")
+                continue
+        
+        db_logger.error("[RECONNECT] Riconnessione fallita dopo tutti i tentativi")
+        return False
+    
+    def execute_with_retry(self, query: str, params: Optional[tuple] = None, fetch: bool = False) -> Any:
+        """Esegue una query con riconnessione automatica in caso di errore."""
+        for attempt in range(self.max_reconnect_attempts):
+            try:
+                if not self._test_connection():
+                    if not self._reconnect_if_needed():
+                        raise mysql.connector.Error("Impossibile riconnettersi al database")
+                
+                cursor = self.connection.cursor()
+                
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                
+                result = None
+                if fetch:
+                    result = cursor.fetchall()
+                
+                cursor.close()
+                return result
+                
+            except mysql.connector.Error as e:
+                error_type = type(e).__name__
+                errno = getattr(e, 'errno', 'N/A')
+                
+                # Errori di connessione che richiedono retry
+                connection_errors = [2003, 2006, 2013, 2055]  # Can't connect, gone away, lost connection, bad file descriptor
+                
+                if errno in connection_errors or "Lost connection" in str(e) or "Bad file descriptor" in str(e):
+                    db_logger.warning(f"[RETRY] Errore di connessione (errno: {errno}), tentativo {attempt + 1}")
+                    self.connection = None  # Forza riconnessione
+                    if attempt < self.max_reconnect_attempts - 1:
+                        continue
+                
+                # Per altri errori, rilancia immediatamente
+                log_error_with_context(db_logger, e, "execute_with_retry", f"query: {query[:100]}...")
+                raise
+        
+        raise mysql.connector.Error("Query fallita dopo tutti i tentativi di riconnessione") 

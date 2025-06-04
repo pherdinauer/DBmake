@@ -2489,122 +2489,117 @@ def analyze_single_category(category, json_files):
     return table_definitions
 
 def create_dynamic_tables_by_category(conn, category_table_definitions):
-    """Crea tabelle dinamiche ottimizzate con schema specifico per ogni categoria."""
+    """Crea tabelle dinamiche ottimizzate con schema specifico per ogni categoria usando connessioni robuste."""
     with LogContext(db_logger, "creazione tabelle ottimizzate per categoria", categories=len(category_table_definitions)):
-        cursor = conn.cursor()
         
-        total_tables_created = 0
-        total_fields_created = 0
-        
-        try:
-            # Prima verifica e migra le tabelle esistenti se necessario
-            categories = list(category_table_definitions.keys())
-            for category in categories:
-                table_name = f"{category}_data"
-                check_and_update_table_structure(cursor, table_name, {category: True})
+        # Usa il DatabaseManager con riconnessione automatica
+        with DatabaseManager.get_connection() as db_manager:
+            total_tables_created = 0
+            total_fields_created = 0
             
-            for category, table_definitions in category_table_definitions.items():
-                if not table_definitions:
-                    db_logger.warning(f"[SKIP] Categoria '{category}' senza campi, skippo creazione tabella")
-                    continue
-                
-                # Prepara mapping dei campi specifici per questa categoria
-                field_mapping, column_types = prepare_field_mappings(table_definitions)
-                
-                # Nome della tabella per questa categoria
-                table_name = f"{category}_data"
-                
-                # Campi principali (escludi cig che è la chiave primaria)
-                main_fields = [f"{field_mapping[field]} {column_types[field]}" 
-                              for field in table_definitions.keys() 
-                              if field.lower() != 'cig']
-                
-                # Crea la tabella ottimizzata
-                create_table_sql = f"""
-                CREATE TABLE IF NOT EXISTS {table_name} (
-                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                    cig VARCHAR(64) NOT NULL,
-                    {', '.join(main_fields)},
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    source_file VARCHAR(255),
-                    batch_id VARCHAR(64),
-                    INDEX idx_cig (cig),
-                    INDEX idx_created_at (created_at),
-                    INDEX idx_source_file (source_file),
-                    INDEX idx_batch_id (batch_id),
-                    INDEX idx_cig_source (cig, source_file),
-                    INDEX idx_cig_batch (cig, batch_id),
-                    INDEX idx_cig_source_batch (cig, source_file, batch_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-                """
-                
-                db_logger.info(f"[CREATE] Tabella ottimizzata '{table_name}' con {len(main_fields)} campi specifici")
-                cursor.execute(create_table_sql)
-                total_tables_created += 1
-                total_fields_created += len(main_fields)
-                
-                # Crea tabelle JSON separate per campi JSON di questa categoria
-                json_tables_count = 0
-                for field, def_type in table_definitions.items():
-                    if def_type == 'JSON':
-                        sanitized_field = field_mapping[field]
-                        json_table_name = f"{category}_{sanitized_field}_data"
-                        
-                        create_json_table = f"""
-                        CREATE TABLE IF NOT EXISTS {json_table_name} (
-                            cig VARCHAR(64) PRIMARY KEY,
-                            {sanitized_field}_json JSON,
-                            source_file VARCHAR(255),
-                            batch_id VARCHAR(64),
-                            INDEX idx_source_file (source_file),
-                            INDEX idx_batch_id (batch_id),
-                            INDEX idx_cig_source (cig, source_file),
-                            INDEX idx_cig_batch (cig, batch_id)
-                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-                        """
-                        cursor.execute(create_json_table)
-                        json_tables_count += 1
-                
-                if json_tables_count > 0:
-                    db_logger.info(f"[CREATE] {json_tables_count} tabelle JSON specifiche per categoria '{category}'")
-                
-                # Report per categoria
-                db_logger.info(f"[RESULT] Categoria '{category}': tabella ottimizzata con {len(table_definitions)} campi totali")
-            
-            # Crea tabelle metadati globali
-            create_metadata_tables_optimized(cursor, category_table_definitions)
-            
-            # COMMIT ESPLICITO per assicurarsi che le tabelle siano create prima di iniziare il processing
-            conn.commit()
-            db_logger.info("[COMMIT] Tutte le tabelle e metadati salvati nel database")
-            
-            # VERIFICA che le tabelle metadati esistano e contengano dati
             try:
-                cursor.execute("SELECT COUNT(*) FROM category_field_mapping")
-                mapping_count = cursor.fetchone()[0]
-                db_logger.info(f"[VERIFY] Tabella category_field_mapping contiene {mapping_count} record")
+                # Prima verifica e migra le tabelle esistenti se necessario
+                categories = list(category_table_definitions.keys())
+                for category in categories:
+                    table_name = f"{category}_data"
+                    check_and_update_table_structure_robust(db_manager, table_name, {category: True})
                 
-                cursor.execute("SHOW TABLES LIKE '%_data'")
-                data_tables = cursor.fetchall()
-                db_logger.info(f"[VERIFY] Trovate {len(data_tables)} tabelle dati: {[table[0] for table in data_tables]}")
-                
-                if mapping_count == 0:
-                    db_logger.warning("[WARN] La tabella category_field_mapping è vuota!")
-                else:
-                    db_logger.info("[VERIFY] Verifica completata con successo")
+                for category, table_definitions in category_table_definitions.items():
+                    if not table_definitions:
+                        db_logger.warning(f"[SKIP] Categoria '{category}' senza campi, skippo creazione tabella")
+                        continue
                     
-            except Exception as verify_error:
-                db_logger.error(f"[ERROR] Errore durante verifica tabelle: {verify_error}")
-            
-            db_logger.info(f"[SUMMARY] Create {total_tables_created} tabelle ottimizzate con {total_fields_created} campi totali")
-            db_logger.info(f"[SUMMARY] Schema ottimizzato: ogni tabella contiene solo i campi necessari")
-            
-        except Exception as e:
-            db_logger.error(f"[ERROR] Errore durante creazione tabelle: {e}")
-            conn.rollback()
-            raise
-        finally:
-            cursor.close()
+                    # Prepara mapping dei campi specifici per questa categoria
+                    field_mapping, column_types = prepare_field_mappings(table_definitions)
+                    
+                    # Nome della tabella per questa categoria
+                    table_name = f"{category}_data"
+                    
+                    # Campi principali (escludi cig che è la chiave primaria)
+                    main_fields = [f"{field_mapping[field]} {column_types[field]}" 
+                                  for field in table_definitions.keys() 
+                                  if field.lower() != 'cig']
+                    
+                    # Crea la tabella ottimizzata con riconnessione automatica
+                    create_table_sql = f"""
+                    CREATE TABLE IF NOT EXISTS {table_name} (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        cig VARCHAR(64) NOT NULL,
+                        {', '.join(main_fields)},
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        source_file VARCHAR(255),
+                        batch_id VARCHAR(64),
+                        INDEX idx_cig (cig),
+                        INDEX idx_created_at (created_at),
+                        INDEX idx_source_file (source_file),
+                        INDEX idx_batch_id (batch_id),
+                        INDEX idx_cig_source (cig, source_file),
+                        INDEX idx_cig_batch (cig, batch_id),
+                        INDEX idx_cig_source_batch (cig, source_file, batch_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                    """
+                    
+                    db_logger.info(f"[CREATE] Tabella ottimizzata '{table_name}' con {len(main_fields)} campi specifici")
+                    
+                    # Usa execute_with_retry per operazioni robuste
+                    db_manager.execute_with_retry(create_table_sql)
+                    total_tables_created += 1
+                    total_fields_created += len(main_fields)
+                    
+                    # Crea tabelle JSON separate per campi JSON di questa categoria
+                    json_tables_count = 0
+                    for field, def_type in table_definitions.items():
+                        if def_type == 'JSON':
+                            sanitized_field = field_mapping[field]
+                            json_table_name = f"{category}_{sanitized_field}_data"
+                            
+                            create_json_table = f"""
+                            CREATE TABLE IF NOT EXISTS {json_table_name} (
+                                cig VARCHAR(64) PRIMARY KEY,
+                                {sanitized_field}_json JSON,
+                                source_file VARCHAR(255),
+                                batch_id VARCHAR(64),
+                                INDEX idx_source_file (source_file),
+                                INDEX idx_batch_id (batch_id),
+                                INDEX idx_cig_source (cig, source_file),
+                                INDEX idx_cig_batch (cig, batch_id)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                            """
+                            
+                            db_manager.execute_with_retry(create_json_table)
+                            json_tables_count += 1
+                    
+                    if json_tables_count > 0:
+                        db_logger.info(f"[CREATE] {json_tables_count} tabelle JSON specifiche per categoria '{category}'")
+                    
+                    # Report per categoria
+                    db_logger.info(f"[RESULT] Categoria '{category}': tabella ottimizzata con {len(table_definitions)} campi totali")
+                
+                # Crea tabelle metadati globali con riconnessione automatica
+                create_metadata_tables_robust(db_manager, category_table_definitions)
+                
+                # VERIFICA che le tabelle metadati esistano e contengano dati
+                try:
+                    mapping_count = db_manager.execute_with_retry("SELECT COUNT(*) FROM category_field_mapping", fetch=True)[0][0]
+                    db_logger.info(f"[VERIFY] Tabella category_field_mapping contiene {mapping_count} record")
+                    
+                    data_tables = db_manager.execute_with_retry("SHOW TABLES LIKE '%_data'", fetch=True)
+                    db_logger.info(f"[VERIFY] Trovate {len(data_tables)} tabelle dati: {[table[0] for table in data_tables]}")
+                    
+                    if mapping_count == 0:
+                        db_logger.warning("[WARN] La tabella category_field_mapping è vuota!")
+                    else:
+                        db_logger.info("[VERIFY] Verifica completata con successo")
+                        
+                except Exception as verify_error:
+                    db_logger.error(f"[ERROR] Errore durante verifica tabelle: {verify_error}")
+                
+                db_logger.info(f"[SUMMARY] Create {total_tables_created} tabelle ottimizzate con {total_fields_created} campi totali")
+                db_logger.info(f"[SUMMARY] Schema ottimizzato: ogni tabella contiene solo i campi necessari")
+                
+            except Exception as e:
+                db_logger.error(f"[ERROR] Errore durante creazione tabelle: {e}")
+                raise
 
 def create_metadata_tables_optimized(cursor, category_table_definitions):
     """Crea tabelle metadati ottimizzate per il sistema per categoria."""
@@ -2850,6 +2845,158 @@ else:  # thorough
     SCHEMA_MAX_ROWS_PER_FILE = 200
     SCHEMA_MAX_FILES_PER_CATEGORY = 20
     SCHEMA_MAX_SAMPLES_PER_FIELD = 20
+
+def check_and_update_table_structure_robust(db_manager, table_name, categories):
+    """Versione robusta per verificare e aggiornare la struttura delle tabelle esistenti."""
+    try:
+        # Verifica se la tabella esiste
+        result = db_manager.execute_with_retry(f"SHOW TABLES LIKE '{table_name}'", fetch=True)
+        if not result:
+            return  # Tabella non esiste, sarà creata normalmente
+        
+        # Verifica la struttura attuale
+        create_table_result = db_manager.execute_with_retry(f"SHOW CREATE TABLE {table_name}", fetch=True)
+        if not create_table_result:
+            return
+        
+        create_table_sql = create_table_result[0][1]
+        
+        # Se la tabella ha la vecchia struttura con PRIMARY KEY (cig, source_file, batch_id)
+        if "PRIMARY KEY (`cig`,`source_file`,`batch_id`)" in create_table_sql:
+            db_logger.warning(f"[MIGRATE] Tabella {table_name} ha la vecchia struttura, la aggiorno...")
+            
+            # Crea una tabella temporanea con la nuova struttura
+            temp_table_name = f"{table_name}_temp"
+            
+            # Trova la categoria corrispondente per questa tabella
+            category = table_name.replace('_data', '')
+            if category in categories:
+                db_logger.info(f"[MIGRATE] Creazione tabella temporanea {temp_table_name}")
+                
+                # Ottieni i campi dalla tabella esistente
+                existing_columns = db_manager.execute_with_retry(f"DESCRIBE {table_name}", fetch=True)
+                
+                main_fields = []
+                for column in existing_columns:
+                    column_name = column[0]
+                    column_type = column[1]
+                    
+                    # Salta i campi di sistema
+                    if column_name not in ['cig', 'created_at', 'source_file', 'batch_id']:
+                        main_fields.append(f"{column_name} {column_type}")
+                
+                # Crea la tabella temporanea con la nuova struttura
+                create_temp_table_sql = f"""
+                CREATE TABLE {temp_table_name} (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    cig VARCHAR(64) NOT NULL,
+                    {', '.join(main_fields)},
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source_file VARCHAR(255),
+                    batch_id VARCHAR(64),
+                    INDEX idx_cig (cig),
+                    INDEX idx_created_at (created_at),
+                    INDEX idx_source_file (source_file),
+                    INDEX idx_batch_id (batch_id),
+                    INDEX idx_cig_source (cig, source_file),
+                    INDEX idx_cig_batch (cig, batch_id),
+                    INDEX idx_cig_source_batch (cig, source_file, batch_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+                """
+                
+                db_manager.execute_with_retry(create_temp_table_sql)
+                
+                # Copia i dati dalla tabella vecchia alla nuova (rimuovendo duplicati)
+                field_list = ', '.join([col[0] for col in existing_columns if col[0] != 'id'])
+                
+                db_logger.info(f"[MIGRATE] Copia dati da {table_name} a {temp_table_name} (rimuovendo duplicati)")
+                copy_data_sql = f"""
+                INSERT INTO {temp_table_name} ({field_list})
+                SELECT {field_list}
+                FROM {table_name}
+                GROUP BY cig, source_file, batch_id
+                """
+                
+                db_manager.execute_with_retry(copy_data_sql)
+                
+                # Rinomina le tabelle
+                db_logger.info(f"[MIGRATE] Sostituisco {table_name} con la nuova struttura")
+                db_manager.execute_with_retry(f"DROP TABLE {table_name}")
+                db_manager.execute_with_retry(f"RENAME TABLE {temp_table_name} TO {table_name}")
+                
+                db_logger.info(f"[SUCCESS] Migrazione completata per {table_name}")
+            
+    except Exception as e:
+        db_logger.error(f"[ERROR] Errore durante aggiornamento struttura {table_name}: {e}")
+        # In caso di errore, elimina la tabella temporanea se esiste
+        try:
+            db_manager.execute_with_retry(f"DROP TABLE IF EXISTS {table_name}_temp")
+        except:
+            pass
+
+def create_metadata_tables_robust(db_manager, category_table_definitions):
+    """Versione robusta per creare tabelle metadati ottimizzate."""
+    with LogContext(db_logger, "creazione tabelle metadati ottimizzate robuste"):
+        
+        # Crea tabella per tracciare i file processati (invariata)
+        create_processed_files = """
+        CREATE TABLE IF NOT EXISTS processed_files (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            file_name VARCHAR(255) UNIQUE,
+            category VARCHAR(100),
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            record_count INT,
+            status ENUM('completed', 'failed') DEFAULT 'completed',
+            error_message TEXT,
+            INDEX idx_file_name (file_name),
+            INDEX idx_category (category),
+            INDEX idx_status (status),
+            INDEX idx_processed_at (processed_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        db_manager.execute_with_retry(create_processed_files)
+        db_logger.info("[CREATE] Tabella processed_files ottimizzata creata")
+        
+        # Crea tabella per mapping campi per categoria
+        create_category_field_mapping = """
+        CREATE TABLE IF NOT EXISTS category_field_mapping (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            category VARCHAR(100),
+            original_name VARCHAR(255),
+            sanitized_name VARCHAR(64),
+            field_type VARCHAR(50),
+            table_name VARCHAR(100),
+            INDEX idx_category (category),
+            INDEX idx_original_name (original_name),
+            INDEX idx_sanitized_name (sanitized_name),
+            INDEX idx_table_name (table_name),
+            UNIQUE KEY unique_category_field (category, original_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
+        """
+        db_manager.execute_with_retry(create_category_field_mapping)
+        db_logger.info("[CREATE] Tabella category_field_mapping creata")
+        
+        # Inserisci il mapping per categoria
+        mapping_records = 0
+        for category, table_definitions in category_table_definitions.items():
+            table_name = f"{category}_data"
+            field_mapping, column_types = prepare_field_mappings(table_definitions)
+            
+            for field, def_type in table_definitions.items():
+                insert_mapping_sql = """
+                    INSERT INTO category_field_mapping (category, original_name, sanitized_name, field_type, table_name)
+                    VALUES (%s, %s, %s, %s, %s) AS new_mapping
+                    ON DUPLICATE KEY UPDATE
+                        sanitized_name = new_mapping.sanitized_name,
+                        field_type = new_mapping.field_type,
+                        table_name = new_mapping.table_name
+                """
+                
+                db_manager.execute_with_retry(insert_mapping_sql, params=(category, field, field_mapping[field], column_types[field], table_name))
+                mapping_records += 1
+        
+        db_logger.info(f"[INSERT] Mapping campi per categoria inserito: {mapping_records} record")
+        db_logger.info("[COMPLETE] Tabelle metadati ottimizzate create")
 
 if __name__ == "__main__":
     main()
