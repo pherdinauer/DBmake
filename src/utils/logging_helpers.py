@@ -72,22 +72,39 @@ def log_error_with_context(logger_instance: logging.Logger, error: Exception, co
     logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
 
 
-def log_resource_optimization(logger_instance: logging.Logger) -> None:
+def log_resource_optimization(logger_instance: logging.Logger, 
+                               cpu_cores: int = None, 
+                               num_threads: int = None, 
+                               total_memory_gb: float = None, 
+                               usable_memory_gb: float = None, 
+                               memory_buffer_ratio: float = None, 
+                               num_workers: int = None, 
+                               batch_size: int = None, 
+                               max_chunk_size: int = None,
+                               current_insert_batch: int = None) -> None:
     """Helper per logging configurazione risorse ottimizzate."""
-    from ..import_json_mysql import (
-        CPU_CORES, NUM_THREADS, TOTAL_MEMORY_GB, USABLE_MEMORY_GB, 
-        MEMORY_BUFFER_RATIO, NUM_WORKERS, BATCH_SIZE, MAX_CHUNK_SIZE,
-        calculate_dynamic_insert_batch_size
-    )
+    
+    # Usa psutil per ottenere i valori se non forniti
+    if cpu_cores is None:
+        import multiprocessing
+        cpu_cores = multiprocessing.cpu_count()
+    
+    if total_memory_gb is None:
+        memory_info = psutil.virtual_memory()
+        total_memory_gb = memory_info.total / (1024**3)
+    
+    if usable_memory_gb is None:
+        memory_info = psutil.virtual_memory()
+        buffer_ratio = memory_buffer_ratio or 0.2
+        usable_memory_gb = (memory_info.total * (1 - buffer_ratio)) / (1024**3)
     
     logger_instance.info("[CONFIG] Configurazione risorse DINAMICHE ottimizzate:")
-    logger_instance.info(f"   [CPU] CPU: {CPU_CORES} core -> {NUM_THREADS} thread attivi ({(NUM_THREADS/CPU_CORES*100):.0f}% utilizzo)")
-    logger_instance.info(f"   [RAM] RAM totale: {TOTAL_MEMORY_GB:.1f}GB")
-    logger_instance.info(f"   [RAM] RAM usabile: {USABLE_MEMORY_GB:.1f}GB (buffer {MEMORY_BUFFER_RATIO*100:.0f}%)")
-    logger_instance.info(f"   [PROC] Worker process: {NUM_WORKERS} (MONO-PROCESSO + thread aggressivi)")
-    logger_instance.info(f"   [BATCH] Batch size principale: {BATCH_SIZE:,}")
+    logger_instance.info(f"   [CPU] CPU: {cpu_cores} core -> {num_threads or 'N/A'} thread attivi")
+    logger_instance.info(f"   [RAM] RAM totale: {total_memory_gb:.1f}GB")
+    logger_instance.info(f"   [RAM] RAM usabile: {usable_memory_gb:.1f}GB")
+    logger_instance.info(f"   [PROC] Worker process: {num_workers or 'N/A'}")
+    logger_instance.info(f"   [BATCH] Batch size principale: {batch_size or 'N/A':,}")
     
-    current_insert_batch = calculate_dynamic_insert_batch_size()
     current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch:,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   [CHUNK] Chunk size max: {MAX_CHUNK_SIZE:,}") 
+    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch or 'N/A':,} (RAM disponibile: {current_ram:.1f}GB)")
+    logger_instance.info(f"   [CHUNK] Chunk size max: {max_chunk_size or 'N/A':,}") 

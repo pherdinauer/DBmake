@@ -1757,6 +1757,22 @@ def import_all_json_files(base_path, conn):
         # Inizializza il pool di connessioni centralizzato
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
         
+        # Importa la funzione aggiornata da utils e passa i parametri
+        from src.utils import log_resource_optimization
+        current_insert_batch = calculate_dynamic_insert_batch_size()
+        log_resource_optimization(
+            import_logger,
+            cpu_cores=CPU_CORES,
+            num_threads=NUM_THREADS, 
+            total_memory_gb=TOTAL_MEMORY_GB,
+            usable_memory_gb=USABLE_MEMORY_GB,
+            memory_buffer_ratio=MEMORY_BUFFER_RATIO,
+            num_workers=NUM_WORKERS,
+            batch_size=BATCH_SIZE,
+            max_chunk_size=MAX_CHUNK_SIZE,
+            current_insert_batch=current_insert_batch
+        )
+        
         log_resource_optimization(import_logger)
         
         # Processa categoria per categoria con schema specifico
