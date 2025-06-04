@@ -269,9 +269,9 @@ class DatabaseManager:
             db_logger.info("[CLOSE] Pool MySQL chiuso")
     
     def _create_single_connection(self) -> Any:
-        """Crea una singola connessione con retry."""
+        """Crea una singola connessione con retry semplificato."""
         max_retries = 3
-        retry_delay = 5
+        retry_delay = 2
         
         for attempt in range(max_retries):
             conn = None
@@ -279,139 +279,93 @@ class DatabaseManager:
             try:
                 db_logger.info(f"[CONNECT] Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
                 
-                # Assicura che il database esista
-                self._ensure_database_exists()
-                
+                # Crea connessione senza chiamate aggiuntive
                 conn = mysql.connector.connect(**self.config)
                 
-                # Configura parametri MySQL per performance
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("SET SESSION max_allowed_packet=1073741824")  # 1GB - usa SESSION invece di GLOBAL
-                    cursor.execute("SET SESSION net_write_timeout=600")  # 10 minuti
-                    cursor.execute("SET SESSION net_read_timeout=600")   # 10 minuti
-                    cursor.execute("SET SESSION wait_timeout=600")       # 10 minuti
-                    cursor.execute("SET SESSION interactive_timeout=600") # 10 minuti
-                except mysql.connector.Error as config_error:
-                    # Se non riusciamo a configurare, logga ma continua
-                    db_logger.warning(f"[WARN] Configurazione sessione MySQL fallita: {config_error}")
-                finally:
-                    if cursor:
-                        cursor.close()
+                # Test IMMEDIATO con query invece di is_connected()
+                db_logger.info("[CONNECT] Test immediato connessione con query...")
+                test_cursor = conn.cursor()
+                test_cursor.execute("SELECT 1")
+                test_result = test_cursor.fetchone()
+                test_cursor.close()
                 
-                db_logger.info("[OK] Connessione MySQL stabilita")
-                return conn
+                if test_result and test_result[0] == 1:
+                    db_logger.info("[OK] Connessione MySQL stabilita e validata con query")
+                    return conn
+                else:
+                    db_logger.warning(f"[WARN] Test query fallito (tentativo {attempt + 1})")
+                    if conn:
+                        conn.close()
+                    continue
                 
             except mysql.connector.Error as e:
                 actual_error_type_name = type(e).__name__
                 errno = getattr(e, 'errno', 'N/A')
-                sqlstate = getattr(e, 'sqlstate', 'N/A')
-                db_logger.info(f"DEBUG _create_single_connection: Caught mysql.connector.Error. Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}")
-
-                is_interface_error = (
-                    actual_error_type_name == 'MySQLInterfaceError' or
-                    actual_error_type_name == 'InterfaceError' or
-                    isinstance(e, mysql.connector.errors.InterfaceError)
-                )
-
-                if is_interface_error:
-                    error_msg_content = f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). Operation failed."
-                else:
-                    if e.args and len(e.args) > 0 and isinstance(e.args[0], str):
-                        error_msg_content = e.args[0]
-                    elif e.args and len(e.args) > 1 and isinstance(e.args[1], str):
-                        error_msg_content = e.args[1]
-                    else:
-                        try:
-                            error_msg_content = str(e)
-                        except Exception as str_conv_ex:
-                            error_msg_content = f"Failed to convert MySQL error to string: {str_conv_ex}"
                 
-                error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {error_msg_content}"
-
-                if "object has no attribute 'msg'" in error_msg: # Final safeguard
-                    error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): Problematic error string detected and suppressed."
+                try:
+                    error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}): {str(e)}"
+                except Exception:
+                    error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}): Unable to convert to string"
 
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
-                    retry_delay *= 2
                 else:
                     db_logger.error(f"[ERROR] Connessione fallita dopo {max_retries} tentativi: {error_msg}")
                     raise
-            except Exception as e: # Generic catch-all for _create_single_connection
-                actual_error_type_name = type(e).__name__
-                db_logger.info(f"DEBUG _create_single_connection: Caught generic Exception. Type: {actual_error_type_name}")
-                is_interface_error_generic = (
-                    actual_error_type_name == 'MySQLInterfaceError' or
-                    actual_error_type_name == 'InterfaceError' or
-                    isinstance(e, mysql.connector.errors.InterfaceError)
-                )
-
-                if is_interface_error_generic:
-                    errno = getattr(e, 'errno', 'N/A')
-                    sqlstate = getattr(e, 'sqlstate', 'N/A')
-                    error_msg = f"MySQL Interface Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): An Interface Error occurred. Details suppressed."
-                elif isinstance(e, mysql.connector.Error):
-                    errno = getattr(e, 'errno', 'N/A')
-                    sqlstate = getattr(e, 'sqlstate', 'N/A')
-                    error_msg = f"Other MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {str(e)}"
-                else:
-                    error_msg = f"Errore generico: {str(e)}"
-                
-                if "object has no attribute 'msg'" in error_msg: # Final safeguard
-                    error_msg = f"Generic Exception (Type: {actual_error_type_name}): Problematic error string detected and suppressed."
-
-                if attempt < max_retries - 1:
-                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
-                else:
-                    db_logger.error(f"[ERROR] Errore imprevisto durante la connessione: {error_msg}")
-                    raise
-            finally:
-                # Pulisci in caso di errore
-                if cursor:
-                    try:
-                        cursor.close()
-                    except:
-                        pass
-                if conn and attempt < max_retries - 1:  # Solo se non è l'ultima iterazione
+                    
+                # Pulizia in caso di errore
+                if conn:
                     try:
                         conn.close()
                     except:
                         pass
+                        
+            except Exception as e:
+                actual_error_type_name = type(e).__name__
+                
+                try:
+                    error_msg = f"Errore generico: {str(e)}"
+                except Exception:
+                    error_msg = f"Errore generico (Type: {actual_error_type_name}): Unable to convert to string"
+                
+                if attempt < max_retries - 1:
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
+                    time.sleep(retry_delay)
+                else:
+                    db_logger.error(f"[ERROR] Errore imprevisto dopo {max_retries} tentativi: {error_msg}")
+                    raise
+                    
+                # Pulizia in caso di errore
+                if conn:
+                    try:
+                        conn.close()
+                    except:
+                        pass
+        
+        # Se arriviamo qui, tutti i tentativi sono falliti
+        raise mysql.connector.Error("Impossibile creare una connessione MySQL valida dopo tutti i tentativi")
     
     def _test_connection(self) -> bool:
-        """Testa se la connessione è ancora valida."""
+        """Testa se la connessione è ancora valida usando solo query diretta."""
         if not self.connection:
             db_logger.info("[TEST_CONNECTION] Connessione non presente")
             return False
         
         try:
-            # Test più robusto della connessione
-            if hasattr(self.connection, 'is_connected'):
-                is_conn_status = self.connection.is_connected()
-                db_logger.info(f"[TEST_CONNECTION] is_connected() = {is_conn_status}")
-                if not is_conn_status:
-                    return False
+            # NOTA: Saltiamo is_connected() perché sembra inaffidabile in questo contesto
+            # Utilizziamo solo il test diretto con query
             
             # Test con query semplice
-            db_logger.info("[TEST_CONNECTION] Creazione cursor per test...")
+            db_logger.info("[TEST_CONNECTION] Test diretto con SELECT 1...")
             cursor = self.connection.cursor()
-            
-            db_logger.info("[TEST_CONNECTION] Esecuzione SELECT 1...")
             cursor.execute("SELECT 1")
-            
-            db_logger.info("[TEST_CONNECTION] Fetch del risultato...")
             result = cursor.fetchone()
-            
-            db_logger.info(f"[TEST_CONNECTION] Risultato query: {result}")
             cursor.close()
             
             # Verifica che il risultato sia corretto
             is_valid = result is not None and result[0] == 1
-            db_logger.info(f"[TEST_CONNECTION] Test completato: {is_valid}")
+            db_logger.info(f"[TEST_CONNECTION] Test completato: {is_valid}, risultato: {result}")
             return is_valid
             
         except Exception as e:
@@ -456,7 +410,7 @@ class DatabaseManager:
         return False
     
     def __enter__(self) -> Any:
-        """Context manager entry con riconnessione automatica e test robusto."""
+        """Context manager entry semplificato e robusto."""
         try:
             if self.use_pool:
                 if not self._pool:
@@ -467,29 +421,10 @@ class DatabaseManager:
                 self.connection = self._create_single_connection()
                 db_logger.info("[ENTER] Connessione diretta stabilita")
                 
-            # Test della connessione con retry integrato
-            max_test_attempts = 3
-            for test_attempt in range(max_test_attempts):
-                if self._test_connection():
-                    db_logger.debug(f"[ENTER] Test connessione riuscito (tentativo {test_attempt + 1})")
-                    return self.connection
-                else:
-                    db_logger.warning(f"[ENTER] Test connessione fallito (tentativo {test_attempt + 1}/{max_test_attempts})")
-                    
-                    if test_attempt < max_test_attempts - 1:
-                        # Riprova a creare la connessione
-                        try:
-                            if self.connection:
-                                self.connection.close()
-                        except:
-                            pass
-                        
-                        time.sleep(1)  # Pausa breve
-                        self.connection = self._create_single_connection()
-                        db_logger.info(f"[ENTER] Ricreo connessione per test (tentativo {test_attempt + 2})")
-            
-            # Se tutti i test falliscono, solleva un'eccezione più specifica
-            raise mysql.connector.Error("Impossibile stabilire una connessione MySQL valida dopo multipli tentativi")
+            # Il test della connessione è già incluso in _create_single_connection
+            # Non serve rifarlo qui
+            db_logger.info("[ENTER] Connessione validata e pronta per l'uso")
+            return self.connection
                 
         except Exception as e:
             # Log dettagliato dell'errore
