@@ -146,21 +146,12 @@ class DatabaseManager:
                 return  # Successo, esci dalla funzione
                 
             except mysql.connector.Error as e:
-                final_err_text = ""
-                if e.args and len(e.args) > 0:
-                    if isinstance(e.args[0], str):
-                        final_err_text = e.args[0]
-                    elif len(e.args) > 1 and isinstance(e.args[1], str):
-                        final_err_text = e.args[1]
-                    else:
-                        final_err_text = f"Details from args: {', '.join(map(str, e.args))}"
+                if isinstance(e, mysql.connector.errors.InterfaceError):
+                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
                 else:
-                    final_err_text = f"No specific message in args. Exception type: {type(e).__name__}."
-
-                if "'MySQLInterfaceError' object has no attribute 'msg'" in final_err_text:
-                    final_err_text = f"Error message retrieval issue. Type: {type(e).__name__}, errno: {getattr(e, 'errno', 'N/A')}."
+                    err_msg_text = str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
                 
-                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {final_err_text}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
@@ -168,23 +159,14 @@ class DatabaseManager:
                     db_logger.error(f"[ERROR] Errore durante la creazione del database: {error_msg}")
                     raise
             except Exception as e:
-                if isinstance(e, mysql.connector.Error):
-                    final_err_text = ""
-                    if e.args and len(e.args) > 0:
-                        if isinstance(e.args[0], str):
-                            final_err_text = e.args[0]
-                        elif len(e.args) > 1 and isinstance(e.args[1], str):
-                            final_err_text = e.args[1]
-                        else:
-                            final_err_text = f"Details from args: {', '.join(map(str, e.args))}"
-                    else:
-                        final_err_text = f"No specific message in args. Exception type: {type(e).__name__}."
-                        
-                    if "'MySQLInterfaceError' object has no attribute 'msg'" in final_err_text:
-                         final_err_text = f"Error message retrieval issue. Type: {type(e).__name__}, errno: {getattr(e, 'errno', 'N/A')}."
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {final_err_text}"
-                else:
+                if isinstance(e, mysql.connector.errors.InterfaceError):
+                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
+                elif isinstance(e, mysql.connector.Error): # Other MySQL errors
+                    err_msg_text = str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
+                else: # Generic non-MySQL errors
                     error_msg = f"Errore generico: {str(e)}"
+                
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
@@ -255,21 +237,12 @@ class DatabaseManager:
                 return conn
                 
             except mysql.connector.Error as e:
-                final_err_text = ""
-                if e.args and len(e.args) > 0:
-                    if isinstance(e.args[0], str):
-                        final_err_text = e.args[0]
-                    elif len(e.args) > 1 and isinstance(e.args[1], str):
-                        final_err_text = e.args[1]
-                    else:
-                        final_err_text = f"Details from args: {', '.join(map(str, e.args))}"
+                if isinstance(e, mysql.connector.errors.InterfaceError):
+                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
                 else:
-                    final_err_text = f"No specific message in args. Exception type: {type(e).__name__}."
-
-                if "'MySQLInterfaceError' object has no attribute 'msg'" in final_err_text:
-                    final_err_text = f"Error message retrieval issue. Type: {type(e).__name__}, errno: {getattr(e, 'errno', 'N/A')}."
+                    err_msg_text = str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
                 
-                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {final_err_text}"
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
@@ -278,23 +251,14 @@ class DatabaseManager:
                     db_logger.error(f"[ERROR] Connessione fallita dopo {max_retries} tentativi: {error_msg}")
                     raise
             except Exception as e:
-                if isinstance(e, mysql.connector.Error):
-                    final_err_text = ""
-                    if e.args and len(e.args) > 0:
-                        if isinstance(e.args[0], str):
-                            final_err_text = e.args[0]
-                        elif len(e.args) > 1 and isinstance(e.args[1], str):
-                            final_err_text = e.args[1]
-                        else:
-                            final_err_text = f"Details from args: {', '.join(map(str, e.args))}"
-                    else:
-                        final_err_text = f"No specific message in args. Exception type: {type(e).__name__}."
-                        
-                    if "'MySQLInterfaceError' object has no attribute 'msg'" in final_err_text:
-                         final_err_text = f"Error message retrieval issue. Type: {type(e).__name__}, errno: {getattr(e, 'errno', 'N/A')}."
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {final_err_text}"
-                else:
+                if isinstance(e, mysql.connector.errors.InterfaceError):
+                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
+                elif isinstance(e, mysql.connector.Error): # Other MySQL errors
+                    err_msg_text = str(e)
+                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
+                else: # Generic non-MySQL errors
                     error_msg = f"Errore generico: {str(e)}"
+                
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
