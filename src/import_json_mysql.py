@@ -37,7 +37,6 @@ except ImportError:
         log_file_progress, log_batch_progress, log_error_with_context,
         log_resource_optimization, check_disk_space
     )
-    from .temp_additions import RecordProcessor, process_batch_parallel
 
 # Crea la directory dei log se non esiste prima della configurazione logging
 logs_dir = Path('logs')
