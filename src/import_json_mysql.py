@@ -2158,7 +2158,20 @@ def main():
         DatabaseManager.close_pool()
         logger.info("Tutte le connessioni chiuse.")
     except Exception as e:
-        log_error_with_context(logger, e, "main", "importazione MySQL")
+        actual_error_type_name = type(e).__name__
+        is_interface_error = (
+            actual_error_type_name == 'MySQLInterfaceError' or
+            actual_error_type_name == 'InterfaceError' or
+            hasattr(e, '__module__') and e.__module__.startswith('mysql.connector') and 'InterfaceError' in actual_error_type_name
+        )
+        logger.info(f"DEBUG main(): Caught exception. Type: '{actual_error_type_name}', Detected as InterfaceError: {is_interface_error}")
+        if is_interface_error:
+            errno = getattr(e, 'errno', 'N/A')
+            sqlstate = getattr(e, 'sqlstate', 'N/A')
+            safe_error_message = f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). Operation failed. Original message suppressed."
+            logger.error(f"[ERROR] [main] Errore durante importazione MySQL: {safe_error_message}")
+        else:
+            logger.error(f"[ERROR] [main] Errore durante importazione MySQL: {e}")
         raise
 
 def create_category_tables(cursor, table_definitions, field_mapping, column_types, categories):
