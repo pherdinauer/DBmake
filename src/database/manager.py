@@ -167,27 +167,64 @@ class DatabaseManager:
                 return  # Successo, esci dalla funzione
                 
             except mysql.connector.Error as e:
-                if isinstance(e, mysql.connector.errors.InterfaceError):
-                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
+                actual_error_type_name = type(e).__name__
+                errno = getattr(e, 'errno', 'N/A')
+                sqlstate = getattr(e, 'sqlstate', 'N/A')
+                db_logger.info(f"DEBUG _ensure_database_exists: Caught mysql.connector.Error. Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}")
+
+                is_interface_error = (
+                    actual_error_type_name == 'MySQLInterfaceError' or
+                    actual_error_type_name == 'InterfaceError' or
+                    isinstance(e, mysql.connector.errors.InterfaceError)
+                )
+
+                if is_interface_error:
+                    error_msg_content = f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). Operation failed."
                 else:
-                    err_msg_text = str(e)
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
+                    if e.args and len(e.args) > 0 and isinstance(e.args[0], str):
+                        error_msg_content = e.args[0]
+                    elif e.args and len(e.args) > 1 and isinstance(e.args[1], str):
+                        error_msg_content = e.args[1]
+                    else:
+                        try:
+                            error_msg_content = str(e)
+                        except Exception as str_conv_ex:
+                            error_msg_content = f"Failed to convert MySQL error to string: {str_conv_ex}"
                 
+                error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {error_msg_content}"
+
+                if "object has no attribute 'msg'" in error_msg: # Final safeguard
+                    error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): Problematic error string detected and suppressed."
+
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
                 else:
                     db_logger.error(f"[ERROR] Errore durante la creazione del database: {error_msg}")
                     raise
-            except Exception as e:
-                if isinstance(e, mysql.connector.errors.InterfaceError):
-                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
-                elif isinstance(e, mysql.connector.Error): # Other MySQL errors
-                    err_msg_text = str(e)
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
-                else: # Generic non-MySQL errors
+            except Exception as e: # Generic catch-all for _ensure_database_exists
+                actual_error_type_name = type(e).__name__
+                db_logger.info(f"DEBUG _ensure_database_exists: Caught generic Exception. Type: {actual_error_type_name}")
+                is_interface_error_generic = (
+                    actual_error_type_name == 'MySQLInterfaceError' or
+                    actual_error_type_name == 'InterfaceError' or
+                    isinstance(e, mysql.connector.errors.InterfaceError)
+                )
+
+                if is_interface_error_generic:
+                    errno = getattr(e, 'errno', 'N/A')
+                    sqlstate = getattr(e, 'sqlstate', 'N/A')
+                    error_msg = f"MySQL Interface Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): An Interface Error occurred. Details suppressed."
+                elif isinstance(e, mysql.connector.Error):
+                    errno = getattr(e, 'errno', 'N/A')
+                    sqlstate = getattr(e, 'sqlstate', 'N/A')
+                    error_msg = f"Other MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {str(e)}"
+                else:
                     error_msg = f"Errore generico: {str(e)}"
-                
+
+                if "object has no attribute 'msg'" in error_msg: # Final safeguard
+                    error_msg = f"Generic Exception (Type: {actual_error_type_name}): Problematic error string detected and suppressed."
+
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
@@ -258,12 +295,35 @@ class DatabaseManager:
                 return conn
                 
             except mysql.connector.Error as e:
-                if isinstance(e, mysql.connector.errors.InterfaceError):
-                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
+                actual_error_type_name = type(e).__name__
+                errno = getattr(e, 'errno', 'N/A')
+                sqlstate = getattr(e, 'sqlstate', 'N/A')
+                db_logger.info(f"DEBUG _create_single_connection: Caught mysql.connector.Error. Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}")
+
+                is_interface_error = (
+                    actual_error_type_name == 'MySQLInterfaceError' or
+                    actual_error_type_name == 'InterfaceError' or
+                    isinstance(e, mysql.connector.errors.InterfaceError)
+                )
+
+                if is_interface_error:
+                    error_msg_content = f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). Operation failed."
                 else:
-                    err_msg_text = str(e)
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
+                    if e.args and len(e.args) > 0 and isinstance(e.args[0], str):
+                        error_msg_content = e.args[0]
+                    elif e.args and len(e.args) > 1 and isinstance(e.args[1], str):
+                        error_msg_content = e.args[1]
+                    else:
+                        try:
+                            error_msg_content = str(e)
+                        except Exception as str_conv_ex:
+                            error_msg_content = f"Failed to convert MySQL error to string: {str_conv_ex}"
                 
+                error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {error_msg_content}"
+
+                if "object has no attribute 'msg'" in error_msg: # Final safeguard
+                    error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): Problematic error string detected and suppressed."
+
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
@@ -271,15 +331,29 @@ class DatabaseManager:
                 else:
                     db_logger.error(f"[ERROR] Connessione fallita dopo {max_retries} tentativi: {error_msg}")
                     raise
-            except Exception as e:
-                if isinstance(e, mysql.connector.errors.InterfaceError):
-                    error_msg = f"MySQL InterfaceError (errno: {getattr(e, 'errno', 'N/A')}). Details suppressed to avoid string conversion issues."
-                elif isinstance(e, mysql.connector.Error): # Other MySQL errors
-                    err_msg_text = str(e)
-                    error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {err_msg_text}"
-                else: # Generic non-MySQL errors
+            except Exception as e: # Generic catch-all for _create_single_connection
+                actual_error_type_name = type(e).__name__
+                db_logger.info(f"DEBUG _create_single_connection: Caught generic Exception. Type: {actual_error_type_name}")
+                is_interface_error_generic = (
+                    actual_error_type_name == 'MySQLInterfaceError' or
+                    actual_error_type_name == 'InterfaceError' or
+                    isinstance(e, mysql.connector.errors.InterfaceError)
+                )
+
+                if is_interface_error_generic:
+                    errno = getattr(e, 'errno', 'N/A')
+                    sqlstate = getattr(e, 'sqlstate', 'N/A')
+                    error_msg = f"MySQL Interface Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): An Interface Error occurred. Details suppressed."
+                elif isinstance(e, mysql.connector.Error):
+                    errno = getattr(e, 'errno', 'N/A')
+                    sqlstate = getattr(e, 'sqlstate', 'N/A')
+                    error_msg = f"Other MySQL Error (Type: {actual_error_type_name}, Errno: {errno}, SQLSTATE: {sqlstate}): {str(e)}"
+                else:
                     error_msg = f"Errore generico: {str(e)}"
                 
+                if "object has no attribute 'msg'" in error_msg: # Final safeguard
+                    error_msg = f"Generic Exception (Type: {actual_error_type_name}): Problematic error string detected and suppressed."
+
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
