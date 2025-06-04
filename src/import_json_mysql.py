@@ -2076,6 +2076,8 @@ class ProgressTracker:
 def main():
     import sys
     
+    logger.info("[VERSION CHECK] Executing updated src/import_json_mysql.py with InterfaceError handling - Version 2025-06-04-10:50")
+    
     # Modalità test se viene passato il parametro --test
     if len(sys.argv) > 1 and sys.argv[1] == '--test':
         try:
@@ -2164,7 +2166,7 @@ def main():
             actual_error_type_name == 'InterfaceError' or
             hasattr(e, '__module__') and e.__module__.startswith('mysql.connector') and 'InterfaceError' in actual_error_type_name
         )
-        logger.info(f"DEBUG main(): Caught exception. Type: '{actual_error_type_name}', Detected as InterfaceError: {is_interface_error}")
+        logger.info(f"[DEBUG main()] Caught exception in main(). Type: '{actual_error_type_name}', Detected as InterfaceError: {is_interface_error}")
         if is_interface_error:
             errno = getattr(e, 'errno', 'N/A')
             sqlstate = getattr(e, 'sqlstate', 'N/A')
