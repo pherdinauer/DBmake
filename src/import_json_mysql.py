@@ -562,10 +562,12 @@ def proactive_schema_fixes(cursor, table_name):
         logger.debug(f"[PROACTIVE] Errore in fix proattivi per {table_name}: {e}")
         return 0
 
-def insert_batch_direct(cursor, main_data, table_name, fields):
+def insert_batch_direct(db_manager, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL con scrittura progressiva robusta."""
     if not main_data:
         return 0
+    
+    cursor = db_manager.connection.cursor()
     
     # APPLICA FIX PROATTIVI PRIMA DI INIZIARE
     proactive_fixes = proactive_schema_fixes(cursor, table_name)
@@ -616,7 +618,7 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
                     
                     # COMMIT FREQUENTE: ogni N mini-batch
                     if mini_batches_processed % COMMIT_FREQUENCY == 0:
-                        cursor.connection.commit()
+                        db_manager.connection.commit()
                         commit_time = time.time() - last_commit_time
                         last_commit_time = time.time()
                         
@@ -643,7 +645,7 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
             i += MINI_BATCH_SIZE
         
         # COMMIT FINALE per gli ultimi record
-        cursor.connection.commit()
+        db_manager.connection.commit()
         
         total_time = time.time() - insert_start_time
         avg_speed = rows_inserted / total_time if total_time > 0 else 0
@@ -662,19 +664,22 @@ def insert_batch_direct(cursor, main_data, table_name, fields):
     except Exception as e:
         # Commit finale anche in caso di errore per salvare quello che si può
         try:
-            cursor.connection.commit()
+            db_manager.connection.commit()
             logger.info(f"[RECOVERY] Commit di emergenza eseguito: {rows_inserted:,} record salvati")
         except:
             pass
         
         logger.error(f"[ERROR] Errore in SCRITTURA PROGRESSIVA: {e}")
         raise
+    finally:
+        cursor.close()
 
-def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=None, category=None):
+def process_batch(db_manager, batch, table_definitions, batch_id, progress_tracker=None, category=None):
     if not batch:
         return
 
     file_name = batch[0][1]
+    cursor = db_manager.connection.cursor()
     
     # Determina il nome della tabella per questa categoria
     table_name = f"{category}_data" if category else "main_data"
@@ -735,7 +740,7 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
                             batch_logger.info(f"     - {field}: {value} ({type(value).__name__})")
                 
                 # Inserimento diretto in MySQL nella tabella corretta per categoria
-                rows_affected = insert_batch_direct(cursor, main_data, table_name, fields)
+                rows_affected = insert_batch_direct(db_manager, main_data, table_name, fields)
             
             # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
             if json_data:
@@ -780,6 +785,8 @@ def process_batch(cursor, batch, table_definitions, batch_id, progress_tracker=N
         except Exception as e:
             log_error_with_context(batch_logger, e, f"batch {batch_id}", "processing")
             raise
+        finally:
+            cursor.close()
 
 def connect_mysql():
     """
@@ -1768,10 +1775,8 @@ def process_chunk_unified(args, execution_mode="sequential"):
         try:
             # Usa DatabaseManager per ottenere connessione dal pool
             with DatabaseManager.get_pooled_connection() as db_manager:
-                # Fix: Access the connection attribute to get the raw MySQL connection
-                cursor = db_manager.connection.cursor()
                 try:
-                    process_batch(cursor, chunk, table_definitions, batch_id, category=category)
+                    process_batch(db_manager, chunk, table_definitions, batch_id, category=category)
                     db_manager.connection.commit()
                     return  # Successo
                 except Exception as e:
@@ -1786,8 +1791,6 @@ def process_chunk_unified(args, execution_mode="sequential"):
                         retry_delay *= 2  # Backoff exponenziale
                     else:
                         raise
-                finally:
-                    cursor.close()
         except Exception as e:
             if attempt == max_retries - 1:
                 final_error = f"Errore nel processare chunk dopo {max_retries} tentativi: {e}"
