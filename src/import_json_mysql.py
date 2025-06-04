@@ -2074,6 +2074,12 @@ class ProgressTracker:
             }
 
 def main():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+    
+    # Prominent log message to confirm script execution
+    logger.info("🚀🚀🚀 [SCRIPT EXECUTION CONFIRMATION] Running updated src/import_json_mysql.py - Version 2025-06-04-11:00 - Check for InterfaceError handling 🚀🚀🚀")
+    
     import sys
     
     logger.info("[VERSION CHECK] Executing updated src/import_json_mysql.py with InterfaceError handling - Version 2025-06-04-10:50")
