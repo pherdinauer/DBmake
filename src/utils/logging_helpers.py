@@ -103,8 +103,14 @@ def log_resource_optimization(logger_instance: logging.Logger,
     logger_instance.info(f"   [RAM] RAM totale: {total_memory_gb:.1f}GB")
     logger_instance.info(f"   [RAM] RAM usabile: {usable_memory_gb:.1f}GB")
     logger_instance.info(f"   [PROC] Worker process: {num_workers or 'N/A'}")
-    logger_instance.info(f"   [BATCH] Batch size principale: {batch_size or 'N/A':,}")
+    
+    # Fix the formatting issue: apply comma formatting only to numeric values
+    batch_size_str = f"{batch_size:,}" if batch_size is not None else 'N/A'
+    logger_instance.info(f"   [BATCH] Batch size principale: {batch_size_str}")
     
     current_ram = psutil.virtual_memory().available / (1024**3)
-    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch or 'N/A':,} (RAM disponibile: {current_ram:.1f}GB)")
-    logger_instance.info(f"   [CHUNK] Chunk size max: {max_chunk_size or 'N/A':,}") 
+    current_insert_batch_str = f"{current_insert_batch:,}" if current_insert_batch is not None else 'N/A'
+    logger_instance.info(f"   [INSERT] INSERT batch dinamico: {current_insert_batch_str} (RAM disponibile: {current_ram:.1f}GB)")
+    
+    max_chunk_size_str = f"{max_chunk_size:,}" if max_chunk_size is not None else 'N/A'
+    logger_instance.info(f"   [CHUNK] Chunk size max: {max_chunk_size_str}") 
