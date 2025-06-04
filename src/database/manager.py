@@ -26,9 +26,24 @@ def log_error_with_context(logger_instance: logging.Logger, error: Exception, co
     context_str = f"[{context}] " if context else ""
     operation_str = f" durante {operation}" if operation else ""
     
-    # Check for the problematic InterfaceError
-    if isinstance(error, mysql.connector.errors.InterfaceError):
-        safe_error_message = f"A MySQL InterfaceError (errno: {getattr(error, 'errno', 'N/A')}) occurred. Original message suppressed due to formatting issues."
+    actual_error_type_name = type(error).__name__
+    # Robust check for InterfaceError
+    is_interface_error = (
+        actual_error_type_name == 'MySQLInterfaceError' or
+        actual_error_type_name == 'InterfaceError' or
+        isinstance(error, mysql.connector.errors.InterfaceError)
+    )
+
+    # Debug log to see what type is being processed
+    logger_instance.info(f"DEBUG log_error_with_context: Processing error of type '{actual_error_type_name}', detected as InterfaceError: {is_interface_error}")
+
+    if is_interface_error:
+        errno = getattr(error, 'errno', 'N/A')
+        sqlstate = getattr(error, 'sqlstate', 'N/A')
+        safe_error_message = (
+            f"A MySQL Interface Error occurred (type: {actual_error_type_name}, errno: {errno}, sqlstate: {sqlstate}). "
+            f"Operation failed. Original message details suppressed due to formatting issues."
+        )
         logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {safe_error_message}")
     else:
         logger_instance.error(f"[ERROR] {context_str}Errore{operation_str}: {error}")
