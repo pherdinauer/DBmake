@@ -114,7 +114,9 @@ class DatabaseManager:
             'password': MYSQL_PASSWORD,
             'charset': 'utf8mb4',
             'autocommit': True,
-            'ssl_disabled': True
+            'ssl_disabled': True,
+            'connect_timeout': 30,
+            'use_pure': True
         }
         
         # Rimuovi il database dal config per la connessione iniziale
@@ -124,6 +126,8 @@ class DatabaseManager:
         
         max_retries = 3
         for attempt in range(max_retries):
+            temp_conn = None
+            cursor = None
             try:
                 db_logger.info(f"[CHECK] Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
                 
@@ -133,23 +137,42 @@ class DatabaseManager:
                 # Controlla se il database esiste
                 cursor.execute("SHOW DATABASES LIKE %s", (MYSQL_DATABASE,))
                 if not cursor.fetchone():
-                    db_logger.info(f"[OK] Creazione database {MYSQL_DATABASE}...")
-                    cursor.execute(f"CREATE DATABASE {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} creato")
+                    db_logger.info(f"[CREATE] Creazione database {MYSQL_DATABASE}...")
+                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
+                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} creato con successo")
                 else:
                     db_logger.info(f"[OK] Database {MYSQL_DATABASE} già esistente")
                 
-                cursor.close()
-                temp_conn.close()
-                return
+                return  # Successo, esci dalla funzione
                 
             except mysql.connector.Error as e:
+                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {str(e)}"
                 if attempt < max_retries - 1:
-                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {e}")
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(2)
                 else:
-                    log_error_with_context(db_logger, e, "database creation")
+                    db_logger.error(f"[ERROR] Errore durante la creazione del database: {error_msg}")
                     raise
+            except Exception as e:
+                error_msg = f"Errore generico: {str(e)}"
+                if attempt < max_retries - 1:
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
+                    time.sleep(2)
+                else:
+                    db_logger.error(f"[ERROR] Errore imprevisto durante la connessione: {error_msg}")
+                    raise
+            finally:
+                # Pulisci sempre le risorse
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if temp_conn:
+                    try:
+                        temp_conn.close()
+                    except:
+                        pass
     
     @classmethod
     def get_pool_connection(cls) -> Any:
@@ -173,8 +196,10 @@ class DatabaseManager:
         retry_delay = 5
         
         for attempt in range(max_retries):
+            conn = None
+            cursor = None
             try:
-                db_logger.info(f"[RETRY] Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
+                db_logger.info(f"[CONNECT] Connessione MySQL (tentativo {attempt + 1}/{max_retries})")
                 
                 # Assicura che il database esista
                 self._ensure_database_exists()
@@ -183,24 +208,52 @@ class DatabaseManager:
                 
                 # Configura parametri MySQL per performance
                 cursor = conn.cursor()
-                cursor.execute("SET GLOBAL max_allowed_packet=1073741824")  # 1GB
-                cursor.execute("SET GLOBAL net_write_timeout=600")  # 10 minuti
-                cursor.execute("SET GLOBAL net_read_timeout=600")   # 10 minuti
-                cursor.execute("SET GLOBAL wait_timeout=600")       # 10 minuti
-                cursor.execute("SET GLOBAL interactive_timeout=600") # 10 minuti
-                cursor.close()
+                try:
+                    cursor.execute("SET SESSION max_allowed_packet=1073741824")  # 1GB - usa SESSION invece di GLOBAL
+                    cursor.execute("SET SESSION net_write_timeout=600")  # 10 minuti
+                    cursor.execute("SET SESSION net_read_timeout=600")   # 10 minuti
+                    cursor.execute("SET SESSION wait_timeout=600")       # 10 minuti
+                    cursor.execute("SET SESSION interactive_timeout=600") # 10 minuti
+                except mysql.connector.Error as config_error:
+                    # Se non riusciamo a configurare, logga ma continua
+                    db_logger.warning(f"[WARN] Configurazione sessione MySQL fallita: {config_error}")
+                finally:
+                    if cursor:
+                        cursor.close()
                 
                 db_logger.info("[OK] Connessione MySQL stabilita")
                 return conn
                 
             except mysql.connector.Error as e:
+                error_msg = f"MySQL Error {getattr(e, 'errno', 'N/A')}: {str(e)}"
                 if attempt < max_retries - 1:
-                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {e}")
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
-                    log_error_with_context(db_logger, e, "single connection", f"fallito dopo {max_retries} tentativi")
+                    db_logger.error(f"[ERROR] Connessione fallita dopo {max_retries} tentativi: {error_msg}")
                     raise
+            except Exception as e:
+                error_msg = f"Errore generico: {str(e)}"
+                if attempt < max_retries - 1:
+                    db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    db_logger.error(f"[ERROR] Errore imprevisto durante la connessione: {error_msg}")
+                    raise
+            finally:
+                # Pulisci in caso di errore
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+                if conn and attempt < max_retries - 1:  # Solo se non è l'ultima iterazione
+                    try:
+                        conn.close()
+                    except:
+                        pass
     
     def __enter__(self) -> Any:
         """Context manager entry."""
