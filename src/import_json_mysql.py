@@ -2156,11 +2156,21 @@ def analyze_single_category(category, json_files):
     field_lengths = defaultdict(int)
     field_sample_values = defaultdict(list)
     
-    MAX_ROWS_PER_FILE = 2000  # Ridotto per analisi più veloce per categoria
+    # PARAMETRI OTTIMIZZATI PER VELOCITÀ
+    MAX_ROWS_PER_FILE = 50  # DRASTICAMENTE RIDOTTO da 2000 a 50 per velocità
+    MAX_FILES_PER_CATEGORY = 10  # Limita anche il numero di file analizzati
     process = psutil.Process()
     max_memory_bytes = USABLE_MEMORY_BYTES * 0.9
     
-    analysis_logger.info(f"  [ANALISI] Categoria '{category}': inizio analisi di {len(json_files)} file")
+    # Seleziona un sottoinsieme di file se ce ne sono troppi
+    files_to_analyze = json_files
+    if len(json_files) > MAX_FILES_PER_CATEGORY:
+        # Prendi file distribuiti uniformemente attraverso la lista
+        step = len(json_files) // MAX_FILES_PER_CATEGORY
+        files_to_analyze = [json_files[i] for i in range(0, len(json_files), step)][:MAX_FILES_PER_CATEGORY]
+        analysis_logger.info(f"  [SAMPLE] Categoria '{category}': campiono {len(files_to_analyze)} file su {len(json_files)} totali")
+    
+    analysis_logger.info(f"  [ANALISI] Categoria '{category}': inizio analisi VELOCE di {len(files_to_analyze)} file (max {MAX_ROWS_PER_FILE} righe/file)")
     
     # Pattern per identificare i tipi (stesso del sistema principale)
     patterns = {
@@ -2313,18 +2323,18 @@ def analyze_single_category(category, json_files):
         else:
             return 'LONGTEXT'
     
-    # Analizza i file di questa categoria
+    # Analizza i file di questa categoria (VELOCE)
     records_analyzed = 0
     files_analyzed = 0
     
-    for json_file in json_files:
+    for json_file in files_to_analyze:  # Usa il sottoinsieme di file
         files_analyzed += 1
         file_records = 0
         
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    if file_records >= MAX_ROWS_PER_FILE:
+                    if file_records >= MAX_ROWS_PER_FILE:  # LIMITE MOLTO BASSO
                         break
                         
                     try:
@@ -2338,7 +2348,8 @@ def analyze_single_category(category, json_files):
                             value_type = analyze_value_type(value)
                             field_types[field][value_type] += 1
                             
-                            if len(field_sample_values[field]) < 20:  # Campioni ridotti per categoria
+                            # Campioni ancora più ridotti per velocità
+                            if len(field_sample_values[field]) < 10:  # Ridotto da 20 a 10
                                 field_sample_values[field].append(value)
                             
                             if isinstance(value, str):
@@ -2346,8 +2357,8 @@ def analyze_single_category(category, json_files):
                                 if current_length > field_lengths[field]:
                                     field_lengths[field] = current_length
                         
-                        # Controllo memoria ogni 1000 record
-                        if file_records % 1000 == 0:
+                        # Controllo memoria ogni 500 record (era 1000)
+                        if file_records % 500 == 0:
                             current_memory = process.memory_info().rss
                             if current_memory > max_memory_bytes:
                                 break
@@ -2365,7 +2376,7 @@ def analyze_single_category(category, json_files):
         mysql_type = determine_mysql_type(field, type_counts, field_lengths[field], field_sample_values[field])
         table_definitions[field] = mysql_type
     
-    analysis_logger.info(f"  [RESULT] Categoria '{category}': {records_analyzed:,} record analizzati, {len(table_definitions)} campi unici")
+    analysis_logger.info(f"  [RESULT] Categoria '{category}': {records_analyzed:,} record analizzati ({files_analyzed} file), {len(table_definitions)} campi unici")
     
     return table_definitions
 
@@ -2714,6 +2725,23 @@ def clean_problematic_tables(conn, categories):
         conn.rollback()
     finally:
         cursor.close()
+
+# Parametri per analisi schema (configurabili per velocità)
+SCHEMA_ANALYSIS_MODE = os.environ.get('SCHEMA_ANALYSIS_MODE', 'fast')  # 'fast', 'ultra-fast', 'thorough'
+
+# Configurazione analisi basata sulla modalità
+if SCHEMA_ANALYSIS_MODE == 'ultra-fast':
+    SCHEMA_MAX_ROWS_PER_FILE = 20
+    SCHEMA_MAX_FILES_PER_CATEGORY = 5
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 5
+elif SCHEMA_ANALYSIS_MODE == 'fast':
+    SCHEMA_MAX_ROWS_PER_FILE = 50
+    SCHEMA_MAX_FILES_PER_CATEGORY = 10
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 10
+else:  # thorough
+    SCHEMA_MAX_ROWS_PER_FILE = 200
+    SCHEMA_MAX_FILES_PER_CATEGORY = 20
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 20
 
 if __name__ == "__main__":
     main()
