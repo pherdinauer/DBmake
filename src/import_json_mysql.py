@@ -562,13 +562,13 @@ def proactive_schema_fixes(cursor, table_name):
         logger.debug(f"[PROACTIVE] Errore in fix proattivi per {table_name}: {e}")
         return 0
 
-def insert_batch_direct(db_manager, main_data, table_name, fields):
+def insert_batch_direct(db_connection, main_data, table_name, fields):
     """Inserisce i dati direttamente in MySQL con scrittura progressiva robusta."""
     if not main_data:
         return 0
     
-    # Il db_manager passato è già una connessione dal pool, non un oggetto con .connection
-    cursor = db_manager.cursor()
+    # Ora db_connection è direttamente la connessione MySQL
+    cursor = db_connection.cursor()
     
     # APPLICA FIX PROATTIVI PRIMA DI INIZIARE
     proactive_fixes = proactive_schema_fixes(cursor, table_name)
@@ -619,7 +619,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
                     
                     # COMMIT FREQUENTE: ogni N mini-batch
                     if mini_batches_processed % COMMIT_FREQUENCY == 0:
-                        db_manager.commit()
+                        db_connection.commit()
                         commit_time = time.time() - last_commit_time
                         last_commit_time = time.time()
                         
@@ -646,7 +646,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
             i += MINI_BATCH_SIZE
         
         # COMMIT FINALE per gli ultimi record
-        db_manager.commit()
+        db_connection.commit()
         
         total_time = time.time() - insert_start_time
         avg_speed = rows_inserted / total_time if total_time > 0 else 0
@@ -665,7 +665,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
     except Exception as e:
         # Commit finale anche in caso di errore per salvare quello che si può
         try:
-            db_manager.commit()
+            db_connection.commit()
             logger.info(f"[RECOVERY] Commit di emergenza eseguito: {rows_inserted:,} record salvati")
         except:
             pass
@@ -675,13 +675,13 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
     finally:
         cursor.close()
 
-def process_batch(db_manager, batch, table_definitions, batch_id, progress_tracker=None, category=None):
+def process_batch(db_connection, batch, table_definitions, batch_id, progress_tracker=None, category=None):
     if not batch:
         return
 
     file_name = batch[0][1]
-    # Il db_manager passato è già una connessione dal pool, non un oggetto con .connection
-    cursor = db_manager.cursor()
+    # Ora db_connection è direttamente la connessione MySQL
+    cursor = db_connection.cursor()
     
     # Determina il nome della tabella per questa categoria
     table_name = f"{category}_data" if category else "main_data"
@@ -742,7 +742,7 @@ def process_batch(db_manager, batch, table_definitions, batch_id, progress_track
                             batch_logger.info(f"     - {field}: {value} ({type(value).__name__})")
                 
                 # Inserimento diretto in MySQL nella tabella corretta per categoria
-                rows_affected = insert_batch_direct(db_manager, main_data, table_name, fields)
+                rows_affected = insert_batch_direct(db_connection, main_data, table_name, fields)
             
             # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
             if json_data:
@@ -3510,10 +3510,10 @@ def process_chunk_immediately(chunk_data, file_name, batch_id, table_definitions
         else:
             formatted_chunk = chunk_data
         
-        # Usa una connessione dal pool invece della classe DatabaseManager
-        with DatabaseManager.get_pooled_connection() as db_manager:
+        # Usa una connessione dal pool - il context manager restituisce un oggetto con .connection
+        with DatabaseManager.get_pooled_connection() as db_context:
             success = process_batch(
-                db_manager, 
+                db_context.connection, 
                 formatted_chunk, 
                 table_definitions, 
                 batch_id, 
