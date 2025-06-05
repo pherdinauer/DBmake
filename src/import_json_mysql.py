@@ -1898,17 +1898,24 @@ def import_all_json_files(base_path, conn):
                 # ANALISI PRELIMINARE PER DECIDERE IL METODO
                 file_analysis = analyze_file_before_processing(json_file)
                 
-                # SCELTA STRATEGIA INTELLIGENTE
+                # SCELTA STRATEGIA INTELLIGENTE (NUOVO SISTEMA DINAMICO)
                 strategy = choose_optimal_processing_strategy(file_analysis)
                 
                 import_logger.info(f"🎯 [STRATEGY] Strategia selezionata: {strategy['strategy'].upper()}")
-                import_logger.info(f"🎯 [SPEED] Velocità attesa: {strategy['expected_speed']}")
-                import_logger.info(f"🎯 [BATCH] Batch size: {strategy['batch_size']:,} record")
+                import_logger.info(f"🎯 [DESCRIPTION] {strategy['description']}")
+                import_logger.info(f"🎯 [BATCH] Batch iniziale: {strategy['batch_size']:,} record")
+                import_logger.info(f"🎯 [RATIONALE] {strategy['rationale']}")
                 
                 success = False
                 
-                # ESEGUI LA STRATEGIA SCELTA
-                if strategy['strategy'] == 'memory_optimized':
+                # ESEGUI LA STRATEGIA SCELTA (PRIORITÀ AL DYNAMIC STREAMING)
+                if strategy['strategy'] == 'dynamic_streaming':
+                    # NUOVO: Streaming dinamico con adattamento automatico RAM
+                    success = process_file_streaming_with_custom_batch(
+                        json_file, category, current_table_definitions, progress_tracker, strategy
+                    )
+                    
+                elif strategy['strategy'] == 'memory_optimized':
                     # File piccoli: massima velocità con caricamento completo in memoria
                     success = process_file_memory_optimized(
                         json_file, category, current_table_definitions, progress_tracker, strategy
@@ -1921,20 +1928,20 @@ def import_all_json_files(base_path, conn):
                     )
                     
                 elif strategy['strategy'] in ['streaming_optimized', 'streaming_safe']:
-                    # File grandi: streaming sicuro con batch personalizzato
+                    # File grandi: streaming sicuro con batch fisso
                     success = process_file_streaming_with_custom_batch(
                         json_file, category, current_table_definitions, progress_tracker, strategy
                     )
                 
-                # FALLBACK UNIVERSALE in caso di errore
+                # FALLBACK UNIVERSALE in caso di errore (SEMPRE DYNAMIC STREAMING)
                 if not success:
-                    import_logger.warning(f"🔄 [UNIVERSAL-FALLBACK] Strategia {strategy['strategy']} fallita, uso streaming sicuro...")
+                    import_logger.warning(f"🔄 [UNIVERSAL-FALLBACK] Strategia {strategy['strategy']} fallita, uso dynamic streaming sicuro...")
                     
                     safe_strategy = {
-                        'strategy': 'streaming_safe',
-                        'batch_size': 3_000,  # Batch molto piccoli per massima sicurezza
-                        'description': 'Streaming di emergenza con batch minimi',
-                        'expected_speed': 'BASSO'
+                        'strategy': 'dynamic_streaming',
+                        'batch_size': 1_000,  # Batch molto piccoli per massima sicurezza
+                        'description': 'Dynamic streaming di emergenza con batch minimi',
+                        'rationale': 'Fallback universale per errori'
                     }
                     
                     success = process_file_streaming_with_custom_batch(
@@ -3477,93 +3484,90 @@ def process_file_streaming(json_file, category, current_table_definitions, progr
 
 def process_chunk_immediately(chunk_data, file_name, batch_id, table_definitions, category, chunk_num, is_problematic_file):
     """
-    Processa un chunk immediatamente senza accumularlo in memoria.
-    Ottimizzato per file problematici.
+    Processa immediatamente un chunk di dati con gestione memoria e logging migliorati.
+    
+    Args:
+        chunk_data: Lista di record JSON (non tuple)
+        file_name: Nome del file
+        batch_id: ID del batch
+        table_definitions: Definizioni tabelle
+        category: Categoria
+        chunk_num: Numero chunk
+        is_problematic_file: Se il file è considerato problematico
     """
+    import_logger.info(f" [STREAMING] Chunk {chunk_num} ({len(chunk_data):,} record) - categoria '{category}'{' - FILE PROBLEMATICO' if is_problematic_file else ''}")
+    
+    start_time = time.time()
+    success = False
+    
     try:
-        chunk_size = len(chunk_data)
-        
-        if is_problematic_file:
-            batch_logger.info(f"🌊 [STREAMING] Chunk {chunk_num} ({chunk_size:,} record) - categoria '{category}' - FILE PROBLEMATICO")
+        # Converti il formato per process_batch se necessario
+        if chunk_data and not isinstance(chunk_data[0], tuple):
+            # Converti da lista di record a lista di tuple (record, file_name, category)
+            formatted_chunk = [(record, file_name, category) for record in chunk_data]
         else:
-            batch_logger.info(f"🌊 [STREAMING] Chunk {chunk_num} ({chunk_size:,} record) - categoria '{category}'")
+            formatted_chunk = chunk_data
         
-        # Usa il processing standard ma con monitoring memoria
-        memory_before = psutil.virtual_memory()
+        # Processa il batch usando il sistema esistente
+        success = process_batch(
+            DatabaseManager, 
+            formatted_chunk, 
+            table_definitions, 
+            batch_id, 
+            category=category
+        )
         
-        chunk_args = (chunk_data, file_name, batch_id, table_definitions, category)
-        process_chunk_sequential(chunk_args)
+        elapsed_time = time.time() - start_time
         
-        memory_after = psutil.virtual_memory()
-        
-        if is_problematic_file:
-            batch_logger.info(f"✅ [STREAMING] Chunk {chunk_num} completato - RAM: {memory_before.percent:.1f}% → {memory_after.percent:.1f}%")
-        
-        return True
+        if success:
+            import_logger.info(f"[COMPLETE] Completato processing batch in {elapsed_time:.1f}s")
+        else:
+            import_logger.error(f"[FAILED] Batch fallito dopo {elapsed_time:.1f}s")
+            
+        return success
         
     except Exception as e:
-        batch_logger.error(f"🚨 [ERROR] Errore in streaming chunk {chunk_num}: {e}")
+        elapsed_time = time.time() - start_time
+        import_logger.error(f"🚨 [CHUNK-ERROR] Errore processing chunk {chunk_num}: {e} (dopo {elapsed_time:.1f}s)")
         return False
 
 def choose_optimal_processing_strategy(file_analysis):
     """
     Sceglie la strategia di processing ottimale basata sull'analisi del file.
-    Bilancia velocità e sicurezza memoria.
+    
+    Ora preferisce il DYNAMIC STREAMING come strategia principale.
     """
-    if not file_analysis:
-        return "streaming_safe"  # Fallback sicuro
+    file_size_gb = file_analysis.get('file_size_gb', 0)
+    estimated_records = file_analysis.get('estimated_records', 0)
+    memory_risk_ratio = file_analysis.get('memory_risk_ratio', 0)
+    total_ram_gb = file_analysis.get('system_ram_gb', 8)
     
-    file_size_gb = file_analysis['file_size_gb']
-    estimated_records = file_analysis['estimated_records']
-    memory_risk_ratio = file_analysis['memory_risk_ratio']
-    available_memory_gb = file_analysis['available_memory_gb']
-    
-    # STRATEGIA 1: MEMORY_OPTIMIZED (più veloce)
-    # File piccoli che stanno comodamente in memoria
-    if (file_size_gb <= 0.5 and 
-        estimated_records <= 500_000 and 
-        memory_risk_ratio <= 0.3 and 
-        available_memory_gb >= 4.0):
+    # NUOVA STRATEGIA PRINCIPALE: DYNAMIC STREAMING
+    # Usa il dynamic streaming per tutti i file, permette adattamento automatico
+    if file_size_gb <= 4 and estimated_records <= 5000000:  # File ragionevolmente grandi
         return {
-            'strategy': 'memory_optimized',
-            'batch_size': 75_000,
-            'description': 'Caricamento completo in memoria per massima velocità',
-            'expected_speed': 'ALTO'
+            'strategy': 'dynamic_streaming',
+            'batch_size': 10000,  # Batch iniziale, verrà adattato dinamicamente
+            'description': 'Streaming dinamico con adattamento automatico RAM',
+            'rationale': f'File {file_size_gb:.2f}GB - Streaming dinamico ottimale'
         }
     
-    # STRATEGIA 2: BALANCED_BATCHING (bilanciato)  
-    # File medi con batching ottimizzato
-    elif (file_size_gb <= 1.5 and 
-          estimated_records <= 1_500_000 and 
-          memory_risk_ratio <= 0.6 and 
-          available_memory_gb >= 2.0):
-        return {
-            'strategy': 'balanced_batching',
-            'batch_size': 25_000,
-            'description': 'Batching ottimizzato per bilanciare velocità e memoria',
-            'expected_speed': 'MEDIO-ALTO'
-        }
-    
-    # STRATEGIA 3: STREAMING_OPTIMIZED (sicuro ma efficiente)
-    # File grandi con streaming ottimizzato per performance
-    elif (file_size_gb <= 3.0 and 
-          estimated_records <= 3_000_000 and 
-          available_memory_gb >= 1.0):
-        return {
-            'strategy': 'streaming_optimized', 
-            'batch_size': 10_000,
-            'description': 'Streaming con batch ottimizzati per file grandi',
-            'expected_speed': 'MEDIO'
-        }
-    
-    # STRATEGIA 4: STREAMING_SAFE (massima sicurezza)
-    # File molto grandi o sistema con poca memoria
-    else:
+    # FALLBACK per file enormi (>4GB) - usa streaming sicuro fisso
+    elif file_size_gb > 4 or estimated_records > 5000000:
         return {
             'strategy': 'streaming_safe',
-            'batch_size': 5_000,
-            'description': 'Streaming sicuro per file molto grandi o memoria limitata',
-            'expected_speed': 'MEDIO-BASSO'
+            'batch_size': 3000,
+            'description': 'Streaming sicuro per file molto grandi',
+            'rationale': f'File {file_size_gb:.2f}GB ({estimated_records:,} record) - troppo grande per dynamic'
+        }
+    
+    # FALLBACK generico - dynamic streaming con batch conservativo
+    else:
+        return {
+            'strategy': 'dynamic_streaming',
+            'batch_size': 5000,  # Batch iniziale conservativo
+            'description': 'Streaming dinamico conservativo',
+            'rationale': f'Strategia dinamica conservativa per file sconosciuto'
         }
 
 def process_file_memory_optimized(json_file, category, current_table_definitions, progress_tracker, strategy):
@@ -3755,126 +3759,138 @@ def process_file_balanced_batching(json_file, category, current_table_definition
 
 def process_file_streaming_with_custom_batch(json_file, category, current_table_definitions, progress_tracker, strategy):
     """
-    Versione del processo streaming con batch size personalizzato dalla strategia.
+    Process file con streaming e batch size DINAMICO che si adatta alla RAM disponibile.
     """
-    # Modifica temporaneamente i parametri interni dello streaming
-    file_name = Path(json_file).name
+    start_time = time.time()
+    file_name = os.path.basename(json_file)
+    processed_records_in_file = 0
+    chunk_num = 0
     
-    # Verifica se già processato
-    with DatabaseManager.get_pooled_connection() as conn_check:
-        if is_file_processed(conn_check.connection, file_name):
-            import_logger.info(f"✅ [OK] File già processato: {file_name}")
-            progress_tracker.processed_files += 1
-            return True
+    # Impostazioni iniziali
+    initial_batch_size = strategy.get('batch_size', 5000)
+    dynamic_recalc_interval = 10  # Ricalcola ogni 10 chunk
     
-    # Analisi per determinare se è problematico (per logging)
-    file_analysis = analyze_file_before_processing(json_file)
-    if not file_analysis:
-        import_logger.error(f"🚨 [SKIP] Impossibile analizzare {file_name}, lo salto")
-        return False
+    import_logger.info(f"🚀 [DYNAMIC-STREAMING] Avvio processing dinamico: {file_name}")
+    import_logger.info(f"    📊 Strategia base: {strategy['strategy']} (batch iniziale: {initial_batch_size:,})")
+    import_logger.info(f"    🔄 Ricalcolo dinamico ogni {dynamic_recalc_interval} chunk")
     
     try:
-        import_logger.info(f"🎯 [CUSTOM-STREAMING] Processing con strategia: {strategy['strategy']}")
-        import_logger.info(f"🎯 [BATCH-SIZE] Batch personalizzato: {strategy['batch_size']:,} record")
-        start_time = time.time()
+        # Calcola batch dinamico iniziale
+        current_batch_size, ram_info = calculate_dynamic_batch_size()
+        log_dynamic_batch_decision(import_logger, current_batch_size, ram_info)
         
-        # Inizia il tracking del file
-        progress_tracker.start_file(file_name, file_analysis['estimated_records'])
-        
-        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
-        current_chunk = []
-        processed_records_in_file = 0
-        total_chunks_processed = 0
-        custom_batch_size = strategy['batch_size']
-        
-        # STREAMING PROCESSING con batch size personalizzato
+        # Apri il file in streaming
         with open(json_file, 'r', encoding='utf-8') as f:
+            # Leggi riga per riga e accumula i record
+            current_chunk = []
+            
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                    
+                
                 try:
                     record = json.loads(line)
-                    current_chunk.append((record, file_name, category))
-                    processed_records_in_file += 1
+                    current_chunk.append(record)
                     
-                    # PROCESSA IL CHUNK con dimensione personalizzata
-                    if len(current_chunk) >= custom_batch_size:
+                    # Quando raggiungiamo la dimensione del chunk corrente
+                    if len(current_chunk) >= current_batch_size:
+                        chunk_num += 1
+                        
+                        # Log del chunk
+                        is_problematic = len(current_chunk) <= 10000  # Considera problematico se usa batch piccoli
+                        import_logger.info(f" [STREAMING] Chunk {chunk_num} ({len(current_chunk):,} record) - categoria '{category}'{' - BATCH DINAMICO' if not is_problematic else ' - BATCH SICURO'}")
+                        
+                        # Processa il chunk
+                        batch_id = f"{int(time.time())}_{chunk_num}"
                         success = process_chunk_immediately(
-                            current_chunk, 
-                            file_name, 
-                            batch_id, 
-                            current_table_definitions, 
-                            category,
-                            total_chunks_processed + 1,
-                            file_analysis['is_problematic']
+                            current_chunk, file_name, batch_id, 
+                            current_table_definitions, category, chunk_num, is_problematic
                         )
                         
                         if success:
-                            total_chunks_processed += 1
-                            progress_tracker.update_file_progress(processed_records_in_file)
+                            processed_records_in_file += len(current_chunk)
+                            progress_tracker.update_file_progress(len(current_chunk))
+                            
+                            # Log progresso RAM
+                            ram = psutil.virtual_memory()
+                            import_logger.info(f"✅ [STREAMING] Chunk {chunk_num} completato - RAM: {ram.percent:.1f}%")
+                            
+                            # Aggiorna progress ogni chunk
+                            if chunk_num % 5 == 0:  # Ogni 5 chunk
+                                speed = processed_records_in_file / (time.time() - start_time)
+                                remaining_time = (2400000 - processed_records_in_file) / speed if speed > 0 else 0
+                                hours, remainder = divmod(remaining_time, 3600)
+                                minutes, seconds = divmod(remainder, 60)
+                                
+                                import_logger.info(f"[BATCH] Batch: {processed_records_in_file:,}/2,397,441 ({processed_records_in_file/2397441*100:.1f}%) | {speed:.0f} rec/s | RAM: ETA: {int(hours)}:{int(minutes):02d}:{int(seconds):02d}")
+                            
+                            # RICALCOLO DINAMICO ogni N chunk
+                            if chunk_num % dynamic_recalc_interval == 0:
+                                old_batch_size = current_batch_size
+                                current_batch_size, ram_info = calculate_dynamic_batch_size()
+                                
+                                if current_batch_size != old_batch_size:
+                                    import_logger.info(f"🔄 [DYNAMIC] Aggiornamento batch size: {old_batch_size:,} → {current_batch_size:,}")
+                                    log_dynamic_batch_decision(import_logger, current_batch_size, ram_info)
+                                else:
+                                    ram_percent = ram_info.get('used_percent', 0)
+                                    batch_category = ram_info.get('batch_category', 'unknown')
+                                    import_logger.info(f"✓ [DYNAMIC] Batch confermato: {current_batch_size:,} ({batch_category}) - RAM: {ram_percent:.1f}%")
+                        else:
+                            import_logger.error(f"❌ [STREAMING] Chunk {chunk_num} fallito, interrompo processing")
+                            return False
                         
-                        # LIBERA IMMEDIATAMENTE LA MEMORIA
+                        # Reset chunk
                         current_chunk = []
+                        
+                        # Cleanup memoria
                         gc.collect()
                         
-                        # Log memoria per strategia
-                        if strategy['strategy'] in ['streaming_optimized', 'streaming_safe'] and total_chunks_processed % 10 == 0:
-                            memory_info = psutil.virtual_memory()
-                            import_logger.info(f"🎯 [CUSTOM] {strategy['strategy']} - Chunk {total_chunks_processed} - RAM: {memory_info.percent:.1f}%")
-                            
-                            # EMERGENCY BRAKE per tutte le strategie
-                            if memory_info.percent > 92:
-                                import_logger.warning(f"🚨 [EMERGENCY] RAM critica ({memory_info.percent:.1f}%), pausa 3s...")
-                                time.sleep(3)
-                                gc.collect()
-                    
-                    # Controllo memoria ogni 2000 record
-                    if processed_records_in_file % 2000 == 0:
-                        memory_info = psutil.virtual_memory()
-                        if memory_info.percent > 95:
-                            import_logger.error(f"🚨 [ABORT] RAM critica ({memory_info.percent:.1f}%) - interrompo file")
-                            raise MemoryError(f"RAM critica: {memory_info.percent:.1f}%")
-                        
+                        # Controlla memoria critica (emergenza)
+                        ram = psutil.virtual_memory()
+                        if ram.percent > 90:
+                            import_logger.warning(f"⚠️ [EMERGENCY] RAM critica {ram.percent:.1f}% - forzo batch minimo")
+                            current_batch_size = 1000
+                        elif ram.percent > 95:
+                            import_logger.error(f"🚨 [ABORT] RAM troppo alta {ram.percent:.1f}% - interrompo")
+                            return False
+                
                 except json.JSONDecodeError as e:
-                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num} in {file_name}: {e}")
+                    import_logger.warning(f"⚠️ [JSON] Riga {line_num} malformata in {file_name}: {e}")
                     continue
-                except Exception as e:
-                    import_logger.error(f"🚨 [ERROR] Errore inaspettato riga {line_num} in {file_name}: {e}")
-                    continue
+            
+            # Processa ultimo chunk se presente
+            if current_chunk:
+                chunk_num += 1
+                import_logger.info(f" [STREAMING] Chunk finale {chunk_num} ({len(current_chunk):,} record) - categoria '{category}'")
+                
+                batch_id = f"{int(time.time())}_{chunk_num}"
+                success = process_chunk_immediately(
+                    current_chunk, file_name, batch_id, 
+                    current_table_definitions, category, chunk_num, True
+                )
+                
+                if success:
+                    processed_records_in_file += len(current_chunk)
+                    progress_tracker.update_file_progress(len(current_chunk))
         
-        # Processa l'ultimo chunk parziale
-        if current_chunk:
-            success = process_chunk_immediately(
-                current_chunk, 
-                file_name, 
-                batch_id, 
-                current_table_definitions, 
-                category,
-                total_chunks_processed + 1,
-                file_analysis['is_problematic']
-            )
-            if success:
-                total_chunks_processed += 1
-            current_chunk = []
-        
-        # Finalizzazione
+        # Statistiche finali
         total_time = time.time() - start_time
-        speed = processed_records_in_file / total_time if total_time > 0 else 0
+        avg_speed = processed_records_in_file / total_time if total_time > 0 else 0
         
+        import_logger.info(f"🎉 [DYNAMIC-COMPLETE] File {file_name} completato!")
+        import_logger.info(f"    📊 Record processati: {processed_records_in_file:,}")
+        import_logger.info(f"    ⏱️ Tempo totale: {total_time:.1f}s")
+        import_logger.info(f"    ⚡ Velocità media: {avg_speed:.0f} rec/s")
+        import_logger.info(f"    🔢 Chunk totali: {chunk_num}")
+        
+        # Marca come completato
         with DatabaseManager.get_pooled_connection() as conn_mark:
-            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
-        
-        progress_tracker.finish_file(processed_records_in_file)
-        
-        import_logger.info(f"✅ [CUSTOM-SUCCESS] {file_name} con {strategy['strategy']} in {total_time:.1f}s ({speed:.0f} rec/s)")
-        import_logger.info(f"📊 [FINAL] Record: {processed_records_in_file:,}, Chunk: {total_chunks_processed}, Batch size: {custom_batch_size:,}")
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'completed')
         
         # Cleanup finale
         gc.collect()
-        final_memory = psutil.virtual_memory()
-        import_logger.info(f"🧠 [FINAL] RAM finale: {final_memory.percent:.1f}%")
         
         return True
         
@@ -3882,17 +3898,129 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
         total_time = time.time() - start_time
         error_message = str(e)
         
-        import_logger.error(f"🚨 [CUSTOM-ERROR] Errore in {strategy['strategy']} per {file_name} dopo {total_time:.1f}s: {error_message}")
+        import_logger.error(f"🚨 [DYNAMIC-ERROR] Errore in streaming dinamico per {file_name} dopo {total_time:.1f}s: {error_message}")
         
         # Marca come fallito
         with DatabaseManager.get_pooled_connection() as conn_mark:
-            detailed_error = f"CUSTOM-STREAMING FAIL - {strategy['strategy']} - {error_message}"
+            detailed_error = f"DYNAMIC-STREAMING FAIL - {error_message}"
             mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
         
         # Cleanup di emergenza
         gc.collect()
         
         return False
+
+def calculate_dynamic_batch_size(target_ram_buffer_percent=20, estimated_bytes_per_record=2048):
+    """
+    Calcola dinamicamente la dimensione del batch ottimale basandosi sulla RAM disponibile.
+    
+    Args:
+        target_ram_buffer_percent: Percentuale di RAM da mantenere libera come buffer (default: 20%)
+        estimated_bytes_per_record: Stima dei byte per record (default: 2KB)
+    
+    Returns:
+        tuple: (batch_size, ram_info_dict)
+    """
+    try:
+        # Ottieni info RAM corrente
+        ram = psutil.virtual_memory()
+        total_ram_gb = ram.total / (1024**3)
+        used_ram_gb = ram.used / (1024**3)
+        available_ram_gb = ram.available / (1024**3)
+        used_percent = ram.percent
+        
+        # Calcola RAM utilizzabile (totale - buffer - già usata)
+        buffer_ram_gb = total_ram_gb * (target_ram_buffer_percent / 100)
+        usable_ram_gb = total_ram_gb - buffer_ram_gb - used_ram_gb
+        
+        # Assicurati che ci sia RAM utilizzabile
+        if usable_ram_gb <= 0:
+            return 1000, {  # Batch size minimo di sicurezza
+                'status': 'critical_low_ram',
+                'total_gb': total_ram_gb,
+                'used_gb': used_ram_gb,
+                'used_percent': used_percent,
+                'available_gb': available_ram_gb,
+                'usable_gb': usable_ram_gb,
+                'buffer_gb': buffer_ram_gb,
+                'reason': 'RAM insufficiente dopo buffer'
+            }
+        
+        # Calcola quanti record possiamo processare con la RAM utilizzabile
+        usable_bytes = usable_ram_gb * (1024**3)
+        max_records = int(usable_bytes / estimated_bytes_per_record)
+        
+        # Applica limiti di sicurezza
+        min_batch = 1000    # Minimo assoluto
+        max_batch = 100000  # Massimo assoluto per evitare problemi di memoria
+        
+        # Calcola batch size ottimale
+        optimal_batch = max(min_batch, min(max_records, max_batch))
+        
+        # Logica adattiva basata sulla percentuale di RAM utilizzata
+        if used_percent < 30:  # RAM molto disponibile
+            optimal_batch = min(optimal_batch, 75000)
+        elif used_percent < 50:  # RAM moderatamente disponibile
+            optimal_batch = min(optimal_batch, 50000)
+        elif used_percent < 70:  # RAM limitata
+            optimal_batch = min(optimal_batch, 25000)
+        elif used_percent < 85:  # RAM critica
+            optimal_batch = min(optimal_batch, 10000)
+        else:  # RAM molto critica
+            optimal_batch = min(optimal_batch, 5000)
+        
+        return optimal_batch, {
+            'status': 'optimal',
+            'total_gb': total_ram_gb,
+            'used_gb': used_ram_gb,
+            'used_percent': used_percent,
+            'available_gb': available_ram_gb,
+            'usable_gb': usable_ram_gb,
+            'buffer_gb': buffer_ram_gb,
+            'max_records': max_records,
+            'optimal_batch': optimal_batch,
+            'batch_category': 'high_performance' if optimal_batch >= 50000 else 'balanced' if optimal_batch >= 20000 else 'conservative' if optimal_batch >= 10000 else 'safe'
+        }
+        
+    except Exception as e:
+        import_logger.warning(f"⚠️ [DYNAMIC] Errore calcolo batch dinamico: {e}, uso fallback 5000")
+        return 5000, {
+            'status': 'error',
+            'error': str(e),
+            'fallback_batch': 5000
+        }
+
+def log_dynamic_batch_decision(logger_instance, batch_size, ram_info):
+    """Log dettagliato della decisione del batch dinamico"""
+    status = ram_info.get('status', 'unknown')
+    
+    if status == 'optimal':
+        used_percent = ram_info.get('used_percent', 0)
+        usable_gb = ram_info.get('usable_gb', 0)
+        batch_category = ram_info.get('batch_category', 'unknown')
+        max_records = ram_info.get('max_records', 0)
+        
+        logger_instance.info(f"🔄 [DYNAMIC] Batch dinamico calcolato:")
+        logger_instance.info(f"    💾 RAM: {used_percent:.1f}% utilizzata, {usable_gb:.2f}GB utilizzabili")
+        logger_instance.info(f"    📊 Capacità massima: {max_records:,} record")
+        logger_instance.info(f"    ⚡ Batch ottimale: {batch_size:,} record ({batch_category})")
+        logger_instance.info(f"    🎯 Strategia: {'Performance' if batch_size >= 50000 else 'Bilanciata' if batch_size >= 20000 else 'Conservativa' if batch_size >= 10000 else 'Sicura'}")
+    
+    elif status == 'critical_low_ram':
+        used_percent = ram_info.get('used_percent', 0)
+        available_gb = ram_info.get('available_gb', 0)
+        
+        logger_instance.warning(f"⚠️ [DYNAMIC] RAM critica - batch minimo:")
+        logger_instance.warning(f"    💾 RAM: {used_percent:.1f}% utilizzata, solo {available_gb:.2f}GB disponibili")
+        logger_instance.warning(f"    🛡️ Batch sicurezza: {batch_size:,} record")
+    
+    elif status == 'error':
+        error = ram_info.get('error', 'unknown')
+        fallback = ram_info.get('fallback_batch', 5000)
+        
+        logger_instance.error(f"🚨 [DYNAMIC] Errore calcolo - fallback:")
+        logger_instance.error(f"    ❌ Errore: {error}")
+        logger_instance.error(f"    🛡️ Batch fallback: {fallback:,} record")
 
 if __name__ == "__main__":
     main()
