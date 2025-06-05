@@ -3508,14 +3508,15 @@ def process_chunk_immediately(chunk_data, file_name, batch_id, table_definitions
         else:
             formatted_chunk = chunk_data
         
-        # Processa il batch usando il sistema esistente
-        success = process_batch(
-            DatabaseManager, 
-            formatted_chunk, 
-            table_definitions, 
-            batch_id, 
-            category=category
-        )
+        # Usa una connessione dal pool invece della classe DatabaseManager
+        with DatabaseManager.get_pooled_connection() as db_manager:
+            success = process_batch(
+                db_manager, 
+                formatted_chunk, 
+                table_definitions, 
+                batch_id, 
+                category=category
+            )
         
         elapsed_time = time.time() - start_time
         
