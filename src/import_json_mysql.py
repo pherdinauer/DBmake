@@ -677,7 +677,7 @@ def insert_batch_direct(db_connection, main_data, table_name, fields):
 
 def process_batch(db_connection, batch, table_definitions, batch_id, progress_tracker=None, category=None):
     if not batch:
-        return
+        return True  # Empty batch is considered successful
 
     file_name = batch[0][1]
     # Ora db_connection è direttamente la connessione MySQL
@@ -743,9 +743,19 @@ def process_batch(db_connection, batch, table_definitions, batch_id, progress_tr
                 
                 # Inserimento diretto in MySQL nella tabella corretta per categoria
                 rows_affected = insert_batch_direct(db_connection, main_data, table_name, fields)
+                
+                # CRITICAL CHECK: Verify all records were inserted
+                expected_records = len(main_data)
+                if rows_affected != expected_records:
+                    batch_logger.error(f"[BATCH-FAIL] Record inseriti mismatch: {rows_affected:,}/{expected_records:,} ({((rows_affected/expected_records)*100):.1f}%)")
+                    return False
+                else:
+                    batch_logger.info(f"[BATCH-SUCCESS] Tutti i record inseriti correttamente: {rows_affected:,}/{expected_records:,}")
             
             # Gestisci i dati JSON separatamente (manteniamo l'approccio precedente per i JSON)
             if json_data:
+                json_errors = []  # Track errors from JSON insertion threads
+                
                 def insert_json_data(field, data):
                     try:
                         json_data_with_metadata = [(cig, json_str, file_name, batch_id) for cig, json_str in data]
@@ -763,6 +773,9 @@ def process_batch(db_connection, batch, table_definitions, batch_id, progress_tr
                             batch_logger.warning("Connessione persa durante l'inserimento JSON, riprovo...")
                             raise ValueError("CONNECTION_LOST")
                         raise
+                    except Exception as e:
+                        json_errors.append(f"JSON insertion failed for field {field}: {e}")
+                        raise
             
                 # Crea e avvia i thread per l'inserimento JSON
                 json_threads = []
@@ -775,9 +788,17 @@ def process_batch(db_connection, batch, table_definitions, batch_id, progress_tr
                 # Attendi il completamento di tutti i thread JSON
                 for thread in json_threads:
                     thread.join()
+                
+                # Check for JSON insertion errors
+                if json_errors:
+                    batch_logger.error(f"[JSON-FAIL] Errori durante inserimento JSON: {json_errors}")
+                    return False
             
             elapsed_time = time.time() - start_time
             log_performance_stats(batch_logger, f"Batch completato per categoria '{category}'", len(batch), elapsed_time)
+            
+            # Return True to indicate successful completion
+            return True
         
         except mysql.connector.Error as e:
             if e.errno == 1153:  # Packet too large
