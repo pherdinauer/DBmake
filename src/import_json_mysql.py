@@ -27,7 +27,7 @@ try:
     from src.utils import (
         LogContext, log_memory_status, log_performance_stats, 
         log_file_progress, log_batch_progress, log_error_with_context,
-        log_resource_optimization, check_disk_space
+        check_disk_space
     )
 except ImportError:
     # Fallback su import relative (quando eseguito come modulo)
@@ -35,7 +35,7 @@ except ImportError:
     from .utils import (
         LogContext, log_memory_status, log_performance_stats, 
         log_file_progress, log_batch_progress, log_error_with_context,
-        log_resource_optimization, check_disk_space
+        check_disk_space
     )
 
 # Crea la directory dei log se non esiste prima della configurazione logging
@@ -118,8 +118,9 @@ else:
     # Configurazione standard ottimizzata
     NUM_THREADS = max(4, CPU_CORES - 1)  # Usa tutti i core meno 1, minimo 4
     NUM_WORKERS = 1   # MONO-PROCESSO per sistemi standard
-    INITIAL_CHUNK_SIZE = calculate_initial_chunk_size()
-    MAX_CHUNK_SIZE = calculate_max_chunk_size()
+    # Calcolo chunk size ottimizzato per sistema standard
+    INITIAL_CHUNK_SIZE = max(5000, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_INIT_RATIO) / AVG_RECORD_SIZE_BYTES))
+    MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
     INSERT_BATCH_SIZE_MULTIPLIER = 1
     CONNECTION_POOL_SIZE = 2
     logger.info("🏃 MODALITÀ STANDARD AUTO-ATTIVATA")
@@ -143,6 +144,23 @@ MIN_CHUNK_SIZE = 5000  # Aumentato da 1000 a 5000
 
 # Chunk size massimo MOLTO pi� aggressivo
 MAX_CHUNK_SIZE = min(MAX_CHUNK_SIZE, 150000)  # Aumentato da 75k a 150k
+
+# Parametri per analisi schema (configurabili per velocità)
+SCHEMA_ANALYSIS_MODE = os.environ.get('SCHEMA_ANALYSIS_MODE', 'fast')  # 'fast', 'ultra-fast', 'thorough'
+
+# Configurazione analisi basata sulla modalità
+if SCHEMA_ANALYSIS_MODE == 'ultra-fast':
+    SCHEMA_MAX_ROWS_PER_FILE = 20
+    SCHEMA_MAX_FILES_PER_CATEGORY = 5
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 5
+elif SCHEMA_ANALYSIS_MODE == 'fast':
+    SCHEMA_MAX_ROWS_PER_FILE = 50
+    SCHEMA_MAX_FILES_PER_CATEGORY = 10
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 10
+else:  # thorough
+    SCHEMA_MAX_ROWS_PER_FILE = 200
+    SCHEMA_MAX_FILES_PER_CATEGORY = 20
+    SCHEMA_MAX_SAMPLES_PER_FIELD = 20
 
 def log_memory_status(logger_instance: logging.Logger, context: str = "") -> None:
     """Helper per logging status memoria."""
@@ -1799,7 +1817,12 @@ def process_chunk_unified(args, execution_mode="sequential"):
             # Usa DatabaseManager per ottenere connessione dal pool
             with DatabaseManager.get_pooled_connection() as db_manager:
                 try:
-                    process_batch(db_manager, chunk, table_definitions, batch_id, category=category)
+                    # Chiamata corretta a process_batch
+                    if hasattr(db_manager, 'connection'):
+                        success = process_batch(db_manager.connection, chunk, table_definitions, batch_id, category=category)
+                    else:
+                        success = process_batch(db_manager, chunk, table_definitions, batch_id, category=category)
+                    
                     db_manager.connection.commit()
                     return  # Successo
                 except Exception as e:
@@ -1885,21 +1908,7 @@ def import_all_json_files(base_path, conn):
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
         
         # Importa la funzione aggiornata da utils e passa i parametri
-        from src.utils import log_resource_optimization
         current_insert_batch = calculate_dynamic_insert_batch_size()
-        log_resource_optimization(
-            import_logger,
-            cpu_cores=CPU_CORES,
-            num_threads=NUM_THREADS, 
-            total_memory_gb=TOTAL_MEMORY_GB,
-            usable_memory_gb=USABLE_MEMORY_GB,
-            memory_buffer_ratio=MEMORY_BUFFER_RATIO,
-            num_workers=NUM_WORKERS,
-            batch_size=BATCH_SIZE,
-            max_chunk_size=MAX_CHUNK_SIZE,
-            current_insert_batch=current_insert_batch
-        )
-        
         log_resource_optimization(import_logger)
         
         # Processa categoria per categoria con schema specifico
@@ -2309,48 +2318,37 @@ def create_category_tables(cursor, table_definitions, field_mapping, column_type
         db_logger.info(f"Create {tables_created} tabelle per categoria")
         return tables_created
 
-def analyze_json_structure_by_category(json_files_by_category):
-    """
-    Analizza la struttura JSON separatamente per ogni categoria.
-    Questo crea tabelle ottimizzate con solo i campi presenti in quella categoria.
-    """
-    all_table_definitions = {}
-    
-    with LogContext(analysis_logger, "analisi struttura JSON per categoria", categories=len(json_files_by_category)):
-        analysis_logger.info("Analisi INTELLIGENTE PER CATEGORIA per:")
-        analysis_logger.info("1. Tabelle ottimizzate con solo campi necessari")
-        analysis_logger.info("2. Eliminazione colonne sempre vuote")
-        analysis_logger.info("3. Schema specifico per ogni tipo di dato")
-        analysis_logger.info("4. Massima efficienza storage")
-        
-        for category, json_files in json_files_by_category.items():
-            if not json_files:
-                continue
-                
-            analysis_logger.info(f"[CATEGORIA] Analizzando '{category}' con {len(json_files)} file")
-            
-            # Analizza solo i file di questa categoria
-            category_table_definitions = analyze_single_category(category, json_files)
-            
-            # Aggiungi al risultato globale con prefisso categoria
-            for field, field_type in category_table_definitions.items():
-                all_table_definitions[f"{category}_{field}"] = field_type
-            
-            analysis_logger.info(f"[CATEGORIA] '{category}': {len(category_table_definitions)} campi specifici rilevati")
-        
-        analysis_logger.info(f"[TOTALE] Campi totali rilevati: {len(all_table_definitions)}")
-        analysis_logger.info("="*80)
-        
-    return all_table_definitions
+# FUNZIONE RIMOSSA: analyze_json_structure_by_category 
+# Non viene mai chiamata e contiene bug dei prefissi categoria
+# Il flusso principale usa analyze_single_category direttamente
 
 def analyze_single_category(category, json_files):
     """Analizza la struttura JSON per una singola categoria."""
+    from collections import defaultdict, Counter
+    import statistics
+    
+    # Strutture dati per analisi approfondita
     field_types = defaultdict(lambda: defaultdict(int))
-    field_lengths = defaultdict(int)
+    field_lengths = defaultdict(list)  # Lista delle lunghezze per statistiche
     field_sample_values = defaultdict(list)
+    field_null_counts = defaultdict(int)
+    field_unique_counts = defaultdict(set)
+    field_numeric_stats = defaultdict(list)  # Per valori numerici
+    
+    # Statistiche per categoria
+    category_stats = {
+        'total_files_analyzed': 0,
+        'total_records_analyzed': 0,
+        'files_with_errors': 0,
+        'files_skipped': 0,
+        'json_parse_errors': 0,
+        'encoding_errors': 0,
+        'unique_fields_found': set(),
+        'common_field_patterns': defaultdict(int)
+    }
     
     # USA PARAMETRI CONFIGURABILI PER VELOCITÀ
-    MAX_ROWS_PER_FILE = SCHEMA_MAX_ROWS_PER_FILE
+    MAX_ROWS_PER_FILE = min(100, SCHEMA_MAX_ROWS_PER_FILE)  # Massimo 100 come richiesto
     MAX_FILES_PER_CATEGORY = SCHEMA_MAX_FILES_PER_CATEGORY
     MAX_SAMPLES_PER_FIELD = SCHEMA_MAX_SAMPLES_PER_FIELD
     
@@ -2361,13 +2359,13 @@ def analyze_single_category(category, json_files):
     files_to_analyze = json_files
     if len(json_files) > MAX_FILES_PER_CATEGORY:
         # Prendi file distribuiti uniformemente attraverso la lista
-        step = len(json_files) // MAX_FILES_PER_CATEGORY
+        step = max(1, len(json_files) // MAX_FILES_PER_CATEGORY)
         files_to_analyze = [json_files[i] for i in range(0, len(json_files), step)][:MAX_FILES_PER_CATEGORY]
         analysis_logger.info(f"  [SAMPLE] Categoria '{category}': campiono {len(files_to_analyze)} file su {len(json_files)} totali")
     
     analysis_logger.info(f"  [ANALISI] Categoria '{category}' [{SCHEMA_ANALYSIS_MODE.upper()}]: {len(files_to_analyze)} file, max {MAX_ROWS_PER_FILE} righe/file")
     
-    # Pattern per identificare i tipi (stesso del sistema principale)
+    # Pattern avanzati per identificare i tipi
     patterns = {
         # Tipi numerici precisi
         'pure_integer': r'^\d+$',
@@ -2375,53 +2373,89 @@ def analyze_single_category(category, json_files):
         'pure_decimal': r'^\d+[.,]\d+$',
         'negative_decimal': r'^-\d+[.,]\d+$',
         'scientific': r'^\d+[.,]?\d*[eE][+-]?\d+$',
+        'zero': r'^0+$',
         
         # Valori monetari e percentuali
-        'monetary_euro': r'^€?\s*\d+([.,]\d{2})?$',
-        'monetary_dollar': r'^\$?\s*\d+([.,]\d{2})?$',
+        'monetary_euro': r'^€?\s*\d+([.,]\d{1,2})?$',
+        'monetary_dollar': r'^\$?\s*\d+([.,]\d{1,2})?$',
         'percentage': r'^\d+([.,]\d+)?%$',
+        'negative_monetary': r'^-€?\$?\s*\d+([.,]\d{1,2})?$',
         
-        # Date e tempi
+        # Date e tempi (più pattern)
         'date_iso': r'^\d{4}-\d{2}-\d{2}$',
+        'date_iso_extended': r'^\d{4}-\d{1,2}-\d{1,2}$',
         'date_european': r'^\d{2}/\d{2}/\d{4}$',
         'date_american': r'^\d{2}/\d{2}/\d{4}$',
         'date_italian': r'^\d{2}-\d{2}-\d{4}$',
+        'date_dot_format': r'^\d{2}\.\d{2}\.\d{4}$',
         'datetime_iso': r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}',
         'datetime_european': r'^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}',
         'time_hhmm': r'^\d{2}:\d{2}$',
         'time_hhmmss': r'^\d{2}:\d{2}:\d{2}$',
         'timestamp_unix': r'^\d{10,13}$',
+        'year_4digit': r'^(19|20)\d{2}$',
+        'month_name_it': r'^(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)$',
+        'month_name_en': r'^(january|february|march|april|may|june|july|august|september|october|november|december)$',
         
-        # Booleani
-        'boolean_it': r'^(si|no|vero|falso)$',
-        'boolean_en': r'^(true|false|yes|no|1|0)$',
+        # Booleani (più varianti)
+        'boolean_it': r'^(si|no|vero|falso|sì)$',
+        'boolean_en': r'^(true|false|yes|no|y|n)$',
+        'boolean_numeric': r'^[01]$',
+        'boolean_ticks': r'^[✓✗×]$',
         
-        # Codici specifici
+        # Codici specifici italiani
         'fiscal_code': r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$',
         'partita_iva': r'^\d{11}$',
         'cup_code': r'^[A-Z]\d{13}$',
         'cig_code': r'^[A-Z0-9]{10}$',
+        'cig_code_extended': r'^[A-Z0-9]{8,15}$',
         'postal_code_it': r'^\d{5}$',
+        'istat_code': r'^\d{6,9}$',
+        'rea_number': r'^[A-Z]{2}-\d{6,7}$',
         
         # Email, URL, telefoni
-        'email': r'^[^@]+@[^@]+\.[^@]+$',
-        'url': r'^https?://',
-        'phone_it': r'^(\+39\s?)?(\d{2,4}[\s-]?)?\d{6,10}$',
+        'email': r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
+        'url_http': r'^https?://[^\s]+$',
+        'url_www': r'^www\.[^\s]+$',
+        'phone_it': r'^(\+39\s?)?(\d{2,4}[\s.-]?)?\d{6,10}$',
+        'phone_international': r'^\+\d{1,3}\s?\d{4,14}$',
         
-        # Alfanumerici
+        # Alfanumerici e codici
         'alphanumeric_upper': r'^[A-Z0-9]+$',
         'alphanumeric_mixed': r'^[A-Za-z0-9]+$',
         'code_with_dashes': r'^[A-Z0-9-]+$',
+        'code_with_slashes': r'^[A-Z0-9/]+$',
+        'uuid_format': r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+        'guid_format': r'^[{]?[0-9a-fA-F]{8}[-]?([0-9a-fA-F]{4}[-]?){3}[0-9a-fA-F]{12}[}]?$',
         
-        # Testi
+        # Indirizzi
+        'address_pattern': r'^(via|viale|piazza|corso|largo|strada|località|loc\.|v\.le|p\.za)\s+',
+        'cap_and_city': r'^\d{5}\s+[A-Za-z\s]+$',
+        
+        # Testi strutturati
+        'text_all_caps': r'^[A-Z\s,.-]+$',
+        'text_title_case': r'^[A-Z][a-z]+(\s[A-Z][a-z]+)*$',
+        'text_with_numbers': r'^.*\d.*$',
         'text_short': r'^.{1,50}$',
         'text_medium': r'^.{51,255}$',
-        'text_long': r'^.{256,}$',
+        'text_long': r'^.{256,1000}$',
+        'text_very_long': r'^.{1001,}$',
+        
+        # Pattern JSON/XML
+        'json_array': r'^\[.*\]$',
+        'json_object': r'^{.*}$',
+        'xml_tag': r'^<[^>]+>.*</[^>]+>$',
+        
+        # Valori speciali
+        'empty_string': r'^$',
+        'whitespace_only': r'^\s+$',
+        'null_string': r'^(null|NULL|nil|NIL|none|NONE)$',
+        'not_available': r'^(n/a|N/A|na|NA|non disponibile|nd|ND)$'
     }
     
-    def analyze_value_type(value):
-        """Analizza un singolo valore."""
-        if value is None or value == '':
+    def analyze_value_type_advanced(value):
+        """Analizza un singolo valore con logica avanzata."""
+        if value is None:
             return 'null'
         
         if isinstance(value, bool):
@@ -2438,140 +2472,331 @@ def analyze_single_category(category, json_files):
             return 'empty'
         
         # PRIORITÀ ALTA: Pattern specifici prima dei generici
-        # Codici fiscali, CIG, P.IVA hanno precedenza sui pattern numerici
         high_priority_patterns = [
-            'fiscal_code', 'cig_code', 'cup_code', 'partita_iva', 
-            'email', 'url', 'phone_it', 'postal_code_it'
+            'fiscal_code', 'cig_code', 'cig_code_extended', 'cup_code', 'partita_iva', 
+            'uuid_format', 'guid_format', 'email', 'url_http', 'url_www', 
+            'phone_it', 'phone_international', 'postal_code_it', 'istat_code', 'rea_number'
         ]
         
-        # Testa prima i pattern ad alta priorità
-        for pattern_name in high_priority_patterns:
-            if pattern_name in patterns:
-                if re.match(patterns[pattern_name], value_str, re.IGNORECASE):
-                    return pattern_name
+        # PRIORITÀ MEDIA: Date e booleani
+        medium_priority_patterns = [
+            'datetime_iso', 'datetime_european', 'date_iso', 'date_iso_extended',
+            'date_european', 'date_american', 'date_italian', 'date_dot_format',
+            'boolean_it', 'boolean_en', 'boolean_numeric', 'boolean_ticks',
+            'timestamp_unix', 'year_4digit'
+        ]
         
-        # Poi testa tutti gli altri pattern in ordine di specificità
-        for pattern_name, pattern in patterns.items():
-            if pattern_name not in high_priority_patterns:
-                if re.match(pattern, value_str, re.IGNORECASE):
-                    return pattern_name
+        # PRIORITÀ BASSA: Pattern generici
+        low_priority_patterns = [
+            'monetary_euro', 'monetary_dollar', 'negative_monetary', 'percentage',
+            'pure_integer', 'negative_integer', 'pure_decimal', 'negative_decimal',
+            'scientific', 'zero'
+        ]
         
-        length = len(value_str)
-        if length <= 50:
-            return 'text_short'
-        elif length <= 255:
-            return 'text_medium'
-        else:
-            return 'text_long'
+        # Testa i pattern in ordine di priorità
+        for pattern_list in [high_priority_patterns, medium_priority_patterns, low_priority_patterns]:
+            for pattern_name in pattern_list:
+                if pattern_name in patterns:
+                    try:
+                        if re.match(patterns[pattern_name], value_str, re.IGNORECASE):
+                            return pattern_name
+                    except re.error:
+                        continue
+        
+        # Pattern testuali e lunghi (ultima priorità)
+        try:
+            length = len(value_str)
+            
+            # Controlla pattern speciali
+            for pattern_name in ['json_array', 'json_object', 'xml_tag', 'address_pattern', 
+                               'cap_and_city', 'text_all_caps', 'text_title_case', 'text_with_numbers',
+                               'month_name_it', 'month_name_en', 'null_string', 'not_available']:
+                if pattern_name in patterns:
+                    if re.match(patterns[pattern_name], value_str, re.IGNORECASE):
+                        return pattern_name
+            
+            # Classificazione per lunghezza
+            if length <= 50:
+                return 'text_short'
+            elif length <= 255:
+                return 'text_medium'
+            elif length <= 1000:
+                return 'text_long'
+            else:
+                return 'text_very_long'
+                
+        except Exception:
+            return 'text_unknown'
     
-    def determine_mysql_type(field, type_counts, max_length, sample_values):
-        """Determina il tipo MySQL per questa categoria."""
+    def determine_mysql_type_advanced(field, type_counts, length_stats, sample_values, numeric_stats):
+        """Determina il tipo MySQL con logica avanzata basata su statistiche."""
         total_values = sum(type_counts.values())
         if total_values == 0:
             return 'VARCHAR(50)'
         
+        # Calcola statistiche sui tipi
         sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
         primary_type = sorted_types[0][0]
         primary_count = sorted_types[0][1]
         primary_percentage = (primary_count / total_values) * 100
         
-        # Logica semplificata per determinare il tipo MySQL
-        if primary_percentage >= 90:
+        # Calcola statistiche sulle lunghezze
+        max_length = max(length_stats) if length_stats else 0
+        avg_length = statistics.mean(length_stats) if length_stats else 0
+        median_length = statistics.median(length_stats) if length_stats else 0
+        
+        # Log dettagliato per debug
+        analysis_logger.debug(f"    Campo '{field}': tipo primario='{primary_type}' ({primary_percentage:.1f}%), "
+                             f"lunghezza max={max_length}, media={avg_length:.1f}, mediana={median_length}")
+        
+        # Decisione tipo MySQL con soglie più conservative
+        if primary_percentage >= 85:  # Soglia più alta per maggiore sicurezza
+            # Tipi numerici
             if primary_type in ['integer_native', 'pure_integer', 'negative_integer']:
+                if numeric_stats:
+                    max_val = max(numeric_stats)
+                    min_val = min(numeric_stats)
+                    if min_val >= 0 and max_val <= 255:
+                        return 'TINYINT UNSIGNED'
+                    elif min_val >= -128 and max_val <= 127:
+                        return 'TINYINT'
+                    elif min_val >= 0 and max_val <= 65535:
+                        return 'SMALLINT UNSIGNED'
+                    elif min_val >= -32768 and max_val <= 32767:
+                        return 'SMALLINT'
+                    elif min_val >= 0 and max_val <= 4294967295:
+                        return 'INT UNSIGNED'
+                    elif min_val >= -2147483648 and max_val <= 2147483647:
+                        return 'INT'
+                    else:
+                        return 'BIGINT'
                 return 'INT'
+                
             elif primary_type in ['decimal_native', 'pure_decimal', 'negative_decimal']:
+                if numeric_stats:
+                    # Calcola precisione necessaria
+                    max_precision = 10  # default
+                    max_scale = 2      # default
+                    for val in sample_values[:10]:  # Controlla campioni
+                        if isinstance(val, (int, float)):
+                            val_str = str(val)
+                            if '.' in val_str:
+                                parts = val_str.split('.')
+                                max_precision = max(max_precision, len(parts[0]) + len(parts[1]))
+                                max_scale = max(max_scale, len(parts[1]))
+                    return f'DECIMAL({min(max_precision, 20)},{min(max_scale, 6)})'
                 return 'DECIMAL(20,6)'
+                
             elif primary_type in ['monetary_euro', 'monetary_dollar']:
                 return 'DECIMAL(15,2)'
             elif primary_type == 'percentage':
                 return 'DECIMAL(5,2)'
-            elif primary_type in ['date_iso', 'date_european', 'date_american', 'date_italian']:
+                
+            # Date e tempi
+            elif primary_type in ['date_iso', 'date_iso_extended', 'date_european', 'date_american', 'date_italian', 'date_dot_format']:
                 return 'DATE'
             elif primary_type in ['datetime_iso', 'datetime_european', 'timestamp_unix']:
                 return 'DATETIME'
-            elif primary_type in ['boolean_native', 'boolean_it', 'boolean_en']:
+            elif primary_type in ['time_hhmm', 'time_hhmmss']:
+                return 'TIME'
+            elif primary_type == 'year_4digit':
+                return 'YEAR'
+                
+            # Booleani
+            elif primary_type in ['boolean_native', 'boolean_it', 'boolean_en', 'boolean_numeric', 'boolean_ticks']:
                 return 'BOOLEAN'
+                
+            # Codici specifici
             elif primary_type == 'fiscal_code':
-                return 'VARCHAR(16)'
+                return 'CHAR(16)'
             elif primary_type == 'partita_iva':
-                return 'VARCHAR(11)'
+                return 'CHAR(11)'
             elif primary_type == 'cup_code':
-                return 'VARCHAR(15)'
-            elif primary_type == 'cig_code':
-                return 'VARCHAR(10)'
+                return 'CHAR(15)'
+            elif primary_type in ['cig_code', 'cig_code_extended']:
+                return f'VARCHAR({max_length + 5})'  # Buffer di sicurezza
             elif primary_type == 'postal_code_it':
-                return 'VARCHAR(5)'
+                return 'CHAR(5)'
+            elif primary_type == 'istat_code':
+                return f'VARCHAR({max_length + 2})'
+            elif primary_type in ['uuid_format', 'guid_format']:
+                return 'CHAR(36)'
+                
+            # Email e URL
             elif primary_type == 'email':
-                return 'VARCHAR(255)'
-            elif primary_type == 'url':
+                return f'VARCHAR({min(max(max_length, 100), 320)})'  # RFC limit è 320
+            elif primary_type in ['url_http', 'url_www']:
                 return 'TEXT'
-            elif primary_type == 'json_native':
+            elif primary_type in ['phone_it', 'phone_international']:
+                return f'VARCHAR({max(max_length, 20)})'
+                
+            # JSON
+            elif primary_type in ['json_native', 'json_array', 'json_object']:
                 return 'JSON'
-        
-        # Fallback basato sulla lunghezza
-        if max_length <= 50:
-            return 'VARCHAR(100)'
+            elif primary_type == 'xml_tag':
+                return 'TEXT'
+                
+        # Fallback intelligente basato sulla lunghezza e pattern secondari
+        if max_length == 0:
+            return 'VARCHAR(50)'
+        elif max_length <= 5 and primary_type in ['pure_integer', 'alphanumeric_upper']:
+            return f'CHAR({max_length})'
+        elif max_length <= 50:
+            return f'VARCHAR({max_length + 10})'  # Buffer 20%
         elif max_length <= 255:
-            return 'VARCHAR(500)'
+            return f'VARCHAR({max_length + 50})'   # Buffer fisso
         elif max_length <= 1000:
             return 'TEXT'
         else:
             return 'LONGTEXT'
     
-    # Analizza i file di questa categoria (VELOCE)
-    records_analyzed = 0
-    files_analyzed = 0
-    
-    for json_file in files_to_analyze:  # Usa il sottoinsieme di file
-        files_analyzed += 1
+    # ANALISI DEI FILE
+    for json_file in files_to_analyze:
+        category_stats['total_files_analyzed'] += 1
         file_records = 0
+        file_has_errors = False
         
         try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if file_records >= MAX_ROWS_PER_FILE:  # LIMITE CONFIGURABILE
-                        break
+            # Prova diverse codifiche
+            encodings_to_try = ['utf-8', 'utf-8-sig', 'latin1', 'cp1252']
+            file_content = None
+            
+            for encoding in encodings_to_try:
+                try:
+                    with open(json_file, 'r', encoding=encoding) as f:
+                        file_content = f.readlines()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if file_content is None:
+                analysis_logger.warning(f"  [ENCODING] Impossibile decodificare {json_file}")
+                category_stats['encoding_errors'] += 1
+                file_has_errors = True
+                continue
+            
+            # Analizza le righe del file
+            for line_num, line in enumerate(file_content, 1):
+                if file_records >= MAX_ROWS_PER_FILE:
+                    break
+                    
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    file_records += 1
+                    category_stats['total_records_analyzed'] += 1
+                    
+                    # Analizza ogni campo del record
+                    for field, value in record.items():
+                        original_field = field
+                        field = field.lower().replace(' ', '_').replace('-', '_')
                         
-                    try:
-                        record = json.loads(line.strip())
-                        file_records += 1
-                        records_analyzed += 1
+                        # Aggiungi a statistiche globali
+                        category_stats['unique_fields_found'].add(field)
                         
-                        for field, value in record.items():
-                            field = field.lower().replace(' ', '_')
-                            
-                            value_type = analyze_value_type(value)
-                            field_types[field][value_type] += 1
-                            
-                            # Campioni configurabili per velocità
-                            if len(field_sample_values[field]) < MAX_SAMPLES_PER_FIELD:
-                                field_sample_values[field].append(value)
-                            
-                            if isinstance(value, str):
-                                current_length = len(value)
-                                if current_length > field_lengths[field]:
-                                    field_lengths[field] = current_length
+                        # Analisi del tipo
+                        value_type = analyze_value_type_advanced(value)
+                        field_types[field][value_type] += 1
                         
-                        # Controllo memoria ogni 500 record (era 1000)
-                        if file_records % 500 == 0:
-                            current_memory = process.memory_info().rss
-                            if current_memory > max_memory_bytes:
-                                break
-                                
-                    except Exception as e:
-                        continue
+                        # Statistiche sui null
+                        if value is None or value == '' or (isinstance(value, str) and value.strip() == ''):
+                            field_null_counts[field] += 1
+                        else:
+                            # Valori unici (campiona solo alcuni per performance)
+                            if len(field_unique_counts[field]) < 1000:
+                                field_unique_counts[field].add(str(value)[:100])  # Tronca a 100 char
+                        
+                        # Campioni di valori
+                        if len(field_sample_values[field]) < MAX_SAMPLES_PER_FIELD:
+                            field_sample_values[field].append(value)
+                        
+                        # Statistiche lunghezza
+                        if isinstance(value, str):
+                            current_length = len(value)
+                            field_lengths[field].append(current_length)
+                        
+                        # Statistiche numeriche
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            field_numeric_stats[field].append(value)
+                        elif isinstance(value, str) and value.strip():
+                            # Prova a convertire stringhe numeriche
+                            try:
+                                # Rimuovi caratteri di valuta e spazi
+                                clean_value = re.sub(r'[€$,\s%]', '', value.replace(',', '.'))
+                                if clean_value.replace('.', '').replace('-', '').isdigit():
+                                    numeric_val = float(clean_value)
+                                    field_numeric_stats[field].append(numeric_val)
+                            except (ValueError, AttributeError):
+                                pass
+                        
+                        # Pattern comuni del campo
+                        if value_type not in ['null', 'empty']:
+                            category_stats['common_field_patterns'][f"{field}:{value_type}"] += 1
+                    
+                    # Controllo memoria ogni 250 record
+                    if file_records % 250 == 0:
+                        current_memory = process.memory_info().rss
+                        if current_memory > max_memory_bytes:
+                            analysis_logger.warning(f"  [MEMORY] Limite memoria raggiunto, interrompo analisi file")
+                            break
+                            
+                except json.JSONDecodeError as e:
+                    category_stats['json_parse_errors'] += 1
+                    if category_stats['json_parse_errors'] <= 5:  # Log solo i primi 5 errori
+                        analysis_logger.warning(f"  [JSON] Errore parsing riga {line_num} in {json_file}: {e}")
+                    file_has_errors = True
+                    continue
+                except Exception as e:
+                    analysis_logger.warning(f"  [ERROR] Errore inaspettato riga {line_num} in {json_file}: {e}")
+                    file_has_errors = True
+                    continue
                         
         except Exception as e:
-            analysis_logger.warning(f"  [WARN] Errore nel file {json_file}: {e}")
+            analysis_logger.warning(f"  [FILE] Errore nell'apertura di {json_file}: {e}")
+            category_stats['files_with_errors'] += 1
             continue
+        
+        if file_has_errors:
+            category_stats['files_with_errors'] += 1
     
-    # Crea le definizioni della tabella per questa categoria
+    # CREAZIONE DEFINIZIONI TABELLA
     table_definitions = {}
     for field, type_counts in field_types.items():
-        mysql_type = determine_mysql_type(field, type_counts, field_lengths[field], field_sample_values[field])
+        if not type_counts:  # Skip campi senza dati
+            continue
+            
+        mysql_type = determine_mysql_type_advanced(
+            field, 
+            type_counts, 
+            field_lengths.get(field, [0]), 
+            field_sample_values.get(field, []),
+            field_numeric_stats.get(field, [])
+        )
         table_definitions[field] = mysql_type
     
-    analysis_logger.info(f"  [RESULT] Categoria '{category}': {records_analyzed:,} record analizzati ({files_analyzed} file), {len(table_definitions)} campi unici")
+    # REPORT FINALE DETTAGLIATO
+    null_percentage_high = [f for f in field_null_counts if 
+                           field_null_counts[f] / max(sum(field_types[f].values()), 1) > 0.8]
+    
+    analysis_logger.info(f"  [STATS] Categoria '{category}': {category_stats['total_records_analyzed']:,} record analizzati "
+                        f"da {category_stats['total_files_analyzed']} file")
+    analysis_logger.info(f"  [QUALITY] Errori: {category_stats['files_with_errors']} file, "
+                        f"{category_stats['json_parse_errors']} JSON malformati, "
+                        f"{category_stats['encoding_errors']} errori encoding")
+    analysis_logger.info(f"  [SCHEMA] Trovati {len(table_definitions)} campi unici")
+    
+    if null_percentage_high:
+        analysis_logger.warning(f"  [NULL-WARN] Campi con >80% null: {', '.join(null_percentage_high[:5])}")
+    
+    # Log dei campi più interessanti
+    interesting_fields = [f for f, types in field_types.items() 
+                         if len(types) == 1 and list(types.keys())[0] in 
+                         ['fiscal_code', 'cig_code', 'email', 'url_http', 'date_iso']]
+    if interesting_fields:
+        analysis_logger.info(f"  [PATTERNS] Campi tipizzati: {', '.join(interesting_fields[:10])}")
     
     return table_definitions
 
@@ -2915,23 +3140,6 @@ def clean_problematic_tables(conn, categories):
         conn.rollback()
     finally:
         cursor.close()
-
-# Parametri per analisi schema (configurabili per velocità)
-SCHEMA_ANALYSIS_MODE = os.environ.get('SCHEMA_ANALYSIS_MODE', 'fast')  # 'fast', 'ultra-fast', 'thorough'
-
-# Configurazione analisi basata sulla modalità
-if SCHEMA_ANALYSIS_MODE == 'ultra-fast':
-    SCHEMA_MAX_ROWS_PER_FILE = 20
-    SCHEMA_MAX_FILES_PER_CATEGORY = 5
-    SCHEMA_MAX_SAMPLES_PER_FIELD = 5
-elif SCHEMA_ANALYSIS_MODE == 'fast':
-    SCHEMA_MAX_ROWS_PER_FILE = 50
-    SCHEMA_MAX_FILES_PER_CATEGORY = 10
-    SCHEMA_MAX_SAMPLES_PER_FIELD = 10
-else:  # thorough
-    SCHEMA_MAX_ROWS_PER_FILE = 200
-    SCHEMA_MAX_FILES_PER_CATEGORY = 20
-    SCHEMA_MAX_SAMPLES_PER_FIELD = 20
 
 def check_and_update_table_structure_robust(db_manager, table_name, categories):
     """Versione robusta per verificare e aggiornare la struttura delle tabelle esistenti."""
@@ -3652,9 +3860,17 @@ def process_file_memory_optimized(json_file, category, current_table_definitions
             
             batch_logger.info(f"🚀 [FAST-BATCH] {batch_num}/{total_batches} ({len(batch_chunk):,} record)")
             
-            # Processing veloce
-            chunk_args = (batch_chunk, file_name, batch_id, current_table_definitions, category)
-            process_chunk_sequential(chunk_args)
+            # Processing veloce - usa process_chunk_immediately che è corretto
+            batch_id_chunk = f"{batch_id}_{batch_num}"
+            success = process_chunk_immediately(
+                batch_chunk, file_name, batch_id_chunk,
+                current_table_definitions, category, batch_num, False
+            )
+            
+            if not success:
+                import_logger.error(f"❌ [FAST-BATCH] Batch {batch_num} fallito")
+                # Fallback a streaming
+                return process_file_streaming(json_file, category, current_table_definitions, progress_tracker)
             
             records_completed += len(batch_chunk)
             progress_tracker.update_file_progress(records_completed)
