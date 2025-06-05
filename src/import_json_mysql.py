@@ -1889,101 +1889,37 @@ def import_all_json_files(base_path, conn):
             # Usa le definizioni specifiche per questa categoria
             current_table_definitions = category_table_definitions[category]
             
-            # Processa i file di questa categoria
+            # Processa i file di questa categoria CON MONITORING AVANZATO
             for idx, json_file in enumerate(category_files, 1):
                 file_name = Path(json_file).name
                 
-                # Salta i file già processati con successo
-                with DatabaseManager.get_pooled_connection() as conn_check:
-                    if is_file_processed(conn_check.connection, file_name):
-                        import_logger.info(f"[OK] File già processato: {file_name}")
-                        progress_tracker.processed_files += 1  # Aggiorna counter per file già processati
-                        continue
+                import_logger.info(f"📁 [FILE] {total_processed_files + 1}/{total_files}: {file_name}")
                 
-                # Conta i record nel file per il progresso
-                file_record_count = 0
-                try:
-                    with open(json_file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            if line.strip():
-                                file_record_count += 1
-                except Exception as e:
-                    log_error_with_context(import_logger, e, "conteggio record", file_name)
-                    continue
+                # USA IL NUOVO SISTEMA DI MONITORING
+                success = process_file_with_monitoring(
+                    json_file, 
+                    category, 
+                    current_table_definitions, 
+                    progress_tracker
+                )
                 
-                # Inizia il tracking del file
-                progress_tracker.start_file(file_name, file_record_count)
-                
-                batch_id = f"{int(time.time())}_{idx}"
-                chunk_size = BATCH_SIZE
-                file_chunks = []
-                current_chunk = []
-                processed_records_in_file = 0
-                
-                # Leggi il file e crea i chunk (solo per questo file)
-                try:
-                    with open(json_file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                record = json.loads(line)
-                                current_chunk.append((record, file_name, category))  # Aggiungi categoria
-                                processed_records_in_file += 1
-                                
-                                # Usa BATCH_SIZE dinamico invece di chunk_size fisso
-                                if len(current_chunk) >= BATCH_SIZE:  # Era chunk_size, ora BATCH_SIZE (75k)
-                                    file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
-                                    current_chunk = []
-                            except Exception as e:
-                                log_error_with_context(import_logger, e, "parsing record", file_name)
-                                continue
-                                
-                    if current_chunk:
-                        file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
+                if success:
+                    total_processed_files += 1
+                    # I record sono già contati nel progress_tracker
+                    total_processed_records = progress_tracker.total_records_processed
                     
-                    batch_logger.info(f"Chunk da processare: {len(file_chunks)} (record effettivi: {processed_records_in_file:,})")
-                    
-                    # Processa i chunk di questo file SEQUENZIALMENTE
-                    records_completed_in_file = 0
-                    if file_chunks:
-                        for chunk_idx, chunk_data in enumerate(file_chunks, 1):
-                            try:
-                                chunk_records = len(chunk_data[0])
-                                batch_logger.info(f"Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record) per categoria '{category}'")
-                                
-                                process_chunk_sequential(chunk_data)
-                                records_completed_in_file += chunk_records
-                                
-                                # Aggiorna progresso del file ogni chunk
-                                progress_tracker.update_file_progress(records_completed_in_file)
-                                
-                            except Exception as e:
-                                log_error_with_context(batch_logger, e, f"chunk {chunk_idx}", file_name)
-                                # Continua con il prossimo chunk invece di fallire tutto
-                                continue
-                        
-                        # Marca il file come processato
-                        with DatabaseManager.get_pooled_connection() as conn_mark:
-                            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
-                        
-                        # Completa il tracking del file
-                        progress_tracker.finish_file(processed_records_in_file)
-                        
-                        total_processed_files += 1
-                        total_processed_records += processed_records_in_file
-                    
-                    # Libera la memoria dei chunk di questo file
-                    del file_chunks
-                    del current_chunk
+                    import_logger.info(f"✅ [DONE] File {file_name} completato con successo")
+                else:
+                    import_logger.warning(f"⚠️  [FAILED] File {file_name} fallito - continuo con il prossimo")
+                
+                # Log progresso ogni 10 file
+                if (total_processed_files + 1) % 10 == 0:
+                    log_memory_status(import_logger, f"OGNI 10 FILE - Completati: {total_processed_files}")
+                
+                # Garbage collection ogni 5 file per mantenere memoria pulita
+                if (total_processed_files + 1) % 5 == 0:
                     gc.collect()
-                
-                except Exception as e:
-                    error_message = str(e)
-                    log_error_with_context(import_logger, e, "processing file", file_name)
-                    with DatabaseManager.get_pooled_connection() as conn_mark:
-                        mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', error_message)
+                    import_logger.debug(f"🧹 [GC] Garbage collection eseguita dopo {total_processed_files + 1} file")
         
         # Statistiche finali
         final_stats = progress_tracker.get_global_stats()
@@ -3080,6 +3016,265 @@ def create_metadata_tables_robust(db_manager, category_table_definitions):
         
         db_logger.info(f"[INSERT] Mapping campi per categoria inserito: {mapping_records} record")
         db_logger.info("[COMPLETE] Tabelle metadati ottimizzate create")
+
+def analyze_file_before_processing(json_file):
+    """Analizza un file prima del processing per rilevare potenziali problemi."""
+    try:
+        file_path = Path(json_file)
+        file_name = file_path.name
+        
+        # Ottieni informazioni sul file
+        file_size_bytes = file_path.stat().st_size
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        file_size_gb = file_size_mb / 1024
+        
+        # Memoria attuale del sistema
+        memory_info = psutil.virtual_memory()
+        available_memory_gb = memory_info.available / (1024**3)
+        used_memory_gb = memory_info.used / (1024**3)
+        memory_percent = memory_info.percent
+        
+        # Stima record nel file (campionamento rapido)
+        estimated_records = 0
+        sample_lines = 0
+        max_sample = 1000  # Campiona max 1000 righe per velocità
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    sample_lines += 1
+                if sample_lines >= max_sample:
+                    break
+        
+        # Stima totale righe nel file
+        if sample_lines > 0:
+            # Stima basata su dimensione file e dimensione media delle righe campionate
+            with open(json_file, 'r', encoding='utf-8') as f:
+                sample_data = f.read(min(file_size_bytes, 1024 * 1024))  # Leggi max 1MB per campione
+                if sample_data:
+                    lines_in_sample = len([line for line in sample_data.split('\n') if line.strip()])
+                    if lines_in_sample > 0:
+                        avg_line_size = len(sample_data.encode('utf-8')) / lines_in_sample
+                        estimated_records = int(file_size_bytes / avg_line_size)
+        
+        # Stima memoria necessaria per processing
+        avg_record_size_bytes = 2048  # Stima 2KB per record in memoria
+        estimated_memory_gb = (estimated_records * avg_record_size_bytes) / (1024**3)
+        
+        # Calcola ratio rischio
+        memory_risk_ratio = estimated_memory_gb / available_memory_gb if available_memory_gb > 0 else float('inf')
+        
+        # Logging dettagliato
+        import_logger.info("="*80)
+        import_logger.info(f"📋 [ANALISI PRE-PROCESSING] File: {file_name}")
+        import_logger.info(f"📏 [DIMENSIONI] File: {file_size_mb:.1f}MB ({file_size_gb:.2f}GB)")
+        import_logger.info(f"📊 [RECORDS] Stimati: {estimated_records:,} record")
+        import_logger.info(f"🧠 [MEMORIA] Sistema: {used_memory_gb:.1f}GB/{memory_info.total/(1024**3):.1f}GB ({memory_percent:.1f}%)")
+        import_logger.info(f"🧠 [MEMORIA] Disponibile: {available_memory_gb:.1f}GB")
+        import_logger.info(f"🧠 [MEMORIA] Stimata necessaria: {estimated_memory_gb:.1f}GB")
+        import_logger.info(f"⚠️  [RISCHIO] Memory ratio: {memory_risk_ratio:.2f} ({'ALTO' if memory_risk_ratio > 0.7 else 'MEDIO' if memory_risk_ratio > 0.4 else 'BASSO'})")
+        
+        # Determina se il file è problematico
+        is_problematic = False
+        risk_factors = []
+        
+        if file_size_gb > 2.0:
+            risk_factors.append("File molto grande (>2GB)")
+            is_problematic = True
+            
+        if estimated_records > 3_000_000:
+            risk_factors.append(f"Troppi record ({estimated_records:,} > 3M)")
+            is_problematic = True
+            
+        if memory_risk_ratio > 0.8:
+            risk_factors.append(f"Memoria insufficiente (ratio: {memory_risk_ratio:.2f})")
+            is_problematic = True
+            
+        if available_memory_gb < 2.0:
+            risk_factors.append(f"RAM disponibile bassa ({available_memory_gb:.1f}GB < 2GB)")
+            is_problematic = True
+        
+        if is_problematic:
+            import_logger.warning(f"🚨 [ALERT] File POTENZIALMENTE PROBLEMATICO!")
+            for factor in risk_factors:
+                import_logger.warning(f"🚨 [FACTOR] {factor}")
+            import_logger.warning(f"🚨 [STRATEGY] Userò processing ridotto per questo file")
+        else:
+            import_logger.info(f"✅ [OK] File sembra processabile normalmente")
+        
+        import_logger.info("="*80)
+        
+        return {
+            'file_name': file_name,
+            'file_size_mb': file_size_mb,
+            'file_size_gb': file_size_gb,
+            'estimated_records': estimated_records,
+            'estimated_memory_gb': estimated_memory_gb,
+            'available_memory_gb': available_memory_gb,
+            'memory_risk_ratio': memory_risk_ratio,
+            'is_problematic': is_problematic,
+            'risk_factors': risk_factors
+        }
+        
+    except Exception as e:
+        import_logger.error(f"🚨 [ERROR] Errore nell'analisi pre-processing di {json_file}: {e}")
+        return None
+
+def process_file_with_monitoring(json_file, category, current_table_definitions, progress_tracker):
+    """Processa un file con monitoring avanzato e gestione errori robusta."""
+    file_name = Path(json_file).name
+    
+    # STEP 1: Analisi pre-processing
+    file_analysis = analyze_file_before_processing(json_file)
+    if not file_analysis:
+        import_logger.error(f"🚨 [SKIP] Impossibile analizzare {file_name}, lo salto")
+        return False
+    
+    # STEP 2: Verifica se già processato
+    with DatabaseManager.get_pooled_connection() as conn_check:
+        if is_file_processed(conn_check.connection, file_name):
+            import_logger.info(f"✅ [OK] File già processato: {file_name}")
+            progress_tracker.processed_files += 1
+            return True
+    
+    # STEP 3: Configura parametri basati sull'analisi
+    original_batch_size = BATCH_SIZE
+    processing_batch_size = BATCH_SIZE
+    
+    if file_analysis['is_problematic']:
+        # Riduci batch size per file problematici
+        processing_batch_size = min(25000, BATCH_SIZE // 3)  # Max 25k per file problematici
+        import_logger.warning(f"🔧 [ADAPT] Batch size ridotto: {BATCH_SIZE:,} → {processing_batch_size:,}")
+        
+        # Log memoria aggiuntivo per file problematici
+        log_memory_status(import_logger, f"PRE-PROCESSING {file_name}")
+    
+    # STEP 4: Processing con monitoring
+    try:
+        import_logger.info(f"🚀 [START] Inizio processing {file_name}")
+        start_time = time.time()
+        
+        # Inizia il tracking del file
+        progress_tracker.start_file(file_name, file_analysis['estimated_records'])
+        
+        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
+        file_chunks = []
+        current_chunk = []
+        processed_records_in_file = 0
+        
+        # Leggi il file e crea i chunk con monitoring
+        chunk_creation_start = time.time()
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    current_chunk.append((record, file_name, category))
+                    processed_records_in_file += 1
+                    
+                    # Controllo memoria ogni 10k record per file problematici
+                    if file_analysis['is_problematic'] and processed_records_in_file % 10000 == 0:
+                        memory_info = psutil.virtual_memory()
+                        if memory_info.percent > 85:  # Soglia di sicurezza
+                            import_logger.warning(f"⚠️  [MEMORY] RAM alta ({memory_info.percent:.1f}%) al record {processed_records_in_file:,}")
+                    
+                    # Usa batch size adattivo
+                    if len(current_chunk) >= processing_batch_size:
+                        file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
+                        current_chunk = []
+                        
+                except json.JSONDecodeError as e:
+                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num} in {file_name}: {e}")
+                    continue
+                except Exception as e:
+                    import_logger.error(f"🚨 [ERROR] Errore inaspettato riga {line_num} in {file_name}: {e}")
+                    continue
+        
+        if current_chunk:
+            file_chunks.append((current_chunk, file_name, batch_id, current_table_definitions, category))
+        
+        chunk_creation_time = time.time() - chunk_creation_start
+        import_logger.info(f"📦 [CHUNKS] Creati {len(file_chunks)} chunk in {chunk_creation_time:.1f}s")
+        import_logger.info(f"📊 [RECORDS] Record effettivi: {processed_records_in_file:,} (stimati: {file_analysis['estimated_records']:,})")
+        
+        # STEP 5: Processa i chunk con timeout monitoring
+        records_completed_in_file = 0
+        chunk_start_time = time.time()
+        
+        for chunk_idx, chunk_data in enumerate(file_chunks, 1):
+            try:
+                chunk_records = len(chunk_data[0])
+                
+                # Log dettagliato per file problematici
+                if file_analysis['is_problematic']:
+                    memory_before = psutil.virtual_memory()
+                    import_logger.info(f"🔄 [CHUNK] {chunk_idx}/{len(file_chunks)} - RAM prima: {memory_before.percent:.1f}%")
+                
+                batch_logger.info(f"Processing chunk {chunk_idx}/{len(file_chunks)} ({chunk_records:,} record) per categoria '{category}'")
+                
+                # Timeout per chunk singolo (per rilevare blocchi)
+                chunk_process_start = time.time()
+                process_chunk_sequential(chunk_data)
+                chunk_process_time = time.time() - chunk_process_start
+                
+                # Verifica se il chunk ha impiegato troppo tempo
+                if chunk_process_time > 300:  # 5 minuti per chunk
+                    import_logger.warning(f"⏰ [SLOW] Chunk {chunk_idx} ha impiegato {chunk_process_time:.1f}s (molto lento)")
+                
+                records_completed_in_file += chunk_records
+                progress_tracker.update_file_progress(records_completed_in_file)
+                
+                # Log memoria dopo chunk problematici
+                if file_analysis['is_problematic']:
+                    memory_after = psutil.virtual_memory()
+                    import_logger.info(f"✅ [CHUNK] {chunk_idx}/{len(file_chunks)} completato - RAM dopo: {memory_after.percent:.1f}%")
+                
+            except Exception as e:
+                import_logger.error(f"🚨 [ERROR] Errore nel chunk {chunk_idx} di {file_name}: {e}")
+                log_error_with_context(batch_logger, e, f"chunk {chunk_idx}", file_name)
+                continue
+        
+        # STEP 6: Finalizzazione
+        total_time = time.time() - start_time
+        
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
+        
+        progress_tracker.finish_file(processed_records_in_file)
+        
+        import_logger.info(f"✅ [SUCCESS] {file_name} completato in {total_time:.1f}s")
+        import_logger.info(f"📊 [FINAL] Record processati: {records_completed_in_file:,}/{processed_records_in_file:,}")
+        
+        # Log finale memoria per file problematici
+        if file_analysis['is_problematic']:
+            log_memory_status(import_logger, f"POST-PROCESSING {file_name}")
+        
+        # Cleanup memoria
+        del file_chunks
+        del current_chunk
+        gc.collect()
+        
+        return True
+        
+    except Exception as e:
+        total_time = time.time() - start_time
+        error_message = str(e)
+        
+        import_logger.error(f"🚨 [FATAL] Errore critico in {file_name} dopo {total_time:.1f}s: {error_message}")
+        log_error_with_context(import_logger, e, "processing file", file_name)
+        
+        # Marca come fallito con dettagli
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            detailed_error = f"CRASH dopo {total_time:.1f}s - {error_message} - Memory: {psutil.virtual_memory().percent:.1f}%"
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
+        
+        # Cleanup memoria di emergenza
+        gc.collect()
+        
+        return False
 
 if __name__ == "__main__":
     main()
