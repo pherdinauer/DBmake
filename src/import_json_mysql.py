@@ -567,7 +567,8 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
     if not main_data:
         return 0
     
-    cursor = db_manager.connection.cursor()
+    # Il db_manager passato è già una connessione dal pool, non un oggetto con .connection
+    cursor = db_manager.cursor()
     
     # APPLICA FIX PROATTIVI PRIMA DI INIZIARE
     proactive_fixes = proactive_schema_fixes(cursor, table_name)
@@ -618,7 +619,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
                     
                     # COMMIT FREQUENTE: ogni N mini-batch
                     if mini_batches_processed % COMMIT_FREQUENCY == 0:
-                        db_manager.connection.commit()
+                        db_manager.commit()
                         commit_time = time.time() - last_commit_time
                         last_commit_time = time.time()
                         
@@ -645,7 +646,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
             i += MINI_BATCH_SIZE
         
         # COMMIT FINALE per gli ultimi record
-        db_manager.connection.commit()
+        db_manager.commit()
         
         total_time = time.time() - insert_start_time
         avg_speed = rows_inserted / total_time if total_time > 0 else 0
@@ -664,7 +665,7 @@ def insert_batch_direct(db_manager, main_data, table_name, fields):
     except Exception as e:
         # Commit finale anche in caso di errore per salvare quello che si può
         try:
-            db_manager.connection.commit()
+            db_manager.commit()
             logger.info(f"[RECOVERY] Commit di emergenza eseguito: {rows_inserted:,} record salvati")
         except:
             pass
@@ -679,7 +680,8 @@ def process_batch(db_manager, batch, table_definitions, batch_id, progress_track
         return
 
     file_name = batch[0][1]
-    cursor = db_manager.connection.cursor()
+    # Il db_manager passato è già una connessione dal pool, non un oggetto con .connection
+    cursor = db_manager.cursor()
     
     # Determina il nome della tabella per questa categoria
     table_name = f"{category}_data" if category else "main_data"
@@ -3776,6 +3778,12 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
     import_logger.info(f"    🔄 Ricalcolo dinamico ogni {dynamic_recalc_interval} chunk")
     
     try:
+        # Verifica se già processato
+        with DatabaseManager.get_pooled_connection() as conn_check:
+            if is_file_processed(conn_check.connection, file_name):
+                import_logger.info(f"✅ [ALREADY-DONE] File già processato: {file_name}")
+                return True
+        
         # Calcola batch dinamico iniziale
         current_batch_size, ram_info = calculate_dynamic_batch_size()
         log_dynamic_batch_decision(import_logger, current_batch_size, ram_info)
@@ -3840,6 +3848,10 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
                                     import_logger.info(f"✓ [DYNAMIC] Batch confermato: {current_batch_size:,} ({batch_category}) - RAM: {ram_percent:.1f}%")
                         else:
                             import_logger.error(f"❌ [STREAMING] Chunk {chunk_num} fallito, interrompo processing")
+                            # Marca come fallito immediatamente
+                            with DatabaseManager.get_pooled_connection() as conn_mark:
+                                detailed_error = f"DYNAMIC-STREAMING FAIL - Chunk {chunk_num} failed"
+                                mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
                             return False
                         
                         # Reset chunk
@@ -3855,6 +3867,10 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
                             current_batch_size = 1000
                         elif ram.percent > 95:
                             import_logger.error(f"🚨 [ABORT] RAM troppo alta {ram.percent:.1f}% - interrompo")
+                            # Marca come fallito
+                            with DatabaseManager.get_pooled_connection() as conn_mark:
+                                detailed_error = f"DYNAMIC-STREAMING FAIL - RAM too high: {ram.percent:.1f}%"
+                                mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
                             return False
                 
                 except json.JSONDecodeError as e:
@@ -3875,10 +3891,25 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
                 if success:
                     processed_records_in_file += len(current_chunk)
                     progress_tracker.update_file_progress(len(current_chunk))
+                else:
+                    import_logger.error(f"❌ [STREAMING] Chunk finale {chunk_num} fallito")
+                    # Marca come fallito
+                    with DatabaseManager.get_pooled_connection() as conn_mark:
+                        detailed_error = f"DYNAMIC-STREAMING FAIL - Final chunk failed"
+                        mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
+                    return False
         
-        # Statistiche finali
+        # Statistiche finali e validazione
         total_time = time.time() - start_time
         avg_speed = processed_records_in_file / total_time if total_time > 0 else 0
+        
+        # CONTROLLO CRITICO: Se non abbiamo processato nessun record, è un fallimento
+        if processed_records_in_file == 0:
+            import_logger.error(f"🚨 [FAIL] File {file_name} completato ma con 0 record processati!")
+            with DatabaseManager.get_pooled_connection() as conn_mark:
+                detailed_error = f"DYNAMIC-STREAMING FAIL - Zero records processed"
+                mark_file_processed(conn_mark.connection, file_name, 0, 'failed', detailed_error)
+            return False
         
         import_logger.info(f"🎉 [DYNAMIC-COMPLETE] File {file_name} completato!")
         import_logger.info(f"    📊 Record processati: {processed_records_in_file:,}")
@@ -3886,7 +3917,7 @@ def process_file_streaming_with_custom_batch(json_file, category, current_table_
         import_logger.info(f"    ⚡ Velocità media: {avg_speed:.0f} rec/s")
         import_logger.info(f"    🔢 Chunk totali: {chunk_num}")
         
-        # Marca come completato
+        # Marca come completato SOLO se abbiamo processato record
         with DatabaseManager.get_pooled_connection() as conn_mark:
             mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'completed')
         
