@@ -1895,13 +1895,51 @@ def import_all_json_files(base_path, conn):
                 
                 import_logger.info(f"📁 [FILE] {total_processed_files + 1}/{total_files}: {file_name}")
                 
-                # USA IL NUOVO SISTEMA DI MONITORING
-                success = process_file_with_monitoring(
-                    json_file, 
-                    category, 
-                    current_table_definitions, 
-                    progress_tracker
-                )
+                # ANALISI PRELIMINARE PER DECIDERE IL METODO
+                file_analysis = analyze_file_before_processing(json_file)
+                
+                # SCELTA STRATEGIA INTELLIGENTE
+                strategy = choose_optimal_processing_strategy(file_analysis)
+                
+                import_logger.info(f"🎯 [STRATEGY] Strategia selezionata: {strategy['strategy'].upper()}")
+                import_logger.info(f"🎯 [SPEED] Velocità attesa: {strategy['expected_speed']}")
+                import_logger.info(f"🎯 [BATCH] Batch size: {strategy['batch_size']:,} record")
+                
+                success = False
+                
+                # ESEGUI LA STRATEGIA SCELTA
+                if strategy['strategy'] == 'memory_optimized':
+                    # File piccoli: massima velocità con caricamento completo in memoria
+                    success = process_file_memory_optimized(
+                        json_file, category, current_table_definitions, progress_tracker, strategy
+                    )
+                    
+                elif strategy['strategy'] == 'balanced_batching':
+                    # File medi: bilanciamento tra velocità e memoria
+                    success = process_file_balanced_batching(
+                        json_file, category, current_table_definitions, progress_tracker, strategy
+                    )
+                    
+                elif strategy['strategy'] in ['streaming_optimized', 'streaming_safe']:
+                    # File grandi: streaming sicuro con batch personalizzato
+                    success = process_file_streaming_with_custom_batch(
+                        json_file, category, current_table_definitions, progress_tracker, strategy
+                    )
+                
+                # FALLBACK UNIVERSALE in caso di errore
+                if not success:
+                    import_logger.warning(f"🔄 [UNIVERSAL-FALLBACK] Strategia {strategy['strategy']} fallita, uso streaming sicuro...")
+                    
+                    safe_strategy = {
+                        'strategy': 'streaming_safe',
+                        'batch_size': 3_000,  # Batch molto piccoli per massima sicurezza
+                        'description': 'Streaming di emergenza con batch minimi',
+                        'expected_speed': 'BASSO'
+                    }
+                    
+                    success = process_file_streaming_with_custom_batch(
+                        json_file, category, current_table_definitions, progress_tracker, safe_strategy
+                    )
                 
                 if success:
                     total_processed_files += 1
@@ -1910,7 +1948,7 @@ def import_all_json_files(base_path, conn):
                     
                     import_logger.info(f"✅ [DONE] File {file_name} completato con successo")
                 else:
-                    import_logger.warning(f"⚠️  [FAILED] File {file_name} fallito - continuo con il prossimo")
+                    import_logger.warning(f"⚠️  [FAILED] File {file_name} fallito definitivamente - continuo con il prossimo")
                 
                 # Log progresso ogni 10 file
                 if (total_processed_files + 1) % 10 == 0:
@@ -3272,6 +3310,586 @@ def process_file_with_monitoring(json_file, category, current_table_definitions,
             mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
         
         # Cleanup memoria di emergenza
+        gc.collect()
+        
+        return False
+
+def process_file_streaming(json_file, category, current_table_definitions, progress_tracker):
+    """
+    Processa un file con approccio STREAMING per evitare Out of Memory.
+    Legge e processa riga per riga senza mai caricare tutto il file in memoria.
+    """
+    file_name = Path(json_file).name
+    
+    # STEP 1: Analisi pre-processing (rimane uguale)
+    file_analysis = analyze_file_before_processing(json_file)
+    if not file_analysis:
+        import_logger.error(f"🚨 [SKIP] Impossibile analizzare {file_name}, lo salto")
+        return False
+    
+    # STEP 2: Verifica se già processato
+    with DatabaseManager.get_pooled_connection() as conn_check:
+        if is_file_processed(conn_check.connection, file_name):
+            import_logger.info(f"✅ [OK] File già processato: {file_name}")
+            progress_tracker.processed_files += 1
+            return True
+    
+    # STEP 3: Configura parametri per STREAMING
+    # Per file problematici usa chunk ancora più piccoli
+    if file_analysis['is_problematic']:
+        streaming_batch_size = 5000  # Solo 5k record per volta per file grandi
+        import_logger.warning(f"🔧 [STREAMING] Batch ultra-ridotto: {streaming_batch_size:,} per file problematico")
+    else:
+        streaming_batch_size = 15000  # 15k per file normali
+    
+    try:
+        import_logger.info(f"🌊 [STREAMING] Inizio processing streaming di {file_name}")
+        start_time = time.time()
+        
+        # Inizia il tracking del file
+        progress_tracker.start_file(file_name, file_analysis['estimated_records'])
+        
+        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
+        current_chunk = []
+        processed_records_in_file = 0
+        total_chunks_processed = 0
+        
+        # STREAMING PROCESSING: leggi riga per riga
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    current_chunk.append((record, file_name, category))
+                    processed_records_in_file += 1
+                    
+                    # PROCESSA IL CHUNK IMMEDIATAMENTE quando è pieno
+                    if len(current_chunk) >= streaming_batch_size:
+                        success = process_chunk_immediately(
+                            current_chunk, 
+                            file_name, 
+                            batch_id, 
+                            current_table_definitions, 
+                            category,
+                            total_chunks_processed + 1,
+                            file_analysis['is_problematic']
+                        )
+                        
+                        if success:
+                            total_chunks_processed += 1
+                            progress_tracker.update_file_progress(processed_records_in_file)
+                        
+                        # LIBERA IMMEDIATAMENTE LA MEMORIA
+                        current_chunk = []
+                        gc.collect()  # Forza garbage collection
+                        
+                        # Log memoria ogni 10 chunk per file problematici
+                        if file_analysis['is_problematic'] and total_chunks_processed % 10 == 0:
+                            memory_info = psutil.virtual_memory()
+                            import_logger.info(f"🌊 [STREAMING] Chunk {total_chunks_processed} - RAM: {memory_info.percent:.1f}%")
+                            
+                            # EMERGENCY BRAKE: se la RAM supera il 90%, forza pausa
+                            if memory_info.percent > 90:
+                                import_logger.warning(f"🚨 [EMERGENCY] RAM critica ({memory_info.percent:.1f}%), pausa 2s...")
+                                time.sleep(2)
+                                gc.collect()
+                    
+                    # Controllo memoria ogni 1000 record per rilevare problemi
+                    if processed_records_in_file % 1000 == 0:
+                        memory_info = psutil.virtual_memory()
+                        if memory_info.percent > 95:
+                            import_logger.error(f"🚨 [ABORT] RAM critica ({memory_info.percent:.1f}%) - interrompo file")
+                            raise MemoryError(f"RAM critica: {memory_info.percent:.1f}%")
+                        
+                except json.JSONDecodeError as e:
+                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num} in {file_name}: {e}")
+                    continue
+                except Exception as e:
+                    import_logger.error(f"🚨 [ERROR] Errore inaspettato riga {line_num} in {file_name}: {e}")
+                    continue
+        
+        # Processa l'ultimo chunk parziale
+        if current_chunk:
+            success = process_chunk_immediately(
+                current_chunk, 
+                file_name, 
+                batch_id, 
+                current_table_definitions, 
+                category,
+                total_chunks_processed + 1,
+                file_analysis['is_problematic']
+            )
+            if success:
+                total_chunks_processed += 1
+            current_chunk = []
+        
+        # STEP 4: Finalizzazione
+        total_time = time.time() - start_time
+        
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
+        
+        progress_tracker.finish_file(processed_records_in_file)
+        
+        import_logger.info(f"✅ [SUCCESS] {file_name} completato con STREAMING in {total_time:.1f}s")
+        import_logger.info(f"📊 [FINAL] Record: {processed_records_in_file:,}, Chunk: {total_chunks_processed}")
+        
+        # Cleanup finale
+        gc.collect()
+        final_memory = psutil.virtual_memory()
+        import_logger.info(f"🧠 [FINAL] RAM finale: {final_memory.percent:.1f}%")
+        
+        return True
+        
+    except MemoryError as e:
+        import_logger.error(f"🚨 [OOM] Out of Memory in {file_name}: {e}")
+        
+        # Marca come fallito con dettagli OOM
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            detailed_error = f"OUT OF MEMORY - {e} - Processed: {processed_records_in_file:,} records"
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
+        
+        # Cleanup di emergenza
+        current_chunk = []
+        gc.collect()
+        
+        return False
+        
+    except Exception as e:
+        total_time = time.time() - start_time
+        error_message = str(e)
+        
+        import_logger.error(f"🚨 [FATAL] Errore critico in {file_name} dopo {total_time:.1f}s: {error_message}")
+        
+        # Marca come fallito
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            detailed_error = f"CRASH dopo {total_time:.1f}s - {error_message} - Records: {processed_records_in_file:,}"
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
+        
+        # Cleanup di emergenza
+        current_chunk = []
+        gc.collect()
+        
+        return False
+
+def process_chunk_immediately(chunk_data, file_name, batch_id, table_definitions, category, chunk_num, is_problematic_file):
+    """
+    Processa un chunk immediatamente senza accumularlo in memoria.
+    Ottimizzato per file problematici.
+    """
+    try:
+        chunk_size = len(chunk_data)
+        
+        if is_problematic_file:
+            batch_logger.info(f"🌊 [STREAMING] Chunk {chunk_num} ({chunk_size:,} record) - categoria '{category}' - FILE PROBLEMATICO")
+        else:
+            batch_logger.info(f"🌊 [STREAMING] Chunk {chunk_num} ({chunk_size:,} record) - categoria '{category}'")
+        
+        # Usa il processing standard ma con monitoring memoria
+        memory_before = psutil.virtual_memory()
+        
+        chunk_args = (chunk_data, file_name, batch_id, table_definitions, category)
+        process_chunk_sequential(chunk_args)
+        
+        memory_after = psutil.virtual_memory()
+        
+        if is_problematic_file:
+            batch_logger.info(f"✅ [STREAMING] Chunk {chunk_num} completato - RAM: {memory_before.percent:.1f}% → {memory_after.percent:.1f}%")
+        
+        return True
+        
+    except Exception as e:
+        batch_logger.error(f"🚨 [ERROR] Errore in streaming chunk {chunk_num}: {e}")
+        return False
+
+def choose_optimal_processing_strategy(file_analysis):
+    """
+    Sceglie la strategia di processing ottimale basata sull'analisi del file.
+    Bilancia velocità e sicurezza memoria.
+    """
+    if not file_analysis:
+        return "streaming_safe"  # Fallback sicuro
+    
+    file_size_gb = file_analysis['file_size_gb']
+    estimated_records = file_analysis['estimated_records']
+    memory_risk_ratio = file_analysis['memory_risk_ratio']
+    available_memory_gb = file_analysis['available_memory_gb']
+    
+    # STRATEGIA 1: MEMORY_OPTIMIZED (più veloce)
+    # File piccoli che stanno comodamente in memoria
+    if (file_size_gb <= 0.5 and 
+        estimated_records <= 500_000 and 
+        memory_risk_ratio <= 0.3 and 
+        available_memory_gb >= 4.0):
+        return {
+            'strategy': 'memory_optimized',
+            'batch_size': 75_000,
+            'description': 'Caricamento completo in memoria per massima velocità',
+            'expected_speed': 'ALTO'
+        }
+    
+    # STRATEGIA 2: BALANCED_BATCHING (bilanciato)  
+    # File medi con batching ottimizzato
+    elif (file_size_gb <= 1.5 and 
+          estimated_records <= 1_500_000 and 
+          memory_risk_ratio <= 0.6 and 
+          available_memory_gb >= 2.0):
+        return {
+            'strategy': 'balanced_batching',
+            'batch_size': 25_000,
+            'description': 'Batching ottimizzato per bilanciare velocità e memoria',
+            'expected_speed': 'MEDIO-ALTO'
+        }
+    
+    # STRATEGIA 3: STREAMING_OPTIMIZED (sicuro ma efficiente)
+    # File grandi con streaming ottimizzato per performance
+    elif (file_size_gb <= 3.0 and 
+          estimated_records <= 3_000_000 and 
+          available_memory_gb >= 1.0):
+        return {
+            'strategy': 'streaming_optimized', 
+            'batch_size': 10_000,
+            'description': 'Streaming con batch ottimizzati per file grandi',
+            'expected_speed': 'MEDIO'
+        }
+    
+    # STRATEGIA 4: STREAMING_SAFE (massima sicurezza)
+    # File molto grandi o sistema con poca memoria
+    else:
+        return {
+            'strategy': 'streaming_safe',
+            'batch_size': 5_000,
+            'description': 'Streaming sicuro per file molto grandi o memoria limitata',
+            'expected_speed': 'MEDIO-BASSO'
+        }
+
+def process_file_memory_optimized(json_file, category, current_table_definitions, progress_tracker, strategy):
+    """
+    Processing ottimizzato per velocità: carica tutto in memoria.
+    Usa solo per file che sicuramente stanno in memoria.
+    """
+    file_name = Path(json_file).name
+    
+    # Verifica se già processato
+    with DatabaseManager.get_pooled_connection() as conn_check:
+        if is_file_processed(conn_check.connection, file_name):
+            import_logger.info(f"✅ [OK] File già processato: {file_name}")
+            progress_tracker.processed_files += 1
+            return True
+    
+    try:
+        import_logger.info(f"🚀 [MEMORY-OPT] Processing ad alta velocità: {file_name}")
+        import_logger.info(f"🚀 [STRATEGY] {strategy['description']} (batch: {strategy['batch_size']:,})")
+        
+        start_time = time.time()
+        
+        # Carica tutto il file in memoria (è sicuro secondo l'analisi)
+        all_records = []
+        processed_records_in_file = 0
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    all_records.append((record, file_name, category))
+                    processed_records_in_file += 1
+                    
+                except json.JSONDecodeError as e:
+                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num}: {e}")
+                    continue
+        
+        import_logger.info(f"📥 [LOADED] {processed_records_in_file:,} record caricati in memoria")
+        
+        # Inizia tracking
+        progress_tracker.start_file(file_name, processed_records_in_file)
+        
+        # Processa in batch grandi per massima velocità
+        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
+        batch_size = strategy['batch_size']
+        total_batches = math.ceil(len(all_records) / batch_size)
+        
+        import_logger.info(f"🔄 [BATCHING] {total_batches} batch da {batch_size:,} record")
+        
+        records_completed = 0
+        for i in range(0, len(all_records), batch_size):
+            batch_num = (i // batch_size) + 1
+            batch_chunk = all_records[i:i + batch_size]
+            
+            batch_logger.info(f"🚀 [FAST-BATCH] {batch_num}/{total_batches} ({len(batch_chunk):,} record)")
+            
+            # Processing veloce
+            chunk_args = (batch_chunk, file_name, batch_id, current_table_definitions, category)
+            process_chunk_sequential(chunk_args)
+            
+            records_completed += len(batch_chunk)
+            progress_tracker.update_file_progress(records_completed)
+        
+        # Finalizza
+        total_time = time.time() - start_time
+        speed = processed_records_in_file / total_time if total_time > 0 else 0
+        
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
+        
+        progress_tracker.finish_file(processed_records_in_file)
+        
+        import_logger.info(f"✅ [SPEED-SUCCESS] {file_name} completato in {total_time:.1f}s ({speed:.0f} rec/s)")
+        
+        # Cleanup
+        del all_records
+        gc.collect()
+        
+        return True
+        
+    except Exception as e:
+        import_logger.error(f"🚨 [SPEED-ERROR] Errore in processing veloce: {e}")
+        
+        # Fallback a streaming in caso di errore
+        import_logger.warning(f"🔄 [FALLBACK] Provo con streaming come backup...")
+        return process_file_streaming(json_file, category, current_table_definitions, progress_tracker)
+
+def process_file_balanced_batching(json_file, category, current_table_definitions, progress_tracker, strategy):
+    """
+    Processing bilanciato: batch medi per bilanciare velocità e memoria.
+    """
+    file_name = Path(json_file).name
+    
+    # Verifica se già processato
+    with DatabaseManager.get_pooled_connection() as conn_check:
+        if is_file_processed(conn_check.connection, file_name):
+            import_logger.info(f"✅ [OK] File già processato: {file_name}")
+            progress_tracker.processed_files += 1
+            return True
+    
+    try:
+        import_logger.info(f"⚖️  [BALANCED] Processing bilanciato: {file_name}")
+        import_logger.info(f"⚖️  [STRATEGY] {strategy['description']} (batch: {strategy['batch_size']:,})")
+        
+        start_time = time.time()
+        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
+        batch_size = strategy['batch_size']
+        
+        current_batch = []
+        processed_records_in_file = 0
+        total_batches_processed = 0
+        
+        # Stima record per tracking
+        file_analysis = analyze_file_before_processing(json_file)
+        estimated_records = file_analysis['estimated_records'] if file_analysis else 0
+        progress_tracker.start_file(file_name, estimated_records)
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    current_batch.append((record, file_name, category))
+                    processed_records_in_file += 1
+                    
+                    # Processa batch quando è pieno
+                    if len(current_batch) >= batch_size:
+                        total_batches_processed += 1
+                        
+                        batch_logger.info(f"⚖️  [BALANCED-BATCH] {total_batches_processed} ({len(current_batch):,} record)")
+                        
+                        chunk_args = (current_batch, file_name, batch_id, current_table_definitions, category)
+                        process_chunk_sequential(chunk_args)
+                        
+                        progress_tracker.update_file_progress(processed_records_in_file)
+                        
+                        # Libera memoria del batch
+                        current_batch = []
+                        
+                        # Controllo memoria ogni 10 batch
+                        if total_batches_processed % 10 == 0:
+                            memory_info = psutil.virtual_memory()
+                            import_logger.info(f"⚖️  [BALANCED] Batch {total_batches_processed} - RAM: {memory_info.percent:.1f}%")
+                            
+                            if memory_info.percent > 85:
+                                gc.collect()  # Garbage collection preventiva
+                    
+                except json.JSONDecodeError as e:
+                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num}: {e}")
+                    continue
+        
+        # Processa ultimo batch parziale
+        if current_batch:
+            total_batches_processed += 1
+            batch_logger.info(f"⚖️  [BALANCED-FINAL] Ultimo batch ({len(current_batch):,} record)")
+            
+            chunk_args = (current_batch, file_name, batch_id, current_table_definitions, category)
+            process_chunk_sequential(chunk_args)
+        
+        # Finalizza
+        total_time = time.time() - start_time
+        speed = processed_records_in_file / total_time if total_time > 0 else 0
+        
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
+        
+        progress_tracker.finish_file(processed_records_in_file)
+        
+        import_logger.info(f"✅ [BALANCED-SUCCESS] {file_name} completato in {total_time:.1f}s ({speed:.0f} rec/s)")
+        
+        # Cleanup
+        gc.collect()
+        
+        return True
+        
+    except Exception as e:
+        import_logger.error(f"🚨 [BALANCED-ERROR] Errore in processing bilanciato: {e}")
+        
+        # Fallback a streaming
+        import_logger.warning(f"🔄 [FALLBACK] Provo con streaming...")
+        return process_file_streaming(json_file, category, current_table_definitions, progress_tracker)
+
+def process_file_streaming_with_custom_batch(json_file, category, current_table_definitions, progress_tracker, strategy):
+    """
+    Versione del processo streaming con batch size personalizzato dalla strategia.
+    """
+    # Modifica temporaneamente i parametri interni dello streaming
+    file_name = Path(json_file).name
+    
+    # Verifica se già processato
+    with DatabaseManager.get_pooled_connection() as conn_check:
+        if is_file_processed(conn_check.connection, file_name):
+            import_logger.info(f"✅ [OK] File già processato: {file_name}")
+            progress_tracker.processed_files += 1
+            return True
+    
+    # Analisi per determinare se è problematico (per logging)
+    file_analysis = analyze_file_before_processing(json_file)
+    if not file_analysis:
+        import_logger.error(f"🚨 [SKIP] Impossibile analizzare {file_name}, lo salto")
+        return False
+    
+    try:
+        import_logger.info(f"🎯 [CUSTOM-STREAMING] Processing con strategia: {strategy['strategy']}")
+        import_logger.info(f"🎯 [BATCH-SIZE] Batch personalizzato: {strategy['batch_size']:,} record")
+        start_time = time.time()
+        
+        # Inizia il tracking del file
+        progress_tracker.start_file(file_name, file_analysis['estimated_records'])
+        
+        batch_id = f"{int(time.time())}_{progress_tracker.processed_files + 1}"
+        current_chunk = []
+        processed_records_in_file = 0
+        total_chunks_processed = 0
+        custom_batch_size = strategy['batch_size']
+        
+        # STREAMING PROCESSING con batch size personalizzato
+        with open(json_file, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    record = json.loads(line)
+                    current_chunk.append((record, file_name, category))
+                    processed_records_in_file += 1
+                    
+                    # PROCESSA IL CHUNK con dimensione personalizzata
+                    if len(current_chunk) >= custom_batch_size:
+                        success = process_chunk_immediately(
+                            current_chunk, 
+                            file_name, 
+                            batch_id, 
+                            current_table_definitions, 
+                            category,
+                            total_chunks_processed + 1,
+                            file_analysis['is_problematic']
+                        )
+                        
+                        if success:
+                            total_chunks_processed += 1
+                            progress_tracker.update_file_progress(processed_records_in_file)
+                        
+                        # LIBERA IMMEDIATAMENTE LA MEMORIA
+                        current_chunk = []
+                        gc.collect()
+                        
+                        # Log memoria per strategia
+                        if strategy['strategy'] in ['streaming_optimized', 'streaming_safe'] and total_chunks_processed % 10 == 0:
+                            memory_info = psutil.virtual_memory()
+                            import_logger.info(f"🎯 [CUSTOM] {strategy['strategy']} - Chunk {total_chunks_processed} - RAM: {memory_info.percent:.1f}%")
+                            
+                            # EMERGENCY BRAKE per tutte le strategie
+                            if memory_info.percent > 92:
+                                import_logger.warning(f"🚨 [EMERGENCY] RAM critica ({memory_info.percent:.1f}%), pausa 3s...")
+                                time.sleep(3)
+                                gc.collect()
+                    
+                    # Controllo memoria ogni 2000 record
+                    if processed_records_in_file % 2000 == 0:
+                        memory_info = psutil.virtual_memory()
+                        if memory_info.percent > 95:
+                            import_logger.error(f"🚨 [ABORT] RAM critica ({memory_info.percent:.1f}%) - interrompo file")
+                            raise MemoryError(f"RAM critica: {memory_info.percent:.1f}%")
+                        
+                except json.JSONDecodeError as e:
+                    import_logger.warning(f"⚠️  [JSON] Errore parsing riga {line_num} in {file_name}: {e}")
+                    continue
+                except Exception as e:
+                    import_logger.error(f"🚨 [ERROR] Errore inaspettato riga {line_num} in {file_name}: {e}")
+                    continue
+        
+        # Processa l'ultimo chunk parziale
+        if current_chunk:
+            success = process_chunk_immediately(
+                current_chunk, 
+                file_name, 
+                batch_id, 
+                current_table_definitions, 
+                category,
+                total_chunks_processed + 1,
+                file_analysis['is_problematic']
+            )
+            if success:
+                total_chunks_processed += 1
+            current_chunk = []
+        
+        # Finalizzazione
+        total_time = time.time() - start_time
+        speed = processed_records_in_file / total_time if total_time > 0 else 0
+        
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file)
+        
+        progress_tracker.finish_file(processed_records_in_file)
+        
+        import_logger.info(f"✅ [CUSTOM-SUCCESS] {file_name} con {strategy['strategy']} in {total_time:.1f}s ({speed:.0f} rec/s)")
+        import_logger.info(f"📊 [FINAL] Record: {processed_records_in_file:,}, Chunk: {total_chunks_processed}, Batch size: {custom_batch_size:,}")
+        
+        # Cleanup finale
+        gc.collect()
+        final_memory = psutil.virtual_memory()
+        import_logger.info(f"🧠 [FINAL] RAM finale: {final_memory.percent:.1f}%")
+        
+        return True
+        
+    except Exception as e:
+        total_time = time.time() - start_time
+        error_message = str(e)
+        
+        import_logger.error(f"🚨 [CUSTOM-ERROR] Errore in {strategy['strategy']} per {file_name} dopo {total_time:.1f}s: {error_message}")
+        
+        # Marca come fallito
+        with DatabaseManager.get_pooled_connection() as conn_mark:
+            detailed_error = f"CUSTOM-STREAMING FAIL - {strategy['strategy']} - {error_message}"
+            mark_file_processed(conn_mark.connection, file_name, processed_records_in_file, 'failed', detailed_error)
+        
+        # Cleanup di emergenza
         gc.collect()
         
         return False
