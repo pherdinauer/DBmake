@@ -298,8 +298,12 @@ def handle_type_compatibility_error(cursor, error_message, table_name):
         if error_type in ['incorrect_integer', 'out_of_range']:
             # Analizza il valore per determinare il tipo più appropriato
             if problematic_value and problematic_value != "out_of_range":
+                # Controlla se è un flag (Y/N/S)
+                if column_name and 'flag_' in column_name.lower() and problematic_value.upper() in ['Y', 'N', 'S', 'T', 'F']:
+                    alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} CHAR(1)"
+                    logger.info(f"[ADAPT] Rilevato flag in '{column_name}' -> CHAR(1)")
                 # Controlla se è un codice fiscale
-                if re.match(r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$', problematic_value):
+                elif re.match(r'^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$', problematic_value):
                     alter_query = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR(16)"
                     logger.info(f"[ADAPT] Rilevato codice fiscale in '{column_name}' -> VARCHAR(16)")
                 # Controlla se è un CIG
@@ -554,6 +558,12 @@ def proactive_schema_fixes(cursor, table_name):
             ("partita_iva", "VARCHAR(11)", "Partite IVA standard"),
             ("cig", "VARCHAR(20)", "CIG possono variare"),
             ("cup", "VARCHAR(20)", "CUP possono variare"),
+            ("flag_quote", "CHAR(1)", "Flag quote sono Y/N/S"),
+            ("flag_ricorso", "CHAR(1)", "Flag ricorso sono Y/N"),
+            ("flag_subappalto", "CHAR(1)", "Flag subappalto sono Y/N"),
+            ("flag_servizi", "CHAR(1)", "Flag servizi sono Y/N"),
+            ("flag_forniture", "CHAR(1)", "Flag forniture sono Y/N"),
+            ("flag_lavori", "CHAR(1)", "Flag lavori sono Y/N"),
         ]
         
         # Ottieni la lista delle colonne esistenti
