@@ -10,6 +10,7 @@ import logging
 import mysql.connector
 from mysql.connector import errorcode
 import time
+import argparse
 
 # Setup logging
 logging.basicConfig(
@@ -166,6 +167,183 @@ def test_database_connection():
         logger.error(f"❌ Errore generico durante test database: {e}")
         return False
 
+def reset_processed_files():
+    """Resetta la tabella processed_files per permettere re-import."""
+    logger.info("🔧 Reset Cache Importazione ANAC")
+    logger.info("=" * 50)
+    
+    try:
+        # Connessione al database
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            autocommit=True
+        )
+        cursor = conn.cursor()
+        
+        # Controlla quanti file sono marcati come processati
+        cursor.execute("SELECT COUNT(*) FROM processed_files WHERE status = 'completed'")
+        completed_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM processed_files WHERE status = 'failed'")
+        failed_count = cursor.fetchone()[0]
+        
+        logger.info(f"📊 File attualmente marcati come processati:")
+        logger.info(f"    ✅ Completati: {completed_count}")
+        logger.info(f"    ❌ Falliti: {failed_count}")
+        logger.info(f"    📝 Totale: {completed_count + failed_count}")
+        
+        if completed_count + failed_count == 0:
+            logger.info("✅ Nessun file da resettare - tabella già vuota")
+            return True
+        
+        # Opzioni di reset
+        print("\n🔧 Opzioni di reset disponibili:")
+        print("    1. Resetta SOLO i file falliti (recommended)")
+        print("    2. Resetta TUTTI i file (re-import completo)")  
+        print("    3. Mostra dettagli file falliti")
+        print("    4. Esci senza modifiche")
+        
+        choice = input("\n👉 Scegli opzione (1-4): ").strip()
+        
+        if choice == "1":
+            # Reset solo file falliti
+            cursor.execute("DELETE FROM processed_files WHERE status = 'failed'")
+            deleted = cursor.rowcount
+            logger.info(f"✅ Rimossi {deleted} file falliti dalla lista")
+            logger.info("🚀 Ora puoi rilanciare l'importazione per processare i file falliti")
+            
+        elif choice == "2":
+            # Reset completo
+            print("⚠️  Stai per resettare TUTTI i file processati!")
+            print("   Questo farà ripartire l'importazione da zero per tutti i 647 file.")
+            confirm = input("   Sei sicuro? Digita 'RESET' per confermare: ").strip()
+            if confirm == 'RESET':
+                cursor.execute("DELETE FROM processed_files")
+                deleted = cursor.rowcount
+                logger.info(f"✅ Rimossi TUTTI i {deleted} file dalla lista")
+                logger.info("🚀 Ora puoi rilanciare l'importazione completa")
+            else:
+                logger.info("❌ Reset annullato - conferma non corretta")
+                
+        elif choice == "3":
+            # Mostra dettagli file falliti
+            cursor.execute("""
+                SELECT file_name, processed_at, error_message 
+                FROM processed_files 
+                WHERE status = 'failed' 
+                ORDER BY processed_at DESC 
+                LIMIT 20
+            """)
+            failed_files = cursor.fetchall()
+            
+            if failed_files:
+                logger.info(f"\n📋 Ultimi {len(failed_files)} file falliti:")
+                for file_name, processed_at, error_msg in failed_files:
+                    logger.info(f"    ❌ {file_name} ({processed_at})")
+                    if error_msg:
+                        logger.info(f"       Errore: {error_msg[:100]}...")
+            else:
+                logger.info("✅ Nessun file fallito trovato")
+                
+        elif choice == "4":
+            logger.info("👋 Uscita senza modifiche")
+            
+        else:
+            logger.error("❌ Opzione non valida")
+            return False
+            
+        cursor.close()
+        conn.close()
+        return True
+        
+    except mysql.connector.Error as e:
+        safe_message = safe_str_from_mysql_error(e)
+        logger.error(f"❌ Errore MySQL durante reset: {safe_message}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Errore durante reset: {e}")
+        return False
+
+def show_menu():
+    """Mostra il menu principale con le opzioni disponibili."""
+    print("\n" + "=" * 60)
+    print("🔧 ANAC MySQL Import Tool")
+    print("=" * 60)
+    print("Scegli un'opzione:")
+    print("  1. 🚀 Avvia importazione dati ANAC")
+    print("  2. 🔧 Reset cache file processati")
+    print("  3. 📊 Mostra stato database")
+    print("  4. 🔍 Test connessione MySQL")
+    print("  5. ❌ Esci")
+    print("=" * 60)
+    
+    choice = input("👉 Scegli opzione (1-5): ").strip()
+    return choice
+
+def show_database_status():
+    """Mostra lo stato del database e delle tabelle."""
+    logger.info("📊 Verifica stato database...")
+    
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            autocommit=True
+        )
+        cursor = conn.cursor()
+        
+        # Tabelle esistenti
+        cursor.execute("SHOW TABLES")
+        tables = [table[0] for table in cursor.fetchall()]
+        
+        logger.info(f"📋 Tabelle nel database '{MYSQL_DATABASE}': {len(tables)}")
+        
+        # Statistiche processed_files
+        if 'processed_files' in tables:
+            cursor.execute("SELECT status, COUNT(*) FROM processed_files GROUP BY status")
+            status_counts = dict(cursor.fetchall())
+            
+            logger.info("📊 Stato file processati:")
+            logger.info(f"    ✅ Completati: {status_counts.get('completed', 0)}")
+            logger.info(f"    ❌ Falliti: {status_counts.get('failed', 0)}")
+        
+        # Tabelle dati per categoria
+        data_tables = [t for t in tables if t.endswith('_data')]
+        if data_tables:
+            logger.info(f"📁 Tabelle dati categorie: {len(data_tables)}")
+            
+            total_records = 0
+            for table in data_tables[:10]:  # Mostra solo le prime 10
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    total_records += count
+                    logger.info(f"    • {table}: {count:,} record")
+                except:
+                    logger.info(f"    • {table}: [errore conteggio]")
+            
+            if len(data_tables) > 10:
+                logger.info(f"    ... e altre {len(data_tables) - 10} tabelle")
+                
+            logger.info(f"📈 Record totali (prime 10 tabelle): {total_records:,}")
+        
+        cursor.close()
+        conn.close()
+        return True
+        
+    except mysql.connector.Error as e:
+        safe_message = safe_str_from_mysql_error(e)
+        logger.error(f"❌ Errore durante verifica stato: {safe_message}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Errore durante verifica stato: {e}")
+        return False
+
 def run_import_script():
     """Esegue il vero script di import."""
     logger.info("🚀 Avvio script di importazione...")
@@ -184,31 +362,95 @@ def run_import_script():
         return False
 
 def main():
-    """Funzione principale del wrapper."""
-    logger.info("🔧 MySQL Import Wrapper - Gestione robusta InterfaceError")
-    logger.info("=" * 70)
+    """Funzione principale del wrapper con menu interattivo."""
+    # Parsing argomenti da linea di comando
+    parser = argparse.ArgumentParser(description='ANAC MySQL Import Tool')
+    parser.add_argument('--menu', action='store_true', help='Mostra menu interattivo')
+    parser.add_argument('--reset', action='store_true', help='Reset cache file processati')
+    parser.add_argument('--status', action='store_true', help='Mostra stato database')
+    parser.add_argument('--import', action='store_true', help='Avvia importazione diretta')
+    args = parser.parse_args()
     
-    # Step 1: Test connessione base
+    logger.info("🔧 ANAC MySQL Import Tool")
+    logger.info("=" * 50)
+    
+    # Test connessioni di base
     if not test_mysql_connection():
         logger.error("❌ Impossibile connettersi a MySQL. Verifica le credenziali.")
         sys.exit(1)
     
-    # Step 2: Crea database se necessario
     if not create_database_if_not_exists():
         logger.error("❌ Impossibile creare/verificare il database.")
         sys.exit(1)
     
-    # Step 3: Test connessione al database
     if not test_database_connection():
         logger.error("❌ Impossibile connettersi al database target.")
         sys.exit(1)
     
-    # Step 4: Esegui import
-    if not run_import_script():
-        logger.error("❌ Importazione fallita.")
-        sys.exit(1)
+    # Gestione argomenti da CLI
+    if args.reset:
+        if reset_processed_files():
+            logger.info("🎉 Reset completato!")
+        else:
+            logger.error("❌ Reset fallito!")
+        sys.exit(0)
     
-    logger.info("🎉 Processo completato con successo!")
+    elif args.status:
+        if show_database_status():
+            logger.info("🎉 Verifica completata!")
+        else:
+            logger.error("❌ Verifica fallita!")
+        sys.exit(0)
+    
+    elif args.import:
+        if run_import_script():
+            logger.info("🎉 Importazione completata!")
+        else:
+            logger.error("❌ Importazione fallita!")
+        sys.exit(0)
+    
+    # Menu interattivo (default o --menu)
+    elif args.menu or len(sys.argv) == 1:
+        while True:
+            choice = show_menu()
+            
+            if choice == "1":
+                logger.info("🚀 Avvio importazione...")
+                if run_import_script():
+                    logger.info("🎉 Importazione completata con successo!")
+                else:
+                    logger.error("❌ Importazione fallita!")
+                    
+            elif choice == "2":
+                if reset_processed_files():
+                    logger.info("🎉 Reset completato!")
+                else:
+                    logger.error("❌ Reset fallito!")
+                    
+            elif choice == "3":
+                if show_database_status():
+                    logger.info("🎉 Verifica completata!")
+                else:
+                    logger.error("❌ Verifica fallita!")
+                    
+            elif choice == "4":
+                logger.info("🔍 Test connessione già eseguito all'avvio - connessione OK!")
+                
+            elif choice == "5":
+                logger.info("👋 Arrivederci!")
+                break
+                
+            else:
+                logger.error("❌ Opzione non valida! Scegli tra 1-5.")
+    
+    else:
+        # Modalità legacy (senza argomenti)
+        logger.info("🚀 Modalità legacy - importazione diretta")
+        if run_import_script():
+            logger.info("🎉 Processo completato con successo!")
+        else:
+            logger.error("❌ Importazione fallita!")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main() 
