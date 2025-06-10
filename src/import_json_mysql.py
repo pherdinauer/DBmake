@@ -564,6 +564,9 @@ def proactive_schema_fixes(cursor, table_name):
             ("flag_servizi", "CHAR(1)", "Flag servizi sono Y/N"),
             ("flag_forniture", "CHAR(1)", "Flag forniture sono Y/N"),
             ("flag_lavori", "CHAR(1)", "Flag lavori sono Y/N"),
+            ("numero_gara", "TEXT", "Numeri gara possono essere molto lunghi"),
+            ("numero_lotto", "TEXT", "Numeri lotto possono essere molto lunghi"),
+            ("descrizione_gara", "LONGTEXT", "Descrizioni gara molto lunghe"),
         ]
         
         # Ottieni la lista delle colonne esistenti
