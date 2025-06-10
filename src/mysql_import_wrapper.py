@@ -368,7 +368,7 @@ def main():
     parser.add_argument('--menu', action='store_true', help='Mostra menu interattivo')
     parser.add_argument('--reset', action='store_true', help='Reset cache file processati')
     parser.add_argument('--status', action='store_true', help='Mostra stato database')
-    parser.add_argument('--import', action='store_true', help='Avvia importazione diretta')
+    parser.add_argument('--run', action='store_true', help='Avvia importazione diretta')
     args = parser.parse_args()
     
     logger.info("🔧 ANAC MySQL Import Tool")
@@ -402,7 +402,7 @@ def main():
             logger.error("❌ Verifica fallita!")
         sys.exit(0)
     
-    elif args.import:
+    elif args.run:
         if run_import_script():
             logger.info("🎉 Importazione completata!")
         else:
