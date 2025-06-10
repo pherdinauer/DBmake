@@ -2234,7 +2234,7 @@ def main():
                 categories = group_files_by_category(json_files)
                 
                 with DatabaseManager.get_connection() as conn:
-                    clean_problematic_tables(conn, categories.keys())
+                    clean_problematic_tables(conn.connection, categories.keys())
                 
                 logger.info(f"[CLEANUP] Pulizia completata!")
                 
@@ -2262,14 +2262,14 @@ def main():
             
             logger.info("[AUTO-CLEANUP] Verifica e pulizia preventiva tabelle...")
             with DatabaseManager.get_connection() as conn:
-                clean_problematic_tables(conn, categories.keys())
+                clean_problematic_tables(conn.connection, categories.keys())
         except Exception as cleanup_error:
             logger.warning(f"[AUTO-CLEANUP] Errore durante pulizia preventiva: {cleanup_error}")
             # Non bloccare l'importazione per errori di pulizia
         
         # Usa DatabaseManager per la connessione principale
         with DatabaseManager.get_connection() as conn:
-            import_all_json_files(JSON_BASE_PATH, conn)
+            import_all_json_files(JSON_BASE_PATH, conn.connection)
             
         # Chiudi il pool alla fine
         DatabaseManager.close_pool()
