@@ -717,6 +717,43 @@ def process_batch(db_connection, batch, table_definitions, batch_id, progress_tr
     # Determina il nome della tabella per questa categoria
     table_name = f"{category}_data" if category else "main_data"
     
+    # 🚀 DYNAMIC SCHEMA: Assicura che tabella e colonne esistano
+    if category:
+        try:
+            from .dynamic_schema import DynamicSchemaManager
+            from .database_manager import DatabaseManager
+            
+            # Usa un wrapper per il db_manager
+            class DBWrapper:
+                def __init__(self, connection):
+                    self.connection = connection
+                
+                def execute_with_retry(self, query, params=None, fetch=False):
+                    cursor = self.connection.cursor()
+                    cursor.execute(query, params or ())
+                    if fetch:
+                        return cursor.fetchall()
+                    return cursor.rowcount
+            
+            db_wrapper = DBWrapper(db_connection)
+            schema_manager = DynamicSchemaManager(db_wrapper)
+            
+            # Prendi un record di esempio per analizzare la struttura
+            sample_record = batch[0][0] if batch else {}
+            
+            # Assicura che la tabella esista
+            table_name = schema_manager.ensure_table_exists(category, sample_record)
+            
+            # Per ogni record nel batch, assicura che le colonne esistano
+            for record, _, _ in batch[:5]:  # Controlla solo i primi 5 per performance
+                schema_manager.ensure_columns_exist(table_name, record)
+                
+            batch_logger.info(f"🎯 [DYNAMIC] Tabella {table_name} pronta per categoria '{category}'")
+            
+        except Exception as e:
+            batch_logger.warning(f"⚠️  Errore Dynamic Schema: {e}, continuo con schema statico")
+            # Continua con il processo normale se il dynamic schema fallisce
+    
     with LogContext(batch_logger, f"processing batch", 
                    batch_size=len(batch), file=file_name, batch_id=batch_id, category=category, table=table_name):
         try:
@@ -1691,7 +1728,10 @@ CATEGORIES = {
 
 def group_files_by_category(json_files):
     """
-    Raggruppa i file JSON per categoria basata su pattern regex predefiniti.
+    Raggruppa i file JSON per categoria.
+    Supporta DUAL MODE:
+    1. Pattern-based: cerca pattern nel nome file (modalità legacy)
+    2. Directory-based: usa il nome della directory come categoria (modalità nuova)
     
     Ignora le date nel nome file (es. 20240201_, 20240401_) per raggruppare
     file dello stesso tipo ma di periodi diversi nella stessa tabella.
@@ -1700,59 +1740,113 @@ def group_files_by_category(json_files):
     categorized_files = {category: [] for category in CATEGORIES.keys()}
     uncategorized_files = []
     
+    # Detect categorization mode
+    directory_based_files = 0
+    pattern_based_files = 0
+    
     for json_file in json_files:
         file_path = Path(json_file)
-        file_name = file_path.name  # Solo il nome del file, senza path
+        file_name = file_path.name
+        parent_dir = file_path.parent.name
         
-        # Rimuovi estensione per il matching
-        file_stem = file_path.stem
+        # Check if parent directory matches a category pattern
+        if parent_dir in ['downloads', 'data'] or parent_dir == Path(json_file).parts[-2]:
+            # Skip base directories
+            continue
         
-        # RIMUOVI LE DATE dal nome file prima del pattern matching
-        # Pattern per date: YYYYMMDD_ o YYYYMMDD- all'inizio (es. 20240201_, 20240401-, etc.)
-        cleaned_name = re.sub(r'^\d{8}[_-]', '', file_stem)
-        
-        # Log del cleaning per debug
-        if cleaned_name != file_stem:
-            import_logger.debug(f"Cleaned file name: '{file_stem}' -> '{cleaned_name}'")
-        
-        category_found = False
-        
-        # Testa ogni categoria con i suoi pattern sul nome pulito
+        # Count files by organization type
         for category, patterns in CATEGORIES.items():
             for pattern in patterns:
-                # Cerca il pattern nel nome del file pulito (senza date)
-                if re.search(pattern, cleaned_name, re.IGNORECASE):
-                    categorized_files[category].append(json_file)
-                    import_logger.debug(f"File '{file_name}' -> categoria '{category}' (pattern: '{pattern}' su nome pulito: '{cleaned_name}')")
-                    category_found = True
+                if re.search(pattern, parent_dir, re.IGNORECASE):
+                    directory_based_files += 1
+                    break
+    
+    # Determine best mode
+    total_files = len(json_files)
+    if directory_based_files > total_files * 0.7:  # >70% in categorized directories
+        categorization_mode = "directory"
+        import_logger.info(f"[AUTO-DETECT] Modalità DIRECTORY rilevata: {directory_based_files}/{total_files} file organizzati per directory")
+    else:
+        categorization_mode = "pattern"
+        import_logger.info(f"[AUTO-DETECT] Modalità PATTERN rilevata: file organizzati per nome")
+    
+    # Categorization process
+    for json_file in json_files:
+        file_path = Path(json_file)
+        file_name = file_path.name
+        file_stem = file_path.stem
+        parent_dir = file_path.parent.name
+        
+        # RIMUOVI LE DATE dal nome file
+        cleaned_name = re.sub(r'^\d{8}[_-]', '', file_stem)
+        
+        category_found = False
+        found_category = None
+        found_method = None
+        
+        if categorization_mode == "directory":
+            # Directory-based categorization
+            for category, patterns in CATEGORIES.items():
+                for pattern in patterns:
+                    if re.search(pattern, parent_dir, re.IGNORECASE):
+                        categorized_files[category].append(json_file)
+                        found_category = category
+                        found_method = f"directory:'{parent_dir}'"
+                        category_found = True
+                        break
+                if category_found:
                     break
             
-            if category_found:
-                break
+            # Fallback to pattern matching if directory method fails
+            if not category_found:
+                for category, patterns in CATEGORIES.items():
+                    for pattern in patterns:
+                        if re.search(pattern, cleaned_name, re.IGNORECASE):
+                            categorized_files[category].append(json_file)
+                            found_category = category
+                            found_method = f"pattern:'{pattern}'"
+                            category_found = True
+                            break
+                    if category_found:
+                        break
         
-        # Se nessun pattern ha fatto match, aggiungi agli uncategorized
-        if not category_found:
+        else:
+            # Pattern-based categorization (legacy)
+            for category, patterns in CATEGORIES.items():
+                for pattern in patterns:
+                    if re.search(pattern, cleaned_name, re.IGNORECASE):
+                        categorized_files[category].append(json_file)
+                        found_category = category
+                        found_method = f"pattern:'{pattern}'"
+                        category_found = True
+                        break
+                if category_found:
+                    break
+        
+        # Log categorization result
+        if category_found:
+            import_logger.debug(f"File '{file_name}' -> categoria '{found_category}' ({found_method})")
+        else:
             uncategorized_files.append(json_file)
-            import_logger.warning(f"File NON categorizzato: '{file_name}' (nome pulito: '{cleaned_name}')")
+            import_logger.warning(f"File NON categorizzato: '{file_name}' (directory: '{parent_dir}', nome pulito: '{cleaned_name}')")
     
     # Rimuovi categorie vuote dal risultato
     final_categories = {cat: files for cat, files in categorized_files.items() if files}
     
-    # Statistiche di categorizzazione con info sul date cleaning
+    # Statistiche di categorizzazione
     total_categorized = sum(len(files) for files in final_categories.values())
-    import_logger.info(f"[CATEGORIES] Categorizzazione completata (IGNORA DATE):")
+    import_logger.info(f"[CATEGORIES] Categorizzazione completata ({categorization_mode.upper()} MODE):")
     import_logger.info(f"  - File categorizzati: {total_categorized}")
     import_logger.info(f"  - File NON categorizzati: {len(uncategorized_files)}")
     import_logger.info(f"  - Categorie attive: {len(final_categories)}")
-    import_logger.info(f"  - Date rimosse automaticamente da nomi file")
     
-    # Report per categoria con raggruppamento per data
+    # Report per categoria
     for category, files in final_categories.items():
         # Raggruppa per data per mostrare quanti file per ogni periodo
         date_groups = defaultdict(int)
         for file_path in files:
             file_name = Path(file_path).name
-            date_match = re.match(r'^(\d{8})_', file_name)
+            date_match = re.match(r'^(\d{8})[_-]', file_name)
             if date_match:
                 date = date_match.group(1)
                 date_groups[date] += 1
@@ -1763,9 +1857,9 @@ def group_files_by_category(json_files):
         import_logger.info(f"    * {category}: {len(files)} file totali - Date: {dates_info}")
     
     if uncategorized_files:
-        import_logger.warning(f"[WARN] File non categorizzati:")
+        import_logger.warning(f"[WARN] File non categorizzati ({len(uncategorized_files)}):")
         for uncategorized in uncategorized_files[:10]:  # Mostra solo i primi 10
-            import_logger.warning(f"    - {Path(uncategorized).name}")
+            import_logger.warning(f"    - {Path(uncategorized).name} (dir: {Path(uncategorized).parent.name})")
         if len(uncategorized_files) > 10:
             import_logger.warning(f"    ... e altri {len(uncategorized_files) - 10} file")
     
@@ -1914,8 +2008,18 @@ def import_all_json_files(base_path, conn):
             
             import_logger.info(f"[SCHEMA] Categoria '{category}': {len(table_definitions)} campi specifici")
         
-        # Crea le tabelle ottimizzate per categoria
-        create_dynamic_tables_by_category(category_table_definitions)
+        # Crea le tabelle ottimizzate per categoria (solo metadati per dynamic schema)
+        # create_dynamic_tables_by_category(category_table_definitions)  # Commentato per Dynamic Schema
+        
+        # 🚀 DYNAMIC SCHEMA: Crea solo le tabelle metadati, le tabelle dati saranno create on-the-fly
+        try:
+            from .database_manager import DatabaseManager
+            with DatabaseManager.get_connection() as db_manager:
+                create_metadata_tables_robust(db_manager, category_table_definitions)
+                import_logger.info("🎯 [DYNAMIC] Setup Dynamic Schema completato - tabelle create on-demand")
+        except Exception as e:
+            import_logger.warning(f"⚠️  Errore setup Dynamic Schema: {e}, uso metodo tradizionale")
+            create_dynamic_tables_by_category(category_table_definitions)
         
         # Inizializza il pool di connessioni centralizzato
         DatabaseManager.initialize_pool(pool_size=2)  # Solo 2 connessioni per mono-processo
