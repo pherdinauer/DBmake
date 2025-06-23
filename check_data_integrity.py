@@ -8,6 +8,7 @@ import sys
 import os
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 # Aggiungi il percorso src al path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -77,12 +78,15 @@ def run_integrity_check():
     }
     
     print("🔧 CONFIGURAZIONE VERIFICA INTEGRITÀ DATI")
-    print("="*50)
-    print(f"Host: {db_config['host']}")
-    print(f"User: {db_config['user']}")
-    print(f"Database: {db_config['database']}")
-    print(f"Verbose: {args.verbose}")
-    print("="*50)
+    print("="*60)
+    print(f"🌐 Host MySQL: {db_config['host']}")
+    print(f"👤 Utente: {db_config['user']}")
+    print(f"🗄️ Database: {db_config['database']}")
+    print(f"🔍 Modalità verbosa: {'Attiva' if args.verbose else 'Standard'}")
+    print(f"⏰ Avvio: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    print("="*60)
+    print("🚀 Inizializzazione controllo di sicurezza dei dati...")
+    print("")
     
     # Configura il logging se verbose
     if args.verbose:

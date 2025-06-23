@@ -158,13 +158,16 @@ class DataIntegrityChecker:
         Conta i record nel database per una specifica tabella
         """
         try:
+            logger.info(f"🔗 Connessione al database...")
             connection = self.get_database_connection()
             cursor = connection.cursor()
             
+            logger.info(f"📊 Esecuzione query: SELECT COUNT(*) FROM {table_name}")
             query = f"SELECT COUNT(*) FROM {table_name}"
             cursor.execute(query)
                 
             count = cursor.fetchone()[0]
+            logger.info(f"✅ Query completata con successo")
             
             cursor.close()
             connection.close()
@@ -172,7 +175,8 @@ class DataIntegrityChecker:
             return count
             
         except Error as e:
-            logger.error(f"❌ Errore conteggio database per tabella {table_name}: {e}")
+            logger.error(f"❌ ERRORE conteggio database per tabella {table_name}: {e}")
+            logger.error(f"💡 Verifica che la tabella esista e sia accessibile")
             return 0
     
     def find_missing_records(self, json_data: List[Dict[str, Any]], 
@@ -182,12 +186,20 @@ class DataIntegrityChecker:
         Trova i record mancanti nel database confrontando con i dati JSON
         """
         missing_records = []
+        total_records = len(json_data)
+        
+        logger.info(f"🔍 Ricerca dettagliata dei record mancanti...")
+        logger.info(f"📋 Record da verificare: {total_records:,}")
+        logger.info(f"🔑 Chiave primaria utilizzata: '{primary_key}'")
         
         try:
             connection = self.get_database_connection()
             cursor = connection.cursor()
             
-            for record in json_data:
+            checked_records = 0
+            batch_size = 1000
+            
+            for i, record in enumerate(json_data):
                 if primary_key in record:
                     key_value = record[primary_key]
                     
@@ -197,12 +209,34 @@ class DataIntegrityChecker:
                     
                     if cursor.fetchone()[0] == 0:
                         missing_records.append(record)
+                    
+                    checked_records += 1
+                    
+                    # Log progresso ogni batch_size record
+                    if checked_records % batch_size == 0:
+                        progress = (checked_records / total_records) * 100
+                        logger.info(f"⏳ Progresso: {checked_records:,}/{total_records:,} ({progress:.1f}%) - Mancanti trovati: {len(missing_records)}")
+                else:
+                    logger.warning(f"⚠️ Record senza chiave '{primary_key}' saltato: {record}")
             
             cursor.close()
             connection.close()
             
+            # Log finale della ricerca
+            logger.info(f"🎯 Ricerca completata:")
+            logger.info(f"   📊 Record controllati: {checked_records:,}")
+            logger.info(f"   ❌ Record mancanti: {len(missing_records):,}")
+            logger.info(f"   ✅ Record presenti: {checked_records - len(missing_records):,}")
+            
+            if len(missing_records) > 0:
+                logger.warning(f"⚠️ TROVATI {len(missing_records)} RECORD MANCANTI!")
+                # Mostra un esempio di record mancante
+                example_record = missing_records[0]
+                logger.warning(f"📄 Esempio record mancante: {primary_key}={example_record.get(primary_key, 'N/A')}")
+            
         except Error as e:
-            logger.error(f"❌ Errore ricerca record mancanti per {table_name}: {e}")
+            logger.error(f"❌ ERRORE durante ricerca record mancanti per {table_name}: {e}")
+            logger.error(f"💡 Controlla la connessione database e la struttura della tabella")
         
         return missing_records
     
@@ -211,24 +245,38 @@ class DataIntegrityChecker:
         Salva un report dettagliato dei dati mancanti
         """
         if not missing_records:
+            logger.info(f"✅ Nessun dato mancante da salvare per {filename}")
             return
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         missing_file = self.missing_data_dir / f"missing_{filename}_{timestamp}.json"
         
         try:
+            logger.info(f"💾 Creazione report dati mancanti...")
+            logger.info(f"   📊 Record mancanti: {len(missing_records):,}")
+            logger.info(f"   📁 File output: {missing_file}")
+            
             with open(missing_file, 'w', encoding='utf-8') as f:
                 json.dump({
                     'filename': filename,
                     'timestamp': timestamp,
                     'missing_count': len(missing_records),
-                    'missing_records': missing_records
+                    'missing_records': missing_records,
+                    'integrity_check': {
+                        'generated_by': 'Data Integrity Checker v1.0',
+                        'generation_time': datetime.now().isoformat(),
+                        'purpose': 'Record mancanti per recupero dati'
+                    }
                 }, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"📄 Report dati mancanti salvato: {missing_file}")
+            file_size = missing_file.stat().st_size / 1024  # KB
+            logger.info(f"✅ Report salvato con successo!")
+            logger.info(f"   📏 Dimensione file: {file_size:.1f} KB")
+            logger.info(f"   🔍 Usa questo file per identificare i dati da recuperare")
             
         except Exception as e:
-            logger.error(f"❌ Errore salvataggio report dati mancanti: {e}")
+            logger.error(f"❌ ERRORE durante salvataggio report dati mancanti: {e}")
+            logger.error(f"💡 Verifica i permessi di scrittura nella directory logs/missing_data/")
     
     def get_table_name_from_file(self, filename: str, dataset_type: str) -> str:
         """
@@ -259,27 +307,60 @@ class DataIntegrityChecker:
         Verifica l'integrità di un singolo file JSON
         """
         start_time = datetime.now()
-        logger.info(f"🔍 Verifica integrità: {file_path.name}")
         
-        # Informazioni base del file
+        # Log inizio verifica con dettagli file
         file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        logger.info(f"")
+        logger.info(f"🔍 AVVIO VERIFICA INTEGRITÀ")
+        logger.info(f"📁 File: {file_path.name}")
+        logger.info(f"📊 Dimensione: {file_size_mb:.2f} MB")
+        logger.info(f"🗂️ Dataset: {dataset_type}")
+        logger.info(f"⏰ Inizio: {start_time.strftime('%H:%M:%S')}")
+        logger.info(f"─" * 50)
+        
         file_hash = self.calculate_file_hash(file_path)
         errors = []
         
-        # Conta record nel JSON
+        # Fase 1: Lettura e conteggio JSON
+        logger.info(f"📖 FASE 1: Lettura file JSON...")
         source_count, json_data = self.count_json_records(file_path)
+        
         if source_count == 0:
+            logger.error(f"❌ ERRORE: Nessun record trovato nel file JSON")
             errors.append("Nessun record trovato nel file JSON")
+        else:
+            logger.info(f"✅ Record JSON letti: {source_count:,}")
+            logger.info(f"🔐 Hash file: {file_hash[:16]}...")
         
-        # Ottieni nome tabella corrispondente
+        # Fase 2: Mapping tabella database
         table_name = self.get_table_name_from_file(file_path.name, dataset_type)
+        logger.info(f"")
+        logger.info(f"🗄️ FASE 2: Verifica database...")
+        logger.info(f"📋 Tabella target: {table_name}")
         
-        # Conta record nel database
+        # Fase 3: Conteggio database
+        logger.info(f"🔢 Conteggio record nel database...")
         database_count = self.count_database_records(table_name)
+        logger.info(f"✅ Record database trovati: {database_count:,}")
         
-        # Trova record mancanti solo se abbiamo dati JSON
+        # Fase 4: Confronto e verifica sicurezza
+        logger.info(f"")
+        logger.info(f"🛡️ FASE 3: CONTROLLO DI SICUREZZA DATI")
+        logger.info(f"⚖️ Confronto JSON vs Database...")
+        logger.info(f"📄 Record attesi (JSON): {source_count:,}")
+        logger.info(f"🗄️ Record inseriti (DB): {database_count:,}")
+        
+        # Verifica iniziale basata sui conteggi
+        if source_count == database_count:
+            logger.info(f"✅ MATCH: I conteggi corrispondono perfettamente!")
+        else:
+            diff = abs(source_count - database_count)
+            logger.warning(f"⚠️ DISCREPANZA: Differenza di {diff:,} record")
+        
+        # Fase 5: Ricerca record mancanti (verifica dettagliata)
         missing_records = []
-        if json_data:
+        if json_data and source_count != database_count:
+            logger.info(f"🔍 Ricerca dettagliata record mancanti...")
             missing_records = self.find_missing_records(json_data, table_name)
         
         missing_count = len(missing_records)
@@ -291,12 +372,31 @@ class DataIntegrityChecker:
             success_rate = 0.0
             errors.append("Impossibile calcolare tasso di successo: nessun record JSON")
         
+        # Log risultati controllo sicurezza dettagliato
+        logger.info(f"")
+        logger.info(f"🔒 RISULTATO CONTROLLO DI SICUREZZA:")
+        if missing_count == 0:
+            logger.info(f"🎉 SICUREZZA CONFERMATA: Tutti i dati JSON sono stati inseriti correttamente!")
+            logger.info(f"✅ {source_count:,} record verificati - 100% successo")
+        else:
+            logger.error(f"🚨 ALLERTA SICUREZZA: {missing_count:,} record mancanti!")
+            logger.error(f"⚠️ Tasso successo: {success_rate:.1f}%")
+            logger.error(f"💥 PERDITA DATI RILEVATA - Verifica necessaria!")
+        
         # Salva report dati mancanti se ce ne sono
         if missing_records:
+            logger.info(f"📄 Generazione report dati mancanti...")
             self.save_missing_data_report(file_path.name, missing_records)
+            logger.info(f"💾 Report salvato con {len(missing_records)} record mancanti")
         
         end_time = datetime.now()
         processing_time = str(end_time - start_time)
+        
+        # Log finale con timing
+        logger.info(f"")
+        logger.info(f"⏱️ Verifica completata in {processing_time}")
+        logger.info(f"🏁 Fine: {end_time.strftime('%H:%M:%S')}")
+        logger.info(f"═" * 50)
         
         # Crea report
         report = FileIntegrityReport(
@@ -313,15 +413,9 @@ class DataIntegrityChecker:
             missing_data_details=missing_records[:10]  # Prime 10 per non appesantire
         )
         
-        # Log risultati
-        if missing_count == 0:
-            logger.info(f"✅ {file_path.name}: {source_count} record, 100% successo")
-        else:
-            logger.warning(f"⚠️ {file_path.name}: {missing_count}/{source_count} record mancanti ({success_rate:.1f}% successo)")
-        
         if errors:
             for error in errors:
-                logger.error(f"❌ {file_path.name}: {error}")
+                logger.error(f"❌ ERRORE AGGIUNTIVO: {error}")
         
         return report
     
@@ -330,40 +424,108 @@ class DataIntegrityChecker:
         Esegue verifica completa dell'integrità per tutti i dataset
         """
         start_time = datetime.now()
-        logger.info("🚀 Avvio verifica completa integrità dati")
+        
+        # Header principale
+        logger.info("🚀" * 20)
+        logger.info("🚀 SISTEMA VERIFICA INTEGRITÀ DATI MYSQL")
+        logger.info("🚀 Controllo di sicurezza JSON → Database")
+        logger.info("🚀" * 20)
+        logger.info(f"⏰ Inizio elaborazione: {start_time.strftime('%d/%m/%Y %H:%M:%S')}")
+        logger.info(f"🗄️ Database target: {self.db_config.get('database', 'N/A')}")
+        logger.info(f"💻 Host: {self.db_config.get('host', 'N/A')}")
+        logger.info("")
         
         all_reports = []
         files_with_issues = []
+        total_files_found = 0
+        total_datasets = len(self.json_data_paths)
         
+        # Conta prima tutti i file disponibili
+        logger.info("📊 SCANSIONE PRELIMINARE DATASET")
+        logger.info("─" * 40)
         for dataset_type, data_path in self.json_data_paths.items():
+            data_dir = Path(data_path)
+            if data_dir.exists():
+                json_files = list(data_dir.glob("*.json"))
+                total_files_found += len(json_files)
+                logger.info(f"📂 {dataset_type:<30} → {len(json_files):>3} file")
+            else:
+                logger.warning(f"⚠️ {dataset_type:<30} → DIRECTORY NON TROVATA")
+        
+        logger.info("─" * 40)
+        logger.info(f"📋 TOTALE: {total_files_found} file JSON in {total_datasets} dataset")
+        logger.info("")
+        
+        if total_files_found == 0:
+            logger.error("❌ ERRORE: Nessun file JSON trovato per la verifica!")
+            logger.error("💡 Verifica che i percorsi dei dati siano corretti")
+            return GlobalIntegrityReport(
+                total_files_processed=0,
+                total_source_records=0,
+                total_database_records=0,
+                total_missing_records=0,
+                global_success_rate=0.0,
+                processing_start=start_time.isoformat(),
+                processing_end=datetime.now().isoformat(),
+                files_with_issues=[],
+                detailed_reports=[]
+            )
+        
+        # Elaborazione dataset per dataset
+        current_file = 0
+        for dataset_index, (dataset_type, data_path) in enumerate(self.json_data_paths.items(), 1):
             data_dir = Path(data_path)
             
             if not data_dir.exists():
-                logger.warning(f"⚠️ Directory non trovata: {data_dir}")
                 continue
             
             # Trova tutti i file JSON nella directory
             json_files = list(data_dir.glob("*.json"))
-            
             if not json_files:
-                logger.warning(f"⚠️ Nessun file JSON trovato in: {data_dir}")
                 continue
             
-            logger.info(f"📂 Elaborazione {dataset_type}: {len(json_files)} file")
+            logger.info("🎯" * 15)
+            logger.info(f"🎯 DATASET {dataset_index}/{total_datasets}: {dataset_type.upper()}")
+            logger.info(f"📁 Percorso: {data_path}")
+            logger.info(f"📄 File da elaborare: {len(json_files)}")
+            logger.info("🎯" * 15)
             
-            for json_file in json_files:
+            dataset_success = 0
+            dataset_total = 0
+            
+            for file_index, json_file in enumerate(json_files, 1):
+                current_file += 1
+                
+                logger.info("")
+                logger.info(f"🔄 ELABORAZIONE FILE {current_file}/{total_files_found}")
+                logger.info(f"📂 Dataset: {dataset_type} ({file_index}/{len(json_files)})")
+                
                 try:
                     report = self.check_file_integrity(json_file, dataset_type)
                     all_reports.append(report)
+                    
+                    # Statistiche per dataset
+                    dataset_total += report.source_records
+                    dataset_success += (report.source_records - report.missing_records)
                     
                     if report.missing_records > 0 or report.errors:
                         files_with_issues.append(report.filename)
                         
                 except Exception as e:
-                    logger.error(f"❌ Errore elaborazione {json_file}: {e}")
+                    logger.error(f"💥 ERRORE CRITICO durante elaborazione {json_file}: {e}")
+                    logger.error(f"🚨 File saltato, continuando con il prossimo...")
                     files_with_issues.append(json_file.name)
+            
+            # Riepilogo dataset
+            dataset_rate = (dataset_success / dataset_total * 100) if dataset_total > 0 else 0
+            logger.info("")
+            logger.info(f"📊 RIEPILOGO DATASET '{dataset_type}':")
+            logger.info(f"✅ Record elaborati con successo: {dataset_success:,}/{dataset_total:,}")
+            logger.info(f"📈 Tasso successo dataset: {dataset_rate:.1f}%")
+            logger.info("")
         
         end_time = datetime.now()
+        total_duration = end_time - start_time
         
         # Calcola statistiche globali
         total_source = sum(r.source_records for r in all_reports)
@@ -373,6 +535,31 @@ class DataIntegrityChecker:
         global_success_rate = 0.0
         if total_source > 0:
             global_success_rate = ((total_source - total_missing) / total_source) * 100
+        
+        # Log risultato finale controllo sicurezza
+        logger.info("🔒" * 25)
+        logger.info("🔒 CONTROLLO DI SICUREZZA GLOBALE COMPLETATO")
+        logger.info("🔒" * 25)
+        logger.info(f"⏰ Durata totale: {total_duration}")
+        logger.info(f"📁 File elaborati: {len(all_reports)}")
+        logger.info(f"📄 Record JSON totali: {total_source:,}")
+        logger.info(f"🗄️ Record database totali: {total_database:,}")
+        logger.info(f"❌ Record mancanti: {total_missing:,}")
+        logger.info("")
+        
+        if total_missing == 0:
+            logger.info("🎉🎉🎉 SICUREZZA MASSIMA CONFERMATA! 🎉🎉🎉")
+            logger.info("✅ TUTTI i dati JSON sono stati inseriti correttamente nel database")
+            logger.info(f"💯 Tasso successo: {global_success_rate:.2f}%")
+            logger.info("🛡️ Nessuna perdita di dati rilevata")
+        else:
+            logger.error("🚨🚨🚨 ALLERTA SICUREZZA! 🚨🚨🚨")
+            logger.error(f"💥 {total_missing:,} RECORD MANCANTI rilevati!")
+            logger.error(f"⚠️ Tasso successo: {global_success_rate:.2f}%")
+            logger.error(f"📋 File con problemi: {len(files_with_issues)}")
+            logger.error("🔍 Controlla i report dettagliati per identificare i dati mancanti")
+        
+        logger.info("🔒" * 25)
         
         # Crea report globale
         global_report = GlobalIntegrityReport(
