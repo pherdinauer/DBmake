@@ -1,0 +1,65 @@
+2025-06-23 12:37:05,695 - INFO -    Workers: 4 processi paralleli
+2025-06-23 12:37:05,696 - INFO -    Chunk: 200,000 iniziale, max 500,000
+2025-06-23 12:37:05,696 - INFO -    INSERT batch: 3x più grandi (fino a 3M record)
+2025-06-23 12:37:05,710 - INFO - [VERSION CHECK] Executing updated src/import_json_mysql.py with InterfaceError handling - Version 2025-06-04-10:50
+2025-06-23 12:37:05,715 - INFO - [START] Inizio test categorizzazione
+2025-06-23 12:37:05,715 - INFO - [TEST MODE] Inizio test categorizzazione: 2025-06-23 12:37:05
+2025-06-23 12:37:05,715 - INFO - [DEBUG] Pattern regex per categoria:
+2025-06-23 12:37:05,722 - INFO -   aggiudicatari:
+2025-06-23 12:37:05,722 - INFO -     - aggiudicatari
+2025-06-23 12:37:05,722 - INFO -   aggiudicazioni:
+2025-06-23 12:37:05,722 - INFO -     - aggiudicazioni
+2025-06-23 12:37:05,722 - INFO -   avvio_contratto:
+2025-06-23 12:37:05,723 - INFO -     - avvio-contratto
+2025-06-23 12:37:05,723 - INFO -   categorie_dpcm:
+2025-06-23 12:37:05,723 - INFO -     - categorie-dpcm-aggregazione
+2025-06-23 12:37:05,723 - INFO -   categorie_opera:
+2025-06-23 12:37:05,724 - INFO -     - categorie-opera
+2025-06-23 12:37:05,724 - INFO -   cig:
+2025-06-23 12:37:05,725 - INFO -     - ^cig[_-]json
+2025-06-23 12:37:05,725 - INFO -     - ^smartcig[_-]json
+2025-06-23 12:37:05,726 - INFO -     - cig[_-]json
+2025-06-23 12:37:05,726 - INFO -     - smartcig[_-]json
+2025-06-23 12:37:05,726 - INFO -   collaudo:
+2025-06-23 12:37:05,726 - INFO -     - collaudo
+2025-06-23 12:37:05,727 - INFO -   fine_contratto:
+2025-06-23 12:37:05,727 - INFO -     - fine-contratto
+2025-06-23 12:37:05,727 - INFO -   fonti_finanziamento:
+2025-06-23 12:37:05,727 - INFO -     - fonti-finanziamento
+2025-06-23 12:37:05,727 - INFO -   lavorazioni:
+2025-06-23 12:37:05,727 - INFO -     - lavorazioni
+2025-06-23 12:37:05,728 - INFO -   partecipanti:
+2025-06-23 12:37:05,728 - INFO -     - partecipanti
+2025-06-23 12:37:05,728 - INFO -   pubblicazioni:
+2025-06-23 12:37:05,728 - INFO -     - pubblicazioni
+2025-06-23 12:37:05,728 - INFO -   quadro_economico:
+2025-06-23 12:37:05,728 - INFO -     - quadro-economico
+2025-06-23 12:37:05,729 - INFO -   sospensioni:
+2025-06-23 12:37:05,729 - INFO -     - sospensioni
+2025-06-23 12:37:05,729 - INFO -   stati_avanzamento:
+2025-06-23 12:37:05,729 - INFO -     - stati-avanzamento
+2025-06-23 12:37:05,729 - INFO -   subappalti:
+2025-06-23 12:37:05,729 - INFO -     - subappalti
+2025-06-23 12:37:05,730 - INFO -   varianti:
+2025-06-23 12:37:05,730 - INFO -     - varianti
+2025-06-23 12:37:05,730 - INFO -   bandi_modalita:
+2025-06-23 12:37:05,730 - INFO -     - bandi-cig-modalita-realizzazione
+2025-06-23 12:37:05,730 - INFO -   bandi_tipo_scelta:
+2025-06-23 12:37:05,731 - INFO -     - bandi-cig-tipo-scelta-contraente
+2025-06-23 12:37:05,731 - INFO -   centri_di_costo:
+2025-06-23 12:37:05,731 - INFO -     - centri-di-costo
+2025-06-23 12:37:05,731 - INFO -   pnrr_indicatori:
+2025-06-23 12:37:05,731 - INFO -     - indicatori-pnrrpnc
+2025-06-23 12:37:05,731 - INFO -   pnrr_misurepremiali:
+2025-06-23 12:37:05,732 - INFO -     - misurepremiali-pnrrpnc
+2025-06-23 12:37:05,732 - INFO -   stazioni_appaltanti:
+2025-06-23 12:37:05,732 - INFO -     - stazioni-appaltanti
+2025-06-23 12:37:05,732 - INFO -   cup:
+2025-06-23 12:37:05,732 - INFO -     - cup[_-]json
+2025-06-23 12:37:05,732 - INFO -   smartcig_fattispecie:
+2025-06-23 12:37:05,733 - INFO -     - smartcig-tipo-fattispecie-contrattuale
+2025-06-23 12:37:05,733 - INFO - [TEST] Testing categorizzazione files in /database/JSON
+2025-06-23 12:37:05,733 - WARNING - Directory non trovata: /database/JSON
+2025-06-23 12:37:05,733 - WARNING - [TEST] Nessun file JSON trovato in /database/JSON
+2025-06-23 12:37:05,734 - WARNING - [TEST] [WARN] Nessuna categoria trovata!
+2025-06-23 12:37:05,734 - INFO - [COMPLETE] Completato test categorizzazione in 0.0s

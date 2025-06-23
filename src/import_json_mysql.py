@@ -2189,6 +2189,10 @@ def main():
     
     args = parser.parse_args()
     
+    # Import dei moduli database (sempre necessario)
+    from src.database.manager import DatabaseManager
+    from src.database.config import DatabaseConfig
+    
     # Gestione del nome del database personalizzato
     global MYSQL_DATABASE
     if args.database:
@@ -2197,8 +2201,6 @@ def main():
         # Aggiorna la variabile d'ambiente per i moduli dipendenti
         os.environ['MYSQL_DATABASE'] = MYSQL_DATABASE
         # Riconfigura il DatabaseManager e la configurazione con il nuovo database
-        from src.database.manager import DatabaseManager
-        from src.database.config import DatabaseConfig
         DatabaseManager._pool = None  # Reset del pool per riconfigurarlo
         DatabaseManager._initialized = False
         DatabaseConfig.set_database_name(MYSQL_DATABASE)
