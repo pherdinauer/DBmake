@@ -195,6 +195,63 @@ def run_import_script(custom_database=None):
         logger.error(f"❌ Errore durante l'importazione: {e}")
         return False
 
+def get_database_choice():
+    """Chiede all'utente di scegliere il database da utilizzare."""
+    print("\n" + "="*70)
+    print("🔧 CONFIGURAZIONE DATABASE")
+    print("="*70)
+    print("1) 📋 Usa database di default (anac_import3)")
+    print("2) 🆕 Crea nuovo database personalizzato")
+    print("3) 📁 Usa database esistente (specifica nome)")
+    print("="*70)
+    
+    while True:
+        try:
+            choice = input("Scegli opzione (1-3): ").strip()
+            
+            if choice == "1":
+                return "anac_import3"
+            
+            elif choice == "2":
+                print("\n🆕 CREAZIONE NUOVO DATABASE")
+                print("-" * 40)
+                while True:
+                    db_name = input("Inserisci nome del nuovo database: ").strip()
+                    if db_name:
+                        # Valida il nome del database
+                        if db_name.replace('_', '').replace('-', '').isalnum():
+                            confirm = input(f"Confermi creazione database '{db_name}'? (s/n): ").strip().lower()
+                            if confirm in ['s', 'si', 'y', 'yes']:
+                                print(f"✅ Database '{db_name}' sarà creato")
+                                return db_name
+                            else:
+                                print("❌ Operazione annullata")
+                                continue
+                        else:
+                            print("❌ Nome database non valido. Usa solo lettere, numeri, '_' e '-'")
+                    else:
+                        print("❌ Nome database non può essere vuoto")
+            
+            elif choice == "3":
+                print("\n📁 USO DATABASE ESISTENTE")
+                print("-" * 40)
+                while True:
+                    db_name = input("Inserisci nome database esistente: ").strip()
+                    if db_name:
+                        return db_name
+                    else:
+                        print("❌ Nome database non può essere vuoto")
+            
+            else:
+                print("❌ Opzione non valida. Scegli 1, 2 o 3.")
+                
+        except KeyboardInterrupt:
+            print("\n❌ Operazione interrotta dall'utente")
+            sys.exit(1)
+        except EOFError:
+            print("\n❌ Input terminato")
+            sys.exit(1)
+
 def main():
     """Funzione principale del wrapper."""
     import argparse
@@ -202,11 +259,17 @@ def main():
     # Parse degli argomenti da riga di comando
     parser = argparse.ArgumentParser(description='MySQL Import Wrapper con gestione robusta InterfaceError')
     parser.add_argument('--database', type=str, help='Nome del database personalizzato da utilizzare')
+    parser.add_argument('--interactive', '-i', action='store_true', help='Modalità interattiva per scegliere il database')
     args = parser.parse_args()
     
     # Aggiorna il database se specificato
     global MYSQL_DATABASE
     custom_database = args.database
+    
+    # Se modalità interattiva, chiedi all'utente
+    if args.interactive and not custom_database:
+        custom_database = get_database_choice()
+    
     if custom_database:
         MYSQL_DATABASE = custom_database
         os.environ['MYSQL_DATABASE'] = custom_database
