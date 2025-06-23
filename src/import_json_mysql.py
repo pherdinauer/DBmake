@@ -3095,7 +3095,16 @@ def check_and_update_table_structure(cursor, table_name, categories):
 
 def clean_problematic_tables(conn, categories):
     """Pulisce le tabelle problematiche con duplicati e permette un restart pulito."""
-    cursor = conn.cursor()
+    # Gestisci sia DatabaseManager che connessioni dirette
+    if hasattr(conn, 'connection') and hasattr(conn.connection, 'cursor'):
+        # È un DatabaseManager
+        cursor = conn.connection.cursor()
+    elif hasattr(conn, 'cursor'):
+        # È una connessione diretta
+        cursor = conn.cursor()
+    else:
+        db_logger.error("[ERROR] Oggetto connessione non riconosciuto per cleanup")
+        return
     
     try:
         db_logger.info("[CLEANUP] Inizio pulizia tabelle problematiche...")
@@ -3159,14 +3168,31 @@ def clean_problematic_tables(conn, categories):
         except Exception as e:
             db_logger.warning(f"[CLEANUP] Errore durante pulizia processed_files: {e}")
         
-        conn.commit()
+        # Gestisci commit in base al tipo di connessione
+        if hasattr(conn, 'connection') and hasattr(conn.connection, 'commit'):
+            # È un DatabaseManager
+            conn.connection.commit()
+        elif hasattr(conn, 'commit'):
+            # È una connessione diretta
+            conn.commit()
+            
         db_logger.info("[CLEANUP] Pulizia completata con successo")
         
     except Exception as e:
         db_logger.error(f"[ERROR] Errore durante pulizia globale: {e}")
-        conn.rollback()
+        # Gestisci rollback in base al tipo di connessione
+        try:
+            if hasattr(conn, 'connection') and hasattr(conn.connection, 'rollback'):
+                # È un DatabaseManager
+                conn.connection.rollback()
+            elif hasattr(conn, 'rollback'):
+                # È una connessione diretta
+                conn.rollback()
+        except Exception as rollback_error:
+            db_logger.warning(f"Rollback per errore: {rollback_error}")
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
 
 def check_and_update_table_structure_robust(db_manager, table_name, categories):
     """Versione robusta per verificare e aggiornare la struttura delle tabelle esistenti."""
