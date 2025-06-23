@@ -227,16 +227,26 @@ import_to_mysql() {
     echo -e "${GREEN}⚡ Ottimizzazioni: multi-thread, batch dinamici, schema intelligente${NC}"
     echo -e "${GREEN}🛡️ Gestione robusta di MySQLInterfaceError${NC}"
     
-    # Chiedi se vuole specificare un database personalizzato
+    # Chiedi modalità di configurazione database
     echo
     echo -e "${YELLOW}🔧 Configurazione Database:${NC}"
     echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
-    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
+    echo -e "${YELLOW}2)${NC} 🆕 Modalità interattiva (crea nuovo o scegli esistente)"
+    echo -e "${YELLOW}3)${NC} Specifica database personalizzato direttamente"
     echo
-    read -p "Scegli opzione (1-2): " db_choice
+    read -p "Scegli opzione (1-3): " db_choice
     
     case $db_choice in
+        1)
+            echo -e "${GREEN}🔧 Utilizzo database di default${NC}"
+            python src/mysql_import_wrapper.py
+            ;;
         2)
+            echo -e "${CYAN}🆕 Modalità interattiva attivata...${NC}"
+            echo -e "${CYAN}Ti verrà chiesto di scegliere o creare un database${NC}"
+            python src/mysql_import_wrapper.py --interactive
+            ;;
+        3)
             read -p "Inserisci nome database personalizzato: " custom_db
             if [ -n "$custom_db" ]; then
                 echo -e "${GREEN}🔧 Utilizzo database personalizzato: $custom_db${NC}"
@@ -247,7 +257,7 @@ import_to_mysql() {
             fi
             ;;
         *)
-            echo -e "${GREEN}🔧 Utilizzo database di default${NC}"
+            echo -e "${GREEN}🔧 Utilizzo database di default (opzione non valida)${NC}"
             python src/mysql_import_wrapper.py
             ;;
     esac
