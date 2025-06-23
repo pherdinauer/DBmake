@@ -226,7 +226,32 @@ import_to_mysql() {
     echo -e "${GREEN}💪 Modalità HIGH-PERFORMANCE con rilevamento automatico risorse${NC}"
     echo -e "${GREEN}⚡ Ottimizzazioni: multi-thread, batch dinamici, schema intelligente${NC}"
     echo -e "${GREEN}🛡️ Gestione robusta di MySQLInterfaceError${NC}"
-    python src/mysql_import_wrapper.py
+    
+    # Chiedi se vuole specificare un database personalizzato
+    echo
+    echo -e "${YELLOW}🔧 Configurazione Database:${NC}"
+    echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
+    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
+    echo
+    read -p "Scegli opzione (1-2): " db_choice
+    
+    case $db_choice in
+        2)
+            read -p "Inserisci nome database personalizzato: " custom_db
+            if [ -n "$custom_db" ]; then
+                echo -e "${GREEN}🔧 Utilizzo database personalizzato: $custom_db${NC}"
+                python src/mysql_import_wrapper.py --database "$custom_db"
+            else
+                echo -e "${RED}❌ Nome database non valido, uso database di default${NC}"
+                python src/mysql_import_wrapper.py
+            fi
+            ;;
+        *)
+            echo -e "${GREEN}🔧 Utilizzo database di default${NC}"
+            python src/mysql_import_wrapper.py
+            ;;
+    esac
+    
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}🎉 Auto-Turbo Import completato con successo!${NC}"
     else
