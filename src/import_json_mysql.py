@@ -2177,11 +2177,36 @@ def main():
     logger.info("🚀🚀🚀 [SCRIPT EXECUTION CONFIRMATION] Running updated src/import_json_mysql.py - Version 2025-06-04-11:00 - Check for InterfaceError handling 🚀🚀🚀")
     
     import sys
+    import argparse
     
     logger.info("[VERSION CHECK] Executing updated src/import_json_mysql.py with InterfaceError handling - Version 2025-06-04-10:50")
     
+    # Parsing degli argomenti da riga di comando
+    parser = argparse.ArgumentParser(description='Importa file JSON nel database MySQL ANAC')
+    parser.add_argument('--test', action='store_true', help='Modalità test - verifica categorizzazione senza importare')
+    parser.add_argument('--cleanup', action='store_true', help='Modalità cleanup - pulisce tabelle problematiche')
+    parser.add_argument('--database', type=str, help='Nome del database da utilizzare (sovrascrive la variabile d\'ambiente MYSQL_DATABASE)')
+    
+    args = parser.parse_args()
+    
+    # Gestione del nome del database personalizzato
+    global MYSQL_DATABASE
+    if args.database:
+        MYSQL_DATABASE = args.database
+        logger.info(f"🔧 [DATABASE] Utilizzando database personalizzato: {MYSQL_DATABASE}")
+        # Aggiorna la variabile d'ambiente per i moduli dipendenti
+        os.environ['MYSQL_DATABASE'] = MYSQL_DATABASE
+        # Riconfigura il DatabaseManager e la configurazione con il nuovo database
+        from src.database.manager import DatabaseManager
+        from src.database.config import DatabaseConfig
+        DatabaseManager._pool = None  # Reset del pool per riconfigurarlo
+        DatabaseManager._initialized = False
+        DatabaseConfig.set_database_name(MYSQL_DATABASE)
+    else:
+        logger.info(f"🔧 [DATABASE] Utilizzando database di default: {MYSQL_DATABASE}")
+    
     # Modalità test se viene passato il parametro --test
-    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+    if args.test:
         try:
             with LogContext(logger, "test categorizzazione"):
                 logger.info(f"[TEST MODE] Inizio test categorizzazione: {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -2211,7 +2236,7 @@ def main():
         return  # Esce senza fare l'importazione
     
     # Modalità cleanup se viene passato il parametro --cleanup
-    if len(sys.argv) > 1 and sys.argv[1] == '--cleanup':
+    if args.cleanup:
         try:
             with LogContext(logger, "pulizia tabelle problematiche"):
                 logger.info(f"[CLEANUP MODE] Inizio pulizia: {time.strftime('%Y-%m-%d %H:%M:%S')}")

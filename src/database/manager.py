@@ -14,7 +14,13 @@ from contextlib import contextmanager
 # Carica le variabili d'ambiente
 load_dotenv()
 
-# Parametri di connessione da variabili d'ambiente
+# Import della configurazione dinamica
+try:
+    from .config import DatabaseConfig
+except ImportError:
+    from config import DatabaseConfig
+
+# Parametri di connessione da variabili d'ambiente (mantenuti per compatibilità)
 MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
@@ -68,29 +74,8 @@ class DatabaseManager:
         self.max_reconnect_attempts = 3
         self.reconnect_delay = 2  # secondi
         
-        # Configurazione MySQL ottimizzata per operazioni lunghe
-        self.config: Dict[str, Any] = {
-            'host': MYSQL_HOST,
-            'user': MYSQL_USER,
-            'password': MYSQL_PASSWORD,
-            'database': MYSQL_DATABASE,
-            'charset': 'utf8mb4',
-            'autocommit': True,
-            'connect_timeout': 300,  # Aumentato a 5 minuti
-            'use_pure': True,
-            'ssl_disabled': True,
-            'get_warnings': False,  # Disabilitato per evitare problemi di configurazione
-            'raise_on_warnings': False,  # Disabilitato per evitare problemi di configurazione
-            'consume_results': True,
-            'buffered': True,
-            'raw': False,
-            'use_unicode': True,
-            'auth_plugin': 'mysql_native_password',
-            # Aggiunte per stabilità connessione
-            'connection_timeout': 300,  # 5 minuti
-            'autocommit': True,
-            'sql_mode': '',  # Mode SQL più permissivo
-        }
+        # Configurazione MySQL ottimizzata per operazioni lunghe - usa configurazione dinamica
+        self.config: Dict[str, Any] = DatabaseConfig.get_config()
     
     @classmethod
     def initialize_pool(cls, pool_size: int = 2) -> Any:
@@ -100,26 +85,16 @@ class DatabaseManager:
             return cls._pool
             
         try:
-            cls._pool_config = {
+            # Usa la configurazione dinamica e aggiunge parametri specifici del pool
+            base_config = DatabaseConfig.get_config()
+            cls._pool_config = base_config.copy()
+            cls._pool_config.update({
                 'pool_name': "anac_import_pool",
                 'pool_size': pool_size,
-                'host': MYSQL_HOST,
-                'user': MYSQL_USER,
-                'password': MYSQL_PASSWORD,
-                'database': MYSQL_DATABASE,
-                'charset': 'utf8mb4',
-                'autocommit': True,
                 'connect_timeout': 180,
-                'use_pure': True,
-                'ssl_disabled': True,
                 'get_warnings': True,
                 'raise_on_warnings': True,
-                'consume_results': True,
-                'buffered': True,
-                'raw': False,
-                'use_unicode': True,
-                'auth_plugin': 'mysql_native_password'
-            }
+            })
             
             # Crea il database se non esiste
             cls._ensure_database_exists()
@@ -137,16 +112,9 @@ class DatabaseManager:
     @classmethod
     def _ensure_database_exists(cls) -> None:
         """Assicura che il database esista, creandolo se necessario."""
-        temp_config = cls._pool_config.copy() if cls._pool_config else {
-            'host': MYSQL_HOST,
-            'user': MYSQL_USER,
-            'password': MYSQL_PASSWORD,
-            'charset': 'utf8mb4',
-            'autocommit': True,
-            'ssl_disabled': True,
-            'connect_timeout': 30,
-            'use_pure': True
-        }
+        # Usa la configurazione dinamica
+        database_name = DatabaseConfig.get_database_name()
+        temp_config = cls._pool_config.copy() if cls._pool_config else DatabaseConfig.get_config()
         
         # Rimuovi il database dal config per la connessione iniziale
         temp_config.pop('database', None)
@@ -158,19 +126,19 @@ class DatabaseManager:
             temp_conn = None
             cursor = None
             try:
-                db_logger.info(f"[CHECK] Verifica database {MYSQL_DATABASE} (tentativo {attempt + 1}/{max_retries})")
+                db_logger.info(f"[CHECK] Verifica database {database_name} (tentativo {attempt + 1}/{max_retries})")
                 
                 temp_conn = mysql.connector.connect(**temp_config)
                 cursor = temp_conn.cursor()
                 
                 # Controlla se il database esiste
-                cursor.execute("SHOW DATABASES LIKE %s", (MYSQL_DATABASE,))
+                cursor.execute("SHOW DATABASES LIKE %s", (database_name,))
                 if not cursor.fetchone():
-                    db_logger.info(f"[CREATE] Creazione database {MYSQL_DATABASE}...")
-                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {MYSQL_DATABASE} DEFAULT CHARACTER SET 'utf8mb4'")
-                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} creato con successo")
+                    db_logger.info(f"[CREATE] Creazione database {database_name}...")
+                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {database_name} DEFAULT CHARACTER SET 'utf8mb4'")
+                    db_logger.info(f"[OK] Database {database_name} creato con successo")
                 else:
-                    db_logger.info(f"[OK] Database {MYSQL_DATABASE} già esistente")
+                    db_logger.info(f"[OK] Database {database_name} già esistente")
                 
                 return  # Successo, esci dalla funzione
                 
