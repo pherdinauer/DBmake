@@ -166,13 +166,25 @@ def test_database_connection():
         logger.error(f"❌ Errore generico durante test database: {e}")
         return False
 
-def run_import_script():
+def run_import_script(custom_database=None):
     """Esegue il vero script di import."""
     logger.info("🚀 Avvio script di importazione...")
     
     try:
-        # Import del modulo principale
-        from import_json_mysql import main as import_main
+        # Configura il database personalizzato se specificato
+        if custom_database:
+            logger.info(f"🔧 Configurazione database personalizzato: {custom_database}")
+            os.environ['MYSQL_DATABASE'] = custom_database
+            global MYSQL_DATABASE
+            MYSQL_DATABASE = custom_database
+        
+        # Import del modulo principale aggiornato
+        try:
+            # Prova l'import relativo (quando eseguito come modulo)
+            from .import_json_mysql import main as import_main
+        except ImportError:
+            # Fallback su import assoluto 
+            from src.import_json_mysql import main as import_main
         
         # Esegue l'import
         import_main()
@@ -185,6 +197,21 @@ def run_import_script():
 
 def main():
     """Funzione principale del wrapper."""
+    import argparse
+    
+    # Parse degli argomenti da riga di comando
+    parser = argparse.ArgumentParser(description='MySQL Import Wrapper con gestione robusta InterfaceError')
+    parser.add_argument('--database', type=str, help='Nome del database personalizzato da utilizzare')
+    args = parser.parse_args()
+    
+    # Aggiorna il database se specificato
+    global MYSQL_DATABASE
+    custom_database = args.database
+    if custom_database:
+        MYSQL_DATABASE = custom_database
+        os.environ['MYSQL_DATABASE'] = custom_database
+        logger.info(f"🔧 Utilizzo database personalizzato: {custom_database}")
+    
     logger.info("🔧 MySQL Import Wrapper - Gestione robusta InterfaceError")
     logger.info("=" * 70)
     
@@ -204,7 +231,7 @@ def main():
         sys.exit(1)
     
     # Step 4: Esegui import
-    if not run_import_script():
+    if not run_import_script(custom_database):
         logger.error("❌ Importazione fallita.")
         sys.exit(1)
     
