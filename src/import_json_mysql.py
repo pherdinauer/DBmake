@@ -3109,6 +3109,14 @@ def clean_problematic_tables(conn, categories):
     try:
         db_logger.info("[CLEANUP] Inizio pulizia tabelle problematiche...")
         
+        # Prima pulizia: rimuovi tutte le eventuali tabelle temporanee rimaste
+        db_logger.info("[CLEANUP] Pulizia preventiva tabelle temporanee...")
+        for category in categories:
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {category}_data_temp")
+            except Exception as e:
+                db_logger.debug(f"[CLEANUP] Ignoro errore pulizia temp per {category}: {e}")
+        
         for category in categories:
             table_name = f"{category}_data"
             
@@ -3143,15 +3151,55 @@ def clean_problematic_tables(conn, categories):
                             db_logger.info(f"[CLEANUP] Eliminazione completa di {table_name} (struttura obsoleta)")
                             cursor.execute(f"DROP TABLE {table_name}")
                         else:
-                            # Se ha la nuova struttura, rimuove solo i duplicati
+                            # Se ha la nuova struttura, usa approccio più semplice
                             db_logger.info(f"[CLEANUP] Rimozione duplicati da {table_name}")
-                            cursor.execute(f"""
-                                CREATE TABLE {table_name}_temp AS 
-                                SELECT * FROM {table_name} 
-                                GROUP BY cig, source_file, batch_id
-                            """)
-                            cursor.execute(f"DROP TABLE {table_name}")
-                            cursor.execute(f"RENAME TABLE {table_name}_temp TO {table_name}")
+                            
+                            try:
+                                # Metodo 1: DELETE duplicati mantenendo solo il record con ID minimo
+                                cursor.execute(f"""
+                                    DELETE t1 FROM {table_name} t1
+                                    INNER JOIN {table_name} t2 
+                                    WHERE t1.id > t2.id 
+                                    AND t1.cig = t2.cig 
+                                    AND t1.source_file = t2.source_file 
+                                    AND t1.batch_id = t2.batch_id
+                                """)
+                                rows_deleted = cursor.rowcount
+                                db_logger.info(f"[CLEANUP] Rimossi {rows_deleted} duplicati da {table_name} con DELETE")
+                                
+                            except Exception as delete_error:
+                                db_logger.warning(f"[CLEANUP] DELETE fallito per {table_name}, uso CREATE TABLE: {delete_error}")
+                                
+                                # Metodo 2: Fallback con CREATE TABLE (se DELETE fallisce)
+                                # Prima rimuovi tabella temporanea se esiste
+                                cursor.execute(f"DROP TABLE IF EXISTS {table_name}_temp")
+                                
+                                # Ottieni la lista delle colonne per SELECT esplicito
+                                cursor.execute(f"DESCRIBE {table_name}")
+                                columns = cursor.fetchall()
+                                column_list = []
+                                
+                                for col in columns:
+                                    col_name = col[0]
+                                    if col_name == 'id':
+                                        # Per l'ID, prendi il MIN per ogni gruppo
+                                        column_list.append(f"MIN({col_name}) as {col_name}")
+                                    else:
+                                        # Per gli altri campi, prendi il primo valore (ANY_VALUE o MAX)
+                                        column_list.append(f"ANY_VALUE({col_name}) as {col_name}")
+                                
+                                # Crea query compatibile con only_full_group_by
+                                select_clause = ", ".join(column_list)
+                                
+                                cursor.execute(f"""
+                                    CREATE TABLE {table_name}_temp AS 
+                                    SELECT {select_clause}
+                                    FROM {table_name} 
+                                    GROUP BY cig, source_file, batch_id
+                                """)
+                                cursor.execute(f"DROP TABLE {table_name}")
+                                cursor.execute(f"RENAME TABLE {table_name}_temp TO {table_name}")
+                                db_logger.info(f"[CLEANUP] Cleanup completato con CREATE TABLE per {table_name}")
                 else:
                     db_logger.info(f"[OK] Nessun duplicato trovato in {table_name}")
                     
