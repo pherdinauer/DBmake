@@ -191,10 +191,11 @@ show_menu() {
     echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
     echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
     echo -e "${YELLOW}3)${NC} 🚀 Auto-Turbo MySQL Import (Consigliato)"
-    echo -e "${YELLOW}4)${NC} Cerca CIG nel database"
-    echo -e "${YELLOW}5)${NC} Esci"
+    echo -e "${YELLOW}4)${NC} 🛡️ Verifica Integrità Database"
+    echo -e "${YELLOW}5)${NC} Cerca CIG nel database"
+    echo -e "${YELLOW}6)${NC} Esci"
     echo
-    echo -n -e "${YELLOW}Scegli un'opzione (1-5): ${NC}"
+    echo -n -e "${YELLOW}Scegli un'opzione (1-6): ${NC}"
 }
 
 # Funzione per importare in SQLite
@@ -269,6 +270,59 @@ import_to_mysql() {
     fi
 }
 
+# Funzione per verifica integrità database
+check_database_integrity() {
+    echo -e "${YELLOW}🛡️ Avvio Verifica Integrità Database...${NC}"
+    echo -e "${GREEN}Controllo consistenza e qualità dei dati nelle tabelle MySQL${NC}"
+    
+    # Chiedi modalità di configurazione database
+    echo
+    echo -e "${YELLOW}🔧 Configurazione Database da verificare:${NC}"
+    echo -e "${YELLOW}1)${NC} Verifica database di default (anac_import3)"
+    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
+    echo -e "${YELLOW}3)${NC} Modalità verbosa (output dettagliato)"
+    echo
+    read -p "Scegli opzione (1-3): " integrity_choice
+    
+    case $integrity_choice in
+        1)
+            echo -e "${GREEN}🔧 Verifica database di default${NC}"
+            python check_database_integrity.py
+            ;;
+        2)
+            read -p "Inserisci nome database da verificare: " custom_db
+            if [ -n "$custom_db" ]; then
+                echo -e "${GREEN}🔧 Verifica database personalizzato: $custom_db${NC}"
+                python check_database_integrity.py --database "$custom_db"
+            else
+                echo -e "${RED}❌ Nome database non valido, uso database di default${NC}"
+                python check_database_integrity.py
+            fi
+            ;;
+        3)
+            echo -e "${CYAN}🔍 Modalità verbosa attivata...${NC}"
+            read -p "Database da verificare (INVIO per default): " verbose_db
+            if [ -n "$verbose_db" ]; then
+                python check_database_integrity.py --database "$verbose_db" --verbose
+            else
+                python check_database_integrity.py --verbose
+            fi
+            ;;
+        *)
+            echo -e "${GREEN}🔧 Verifica database di default (opzione non valida)${NC}"
+            python check_database_integrity.py
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Verifica integrità completata: NESSUN PROBLEMA RILEVATO${NC}"
+    elif [ $? -eq 1 ]; then
+        echo -e "${YELLOW}⚠️ Verifica completata: alcuni problemi rilevati (vedi dettagli sopra)${NC}"
+    else
+        echo -e "${RED}❌ Errore durante la verifica dell'integrità.${NC}"
+    fi
+}
+
 # Funzione per cercare CIG
 search_cig() {
     echo -e "${YELLOW}Avvio ricerca CIG...${NC}"
@@ -292,9 +346,12 @@ while true; do
             import_to_mysql
             ;;
         4)
-            search_cig
+            check_database_integrity
             ;;
         5)
+            search_cig
+            ;;
+        6)
             echo -e "${GREEN}Arrivederci!${NC}"
             deactivate
             exit 0
