@@ -188,7 +188,10 @@ show_menu() {
     echo -e "║                     Branch: MULTITAB (Completamente Ottimizzato)              ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
-    echo -e "${GREEN}🎯 COMANDI PRINCIPALI (RACCOMANDATI):${NC}"
+    echo -e "${RED}🎯 ONE-CLICK (NON TI DEVI PREOCCUPARE DI NIENTE!):${NC}"
+    echo -e "${GREEN}0)${NC} 🎯 ONE-CLICK COMPLETO - FA TUTTO AUTOMATICAMENTE!"
+    echo
+    echo -e "${GREEN}🎯 COMANDI PRINCIPALI (MANUALI):${NC}"
     echo -e "${YELLOW}1)${NC} 🧪 Test Categorizzazione (FAI SEMPRE PRIMA!)"
     echo -e "${YELLOW}2)${NC} 🚀 SMART Import - Migliore per la tua struttura"
     echo -e "${YELLOW}3)${NC} 🔧 Fix Tabelle Vuote (risolve il problema)"
@@ -208,11 +211,12 @@ show_menu() {
     echo -e "${YELLOW}11)${NC} Genera file SQL per MySQL"
     echo -e "${YELLOW}12)${NC} 🛡️ Verifica Integrità Database"
     echo -e "${YELLOW}13)${NC} Cerca CIG nel database"
-    echo -e "${YELLOW}0)${NC} Esci"
+    echo -e "${YELLOW}99)${NC} Esci"
     echo
-    echo -e "${GREEN}💡 RACCOMANDAZIONE: Usa opzioni 1 → 2 per la migliore esperienza${NC}"
+    echo -e "${RED}💡 RACCOMANDAZIONE SUPER: USA OPZIONE 0 (ONE-CLICK) E NON TI PREOCCUPARE DI NIENTE!${NC}"
+    echo -e "${GREEN}💡 Alternative manuali: Usa opzioni 1 → 2 per controllo manuale${NC}"
     echo
-    echo -n -e "${YELLOW}Scegli un'opzione (0-13): ${NC}"
+    echo -n -e "${YELLOW}Scegli un'opzione (0-13, 99): ${NC}"
 }
 
 # Funzione per importare in SQLite
@@ -239,6 +243,32 @@ generate_mysql_sql() {
 }
 
 # 🧪 FUNZIONI NUOVE CON CLI UNIFICATO
+
+# 🎯 ONE-CLICK COMPLETO - FA TUTTO AUTOMATICAMENTE!
+one_click_complete() {
+    echo -e "${RED}🎯 ONE-CLICK COMPLETO - MODALITÀ AUTOMATICA TOTALE${NC}"
+    echo -e "${GREEN}✨ Non ti devi preoccupare di niente! Farò tutto io:${NC}"
+    echo -e "${GREEN}   ✅ Test automatico categorizzazione${NC}"
+    echo -e "${GREEN}   ✅ Import automatico con SMART mode${NC}"
+    echo -e "${GREEN}   ✅ Fix automatico se ci sono problemi${NC}"
+    echo -e "${GREEN}   ✅ Verifica finale del risultato${NC}"
+    echo
+    echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+    
+    python run_import.py --one-click
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 ONE-CLICK SUCCESS: Tutto completato automaticamente!${NC}"
+        echo -e "${GREEN}✅ Le tue tabelle dovrebbero ora contenere tutti i dati!${NC}"
+        echo -e "${GREEN}🎯 Problema tabelle vuote RISOLTO!${NC}"
+    else
+        echo -e "${RED}💔 ONE-CLICK FAILED: Si è verificato un problema${NC}"
+        echo -e "${YELLOW}🆘 Ma non preoccuparti! Prova una di queste opzioni:${NC}"
+        echo -e "${YELLOW}   - Opzione 4 (Streaming Import) per dataset grandi${NC}"
+        echo -e "${YELLOW}   - Opzione 9 (Test tutte le soluzioni) per diagnostica${NC}"
+        echo -e "${YELLOW}   - Opzione 8 (Mostra log) per vedere errori dettagliati${NC}"
+    fi
+}
 
 # Test categorizzazione
 test_categorization() {
@@ -523,6 +553,9 @@ while true; do
     read choice
 
     case $choice in
+        0)
+            one_click_complete
+            ;;
         1)
             test_categorization
             ;;
@@ -562,7 +595,7 @@ while true; do
         13)
             search_cig
             ;;
-        0)
+        99)
             echo -e "${GREEN}Arrivederci!${NC}"
             deactivate
             exit 0
@@ -572,8 +605,9 @@ while true; do
             legacy_import_to_mysql
             ;;
         *)
-            echo -e "${RED}Opzione non valida. Usa numeri da 0 a 13.${NC}"
-            echo -e "${YELLOW}💡 TIP: Usa opzioni 1 → 2 per la migliore esperienza${NC}"
+            echo -e "${RED}Opzione non valida. Usa numeri da 0 a 13 o 99.${NC}"
+            echo -e "${RED}💡 TIP SUPER: Usa opzione 0 (ONE-CLICK) per non preoccuparti di niente!${NC}"
+            echo -e "${YELLOW}💡 TIP alternative: Usa opzioni 1 → 2 per controllo manuale${NC}"
             ;;
     esac
 

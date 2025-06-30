@@ -103,6 +103,71 @@ def run_fix_empty_tables():
     set_env_mode('smart')
     return run_import()
 
+def run_one_click():
+    """🎯 ONE-CLICK: Fa tutto automaticamente! Test + Import + Fix se necessario."""
+    print("🎯 [ONE-CLICK] Avvio processo completo automatico...")
+    print("✨ [ONE-CLICK] Questo farà tutto senza che tu debba preoccuparti di niente!")
+    print("")
+    
+    # Step 1: Test categorizzazione
+    print("📋 [ONE-CLICK] ========== STEP 1: TEST CATEGORIZZAZIONE ==========")
+    print("🧪 [ONE-CLICK] Verifico che i file JSON vengano trovati e categorizzati...")
+    if not run_test_categorization():
+        print("❌ [ONE-CLICK] PROBLEMA: Test categorizzazione fallito!")
+        print("🛠️  [ONE-CLICK] Provo con modalità avanzata...")
+        
+        # Prova con modalità streaming se il test normale fallisce
+        print("🌊 [ONE-CLICK] Tentativo con modalità STREAMING...")
+        set_env_mode('streaming')
+        if not run_import():
+            print("💔 [ONE-CLICK] FALLIMENTO: Anche la modalità streaming ha fallito")
+            print("🆘 [ONE-CLICK] Azioni consigliate:")
+            print("   1. Controlla che i file JSON esistano in database/JSON/")
+            print("   2. Verifica i permessi di lettura sui file")
+            print("   3. Controlla i log in logs/ per errori dettagliati")
+            return False
+        else:
+            print("🎉 [ONE-CLICK] SUCCESS: Streaming mode ha risolto il problema!")
+            return True
+    
+    print("✅ [ONE-CLICK] Test categorizzazione OK! Procedo con l'importazione...")
+    print("")
+    
+    # Step 2: Importazione SMART
+    print("📋 [ONE-CLICK] ========== STEP 2: IMPORTAZIONE SMART ==========")
+    print("🧠 [ONE-CLICK] Uso SMART mode (migliore per la tua struttura timestamp)...")
+    set_env_mode('smart')
+    
+    if run_import():
+        print("🎉 [ONE-CLICK] SUCCESS: Importazione completata con successo!")
+        print("✅ [ONE-CLICK] Le tue tabelle dovrebbero ora contenere i dati!")
+        
+        # Step 3: Verifica finale (opzionale)
+        print("")
+        print("📋 [ONE-CLICK] ========== STEP 3: VERIFICA FINALE ==========")
+        print("📊 [ONE-CLICK] Mostro lo status finale del sistema...")
+        print_status_info()
+        
+        return True
+    else:
+        print("⚠️  [ONE-CLICK] PROBLEMA: Importazione SMART fallita!")
+        print("🛠️  [ONE-CLICK] Provo il fix specifico per tabelle vuote...")
+        
+        # Step 2.5: Fix tabelle vuote se SMART fallisce
+        print("")
+        print("📋 [ONE-CLICK] ========== STEP 2.5: FIX TABELLE VUOTE ==========")
+        if run_fix_empty_tables():
+            print("🎉 [ONE-CLICK] SUCCESS: Fix tabelle vuote ha risolto!")
+            return True
+        else:
+            print("💔 [ONE-CLICK] FALLIMENTO: Anche il fix delle tabelle vuote ha fallito")
+            print("🆘 [ONE-CLICK] Situazione critica! Azioni manuali necessarie:")
+            print("   1. python run_import.py --streaming  # Prova modalità più robusta")
+            print("   2. python run_import.py --test-all   # Testa tutte le soluzioni")
+            print("   3. Controlla logs/ per errori specifici")
+            print("   4. Verifica che i file JSON non siano corrotti")
+            return False
+
 def show_logs():
     """Mostra gli ultimi log di importazione."""
     print("📄 [LOGS] Ricerca ultimi log di importazione...")
@@ -175,7 +240,10 @@ def main():
         description='🚀 CLI UNIFICATO per Import JSON Dinamico ANAC',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-🎯 COMANDI PRINCIPALI:
+🎯 ONE-CLICK (RACCOMANDATISSIMO):
+  python run_import.py --one-click        # FA TUTTO AUTOMATICAMENTE! Test + Import + Fix
+
+🚀 COMANDI PRINCIPALI:
   python run_import.py                    # SMART mode (RACCOMANDATO per la tua struttura)
   python run_import.py --run              # Importazione diretta con SMART mode
   python run_import.py --test             # Test categorizzazione (SEMPRE prima!)
@@ -192,13 +260,16 @@ def main():
   python run_import.py --logs             # Mostra ultimi log
 
 💡 RACCOMANDAZIONE:
+  USA --one-click per non preoccuparti di niente! Fa tutto automaticamente.
   Per la tua struttura con timestamp (20240201-categoria_json), 
-  usa SMART mode che analizza il contenuto dei file oltre ai nomi.
+  il sistema userà SMART mode che analizza il contenuto dei file oltre ai nomi.
         """
     )
     
     # COMANDI PRINCIPALI (mutualmente esclusivi)
     main_group = parser.add_mutually_exclusive_group()
+    main_group.add_argument('--one-click', action='store_true',
+                           help='🎯 ONE-CLICK: Fa tutto automaticamente! (RACCOMANDATISSIMO)')
     main_group.add_argument('--run', action='store_true',
                            help='🚀 IMPORTAZIONE DIRETTA con SMART mode (raccomandato per te)')
     main_group.add_argument('--test', action='store_true',
@@ -251,6 +322,9 @@ def main():
         print(f"📁 [CONFIG] Path JSON personalizzato: {args.path}")
     
     # COMANDI PRINCIPALI
+    if args.one_click:
+        return run_one_click()
+    
     if args.run:
         return run_import_direct()
     
