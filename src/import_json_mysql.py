@@ -1719,7 +1719,7 @@ CATEGORIES = {
     "avvio_contratto":        [r"avvio-contratto"],
     "categorie_dpcm":         [r"categorie-dpcm-aggregazione"],
     "categorie_opera":        [r"categorie-opera"],
-    "cig":                    [r"^cig[_-]json", r"^smartcig[_-]json", r"cig[_-]json", r"smartcig[_-]json", r"\d{8}-cig[_-]json", r"\d{8}-smartcig[_-]json"],
+    "cig":                    [r"^cig[_-]json", r"^smartcig[_-]json", r"cig[_-]json", r"smartcig[_-]json", r"\d{8}-cig[_-]json", r"\d{8}-smartcig[_-]json", r"^cig$", r"^smartcig$"],
     "collaudo":               [r"collaudo"],
     "fine_contratto":         [r"fine-contratto"],
     "fonti_finanziamento":    [r"fonti-finanziamento"],
@@ -1739,7 +1739,7 @@ CATEGORIES = {
     "pnrr_misurepremiali":    [r"misurepremiali-pnrrpnc"],
     "stazioni_appaltanti":    [r"stazioni-appaltanti"],
     # NUOVE CATEGORIE per file non categorizzati:
-    "cup":                    [r"cup[_-]json", r"\d{8}-cup[_-]json"],
+    "cup":                    [r"cup[_-]json", r"\d{8}-cup[_-]json", r"^cup$"],
     "smartcig_fattispecie":   [r"smartcig-tipo-fattispecie-contrattuale"],
 }
 

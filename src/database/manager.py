@@ -279,7 +279,7 @@ class DatabaseManager:
                 if errno == 1049 and attempt == 0:  # Solo al primo tentativo
                     db_logger.info(f"[AUTO-CREATE] Database non trovato (errno: {errno}), tentativo di creazione automatica...")
                     try:
-                        cls._ensure_database_exists()
+                        self.__class__._ensure_database_exists()
                         db_logger.info("[AUTO-CREATE] Database creato, riprovo connessione...")
                         continue  # Riprova subito senza attendere
                     except Exception as create_error:
