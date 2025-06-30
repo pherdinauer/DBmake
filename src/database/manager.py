@@ -275,6 +275,17 @@ class DatabaseManager:
                 except Exception:
                     error_msg = f"MySQL Error (Type: {actual_error_type_name}, Errno: {errno}): Unable to convert to string"
 
+                # AUTO-CREATE DATABASE: Se errore 1049 (database non esistente), tenta creazione
+                if errno == 1049 and attempt == 0:  # Solo al primo tentativo
+                    db_logger.info(f"[AUTO-CREATE] Database non trovato (errno: {errno}), tentativo di creazione automatica...")
+                    try:
+                        cls._ensure_database_exists()
+                        db_logger.info("[AUTO-CREATE] Database creato, riprovo connessione...")
+                        continue  # Riprova subito senza attendere
+                    except Exception as create_error:
+                        db_logger.warning(f"[AUTO-CREATE] Creazione database fallita: {create_error}")
+                        # Continua con il normale retry
+
                 if attempt < max_retries - 1:
                     db_logger.warning(f"[WARN] Tentativo {attempt + 1} fallito: {error_msg}")
                     time.sleep(retry_delay)
