@@ -69,7 +69,36 @@ MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
 MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
 MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
 MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
-JSON_BASE_PATH = os.environ.get('ANAC_BASE_PATH', '/database/JSON')  # Ripristinato percorso originale
+
+# AUTO-DISCOVERY PATH con fallback intelligenti
+def discover_json_base_path():
+    """Auto-scopre il path corretto per i file JSON con fallback multipli."""
+    possible_paths = [
+        os.environ.get('ANAC_BASE_PATH'),  # Variabile d'ambiente se definita
+        './database',                      # Database root (nuovo per il tuo caso)
+        'database',                        # Database root alternative
+        './database/JSON',                 # Path relativo standard
+        'database/JSON',                   # Alternative relativo
+        '/database/JSON',                  # Path assoluto fallback
+        os.path.join(os.getcwd(), 'database'),          # Database root assoluto
+        os.path.join(os.getcwd(), 'database', 'JSON'),  # Path costruito dinamicamente
+    ]
+    
+    for path in possible_paths:
+        if path and os.path.exists(path):
+            actual_files = len(list(Path(path).rglob("*.json")))
+            logger.info(f"[AUTO-DISCOVERY] Path trovato: {path} ({actual_files} file JSON)")
+            if actual_files > 0:  # Solo se contiene effettivamente file JSON
+                return path
+    
+    # Se nessun path trovato, crea directory di default
+    default_path = './database/JSON'
+    os.makedirs(default_path, exist_ok=True)
+    logger.warning(f"[AUTO-DISCOVERY] Nessun path valido trovato, creato: {default_path}")
+    return default_path
+
+JSON_BASE_PATH = discover_json_base_path()
+
 BATCH_SIZE = int(os.environ.get('IMPORT_BATCH_SIZE', 75000))  # Aumentato da 25k a 75k
 
 # Configurazione dinamica delle risorse
@@ -88,14 +117,14 @@ def detect_high_performance_capability():
     load_capable = True  # Assumiamo sempre ok per ora
     
     if cpu_capable and ram_capable:
-        logger.info(f"🚀 AUTO-DETECT: Sistema potente rilevato!")
-        logger.info(f"   CPU: {CPU_CORES} core ✅")
-        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB ✅")
+        logger.info(f"AUTO-DETECT: Sistema potente rilevato!")
+        logger.info(f"   CPU: {CPU_CORES} core OK")
+        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB OK")
         return True
     else:
-        logger.info(f"🏃 AUTO-DETECT: Sistema standard rilevato")
-        logger.info(f"   CPU: {CPU_CORES} core {'✅' if cpu_capable else '❌'}")
-        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB {'✅' if ram_capable else '❌'}")
+        logger.info(f"AUTO-DETECT: Sistema standard rilevato")
+        logger.info(f"   CPU: {CPU_CORES} core {'OK' if cpu_capable else 'BASSO'}")
+        logger.info(f"   RAM: {TOTAL_RAM_GB:.1f}GB {'OK' if ram_capable else 'BASSO'}")
         return False
 
 # MODALITÀ AUTOMATICA - sempre al massimo delle performance disponibili
@@ -109,8 +138,8 @@ if HIGH_PERFORMANCE_MODE:
     MAX_CHUNK_SIZE = 500_000           # Limite massimo aumentato
     INSERT_BATCH_SIZE_MULTIPLIER = 3   # Batch MySQL più grandi
     CONNECTION_POOL_SIZE = NUM_WORKERS + 2  # Pool connessioni più ampio
-    logger.info("💪 MODALITÀ HIGH-PERFORMANCE AUTO-ATTIVATA!")
-    logger.info(f"   CPU: {CPU_CORES} core → {NUM_THREADS} thread aggressivi")
+    logger.info("MODALITA HIGH-PERFORMANCE AUTO-ATTIVATA!")
+    logger.info(f"   CPU: {CPU_CORES} core -> {NUM_THREADS} thread aggressivi")
     logger.info(f"   Workers: {NUM_WORKERS} processi paralleli")
     logger.info(f"   Chunk: {INITIAL_CHUNK_SIZE:,} iniziale, max {MAX_CHUNK_SIZE:,}")
     logger.info(f"   INSERT batch: 3x più grandi (fino a 3M record)")
@@ -123,8 +152,8 @@ else:
     MAX_CHUNK_SIZE = max(INITIAL_CHUNK_SIZE, int((USABLE_MEMORY_BYTES * CHUNK_SIZE_MAX_RATIO) / AVG_RECORD_SIZE_BYTES))
     INSERT_BATCH_SIZE_MULTIPLIER = 1
     CONNECTION_POOL_SIZE = 2
-    logger.info("🏃 MODALITÀ STANDARD AUTO-ATTIVATA")
-    logger.info(f"   CPU: {CPU_CORES} core → {NUM_THREADS} thread")
+    logger.info("MODALITA STANDARD AUTO-ATTIVATA")
+    logger.info(f"   CPU: {CPU_CORES} core -> {NUM_THREADS} thread")
     logger.info(f"   Configurazione ottimizzata per sistema standard")
 
 # Calcola la RAM totale del sistema - aggressivo ma sicuro
@@ -1625,7 +1654,11 @@ def mark_file_processed(conn, file_name, record_count, status='completed', error
         cursor.close()
 
 def find_json_files(base_path):
-    """Trova tutti i file JSON nella directory e sottodirectory usando pathlib."""
+    """
+    Trova tutti i file JSON nella directory e sottodirectory con validazione intelligente.
+    
+    DINAMICO: Filtra automaticamente file vuoti/corrotti e fornisce statistiche dettagliate.
+    """
     base_dir = Path(base_path)
     
     if not base_dir.exists():
@@ -1639,11 +1672,45 @@ def find_json_files(base_path):
     # Usa rglob per ricerca ricorsiva di tutti i file .json
     json_files = list(base_dir.rglob("*.json"))
     
-    # Converte i Path objects in stringhe per compatibilità con il resto del codice
-    json_file_paths = [str(json_file) for json_file in json_files]
+    # VALIDAZIONE DINAMICA: filtra file validi
+    valid_files = []
+    empty_files = []
+    corrupt_files = []
     
-    import_logger.info(f"Trovati {len(json_file_paths)} file JSON in {base_path}")
-    return json_file_paths
+    for json_file in json_files:
+        try:
+            # Controlla dimensione file
+            if json_file.stat().st_size == 0:
+                empty_files.append(str(json_file))
+                continue
+            
+            # Test rapido di validità JSON (leggi solo prima riga)
+            with open(json_file, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+                if first_line and (first_line.startswith('{') or first_line.startswith('[')):
+                    valid_files.append(str(json_file))
+                else:
+                    corrupt_files.append(str(json_file))
+        
+        except Exception as e:
+            import_logger.debug(f"⚠️  [SKIP] File problematico {json_file}: {e}")
+            corrupt_files.append(str(json_file))
+    
+    # Statistiche dettagliate
+    total_found = len(json_files)
+    total_valid = len(valid_files)
+    total_empty = len(empty_files)
+    total_corrupt = len(corrupt_files)
+    
+    import_logger.info(f"📊 [DISCOVERY] Analisi {base_path}:")
+    import_logger.info(f"   - File .json trovati: {total_found}")
+    import_logger.info(f"   - File validi: {total_valid} ✅")
+    if total_empty > 0:
+        import_logger.warning(f"   - File vuoti saltati: {total_empty} ⚠️")
+    if total_corrupt > 0:
+        import_logger.warning(f"   - File corrotti saltati: {total_corrupt} ❌")
+    
+    return valid_files
 
 # Mappa categorie → elenco di pattern regex da cercare nel nome file
 CATEGORIES = {
@@ -1680,8 +1747,11 @@ def group_files_by_category(json_files):
     """
     Raggruppa i file JSON per categoria basata su pattern regex predefiniti.
     
-    Ignora le date nel nome file (es. 20240201_, 20240401_) per raggruppare
-    file dello stesso tipo ma di periodi diversi nella stessa tabella.
+    DINAMICO: Supporta multiple strutture di nomi:
+    - 20240201-aggiudicatari_json.json  
+    - aggiudicatari_json.json
+    - cig_json_2007_01.json
+    - smartcig_json_2011_01.json
     """
     # Inizializza le categorie vuote
     categorized_files = {category: [] for category in CATEGORIES.keys()}
@@ -1694,26 +1764,58 @@ def group_files_by_category(json_files):
         # Rimuovi estensione per il matching
         file_stem = file_path.stem
         
-        # RIMUOVI LE DATE dal nome file prima del pattern matching
-        # Pattern per date: YYYYMMDD_ o YYYYMMDD- all'inizio (es. 20240201_, 20240401-, etc.)
-        cleaned_name = re.sub(r'^\d{8}[_-]', '', file_stem)
+        # PULIZIA DINAMICA più aggressiva per multiple strutture
+        cleaned_name = file_stem
+        
+        # 1. Rimuovi date YYYYMMDD all'inizio con - o _
+        cleaned_name = re.sub(r'^\d{8}[-_]', '', cleaned_name)
+        
+        # 2. Rimuovi suffissi _json e _json alla fine
+        cleaned_name = re.sub(r'[_-]json$', '', cleaned_name)
+        
+        # 3. Rimuovi pattern anno-mese per CIG/SmartCIG (es. _2007_01, _2011_12)
+        cleaned_name = re.sub(r'_\d{4}_\d{2}$', '', cleaned_name)
+        
+        # 4. Usa anche il nome della cartella per il matching se presente
+        parent_dir = file_path.parent.name
+        if parent_dir != 'JSON':  # Non la root JSON directory
+            # Pulisci anche il nome della cartella
+            parent_cleaned = re.sub(r'^\d{8}[-_]', '', parent_dir)
+            parent_cleaned = re.sub(r'[_-]json$', '', parent_cleaned)
+            # Se file e cartella non coincidono, prova anche la cartella
+            if parent_cleaned != cleaned_name:
+                alternative_name = parent_cleaned
+            else:
+                alternative_name = None
+        else:
+            alternative_name = None
         
         # Log del cleaning per debug
         if cleaned_name != file_stem:
-            import_logger.debug(f"Cleaned file name: '{file_stem}' -> '{cleaned_name}'")
+            import_logger.debug(f"🧹 [CLEAN] '{file_stem}' -> '{cleaned_name}'" + 
+                               (f" | alt: '{alternative_name}'" if alternative_name else ""))
         
         category_found = False
+        match_details = None
         
-        # Testa ogni categoria con i suoi pattern sul nome pulito
+        # Lista di nomi da testare (principale + alternativo)
+        names_to_test = [cleaned_name]
+        if alternative_name:
+            names_to_test.append(alternative_name)
+        
+        # Testa ogni categoria con i suoi pattern su tutti i nomi possibili
         for category, patterns in CATEGORIES.items():
             for pattern in patterns:
-                # Cerca il pattern nel nome del file pulito (senza date)
-                if re.search(pattern, cleaned_name, re.IGNORECASE):
-                    categorized_files[category].append(json_file)
-                    import_logger.debug(f"File '{file_name}' -> categoria '{category}' (pattern: '{pattern}' su nome pulito: '{cleaned_name}')")
-                    category_found = True
+                for test_name in names_to_test:
+                    # Cerca il pattern nel nome testato
+                    if re.search(pattern, test_name, re.IGNORECASE):
+                        categorized_files[category].append(json_file)
+                        match_details = f"pattern: '{pattern}' su nome: '{test_name}'"
+                        import_logger.debug(f"✅ [MATCH] '{file_name}' -> categoria '{category}' ({match_details})")
+                        category_found = True
+                        break
+                if category_found:
                     break
-            
             if category_found:
                 break
         
@@ -1768,7 +1870,7 @@ def test_categorization(base_path):
     json_files = find_json_files(base_path)
     if not json_files:
         import_logger.warning(f"[TEST] Nessun file JSON trovato in {base_path}")
-        return
+        return {}
     
     import_logger.info(f"[TEST] Trovati {len(json_files)} file JSON totali")
     categories = group_files_by_category(json_files)
@@ -1785,6 +1887,88 @@ def test_categorization(base_path):
     
     return categories
 
+def smart_categorization_with_content_analysis(base_path):
+    """
+    SOLUZIONE 2: Categorizzazione intelligente basata su contenuto + pattern.
+    
+    Combina pattern matching con analisi del contenuto per massima accuratezza.
+    """
+    import_logger.info("🧠 [SMART] Avvio categorizzazione intelligente...")
+    
+    json_files = find_json_files(base_path)
+    if not json_files:
+        return {}
+    
+    # Categorizzazione base con pattern migliorati
+    categories = group_files_by_category(json_files)
+    
+    # Analisi contenuto per file non categorizzati
+    uncategorized = []
+    for json_file in json_files:
+        found_in_category = False
+        for cat_files in categories.values():
+            if json_file in cat_files:
+                found_in_category = True
+                break
+        if not found_in_category:
+            uncategorized.append(json_file)
+    
+    import_logger.info(f"🔍 [CONTENT] Analisi contenuto per {len(uncategorized)} file non categorizzati...")
+    
+    # Analizza contenuto per ri-categorizzare
+    for json_file in uncategorized:
+        category = analyze_file_content_for_category(json_file)
+        if category:
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(json_file)
+            import_logger.info(f"✨ [RESCUED] '{Path(json_file).name}' -> categoria '{category}' (analisi contenuto)")
+    
+    return categories
+
+def analyze_file_content_for_category(json_file):
+    """Analizza il contenuto di un file per determinare la categoria."""
+    try:
+        with open(json_file, 'r', encoding='utf-8') as f:
+            # Leggi primi 5 record per analisi
+            fields_found = set()
+            for i, line in enumerate(f):
+                if i >= 5:  # Analizza solo primi 5 record
+                    break
+                try:
+                    record = json.loads(line.strip())
+                    fields_found.update(record.keys())
+                except:
+                    continue
+        
+        # Pattern di riconoscimento basati su campi
+        if any(field.lower() in {'cig', 'codice_identificativo_gara'} for field in fields_found):
+            return 'cig'
+        elif any('aggiudicazione' in field.lower() for field in fields_found):
+            return 'aggiudicazioni' 
+        elif any('partecipant' in field.lower() or 'fiscale' in field.lower() for field in fields_found):
+            return 'partecipanti'
+        elif any('pubblicazione' in field.lower() for field in fields_found):
+            return 'pubblicazioni'
+        elif any('variante' in field.lower() for field in fields_found):
+            return 'varianti'
+        elif any('subappalto' in field.lower() for field in fields_found):
+            return 'subappalti'
+        elif any('collaudo' in field.lower() for field in fields_found):
+            return 'collaudo'
+        elif any('avanzamento' in field.lower() for field in fields_found):
+            return 'stati_avanzamento'
+        elif any('sospension' in field.lower() for field in fields_found):
+            return 'sospensioni'
+        elif any('economico' in field.lower() for field in fields_found):
+            return 'quadro_economico'
+        
+        return None
+        
+    except Exception as e:
+        import_logger.debug(f"Errore analisi contenuto {json_file}: {e}")
+        return None
+
 def print_category_patterns():
     """Stampa tutti i pattern definiti per il debug."""
     import_logger.info("[DEBUG] Pattern regex per categoria:")
@@ -1792,6 +1976,205 @@ def print_category_patterns():
         import_logger.info(f"  {category}:")
         for pattern in patterns:
             import_logger.info(f"    - {pattern}")
+
+def streaming_incremental_import(base_path, conn):
+    """
+    SOLUZIONE 3: Import streaming incrementale con auto-retry e recovery.
+    
+    Caratteristiche:
+    - Processa file uno alla volta per evitare problemi di memoria
+    - Auto-retry su errori temporanei
+    - Recovery automatico da interruzioni
+    - Tracking dettagliato del progresso
+    - Skip intelligente di file problematici
+    """
+    import_logger.info("🚀 [STREAMING] Avvio importazione streaming incrementale...")
+    
+    # 1. Auto-discovery dei file con prioritizzazione
+    json_files = find_json_files(base_path)
+    if not json_files:
+        import_logger.error("❌ Nessun file JSON trovato per l'importazione")
+        return
+    
+    # 2. Categorizzazione con fallback intelligente 
+    categories = smart_categorization_with_content_analysis(base_path)
+    
+    if not categories:
+        import_logger.error("❌ Nessuna categoria rilevata, impossibile procedere")
+        return
+    
+    import_logger.info(f"📊 [PLAN] Piano di importazione:")
+    total_files = sum(len(files) for files in categories.values())
+    import_logger.info(f"   - File totali: {total_files}")
+    import_logger.info(f"   - Categorie: {len(categories)}")
+    
+    # 3. Prioritizza categorie per importanza (CIG prima, poi resto)
+    priority_order = ['cig', 'aggiudicazioni', 'aggiudicatari', 'partecipanti']
+    sorted_categories = []
+    
+    for priority_cat in priority_order:
+        if priority_cat in categories:
+            sorted_categories.append((priority_cat, categories[priority_cat]))
+    
+    for category, files in categories.items():
+        if category not in priority_order:
+            sorted_categories.append((category, files))
+    
+    # 4. Processa categoria per categoria con streaming
+    overall_stats = {
+        'total_files': total_files,
+        'processed_files': 0,
+        'successful_files': 0,
+        'failed_files': 0,
+        'skipped_files': 0,
+        'total_records': 0
+    }
+    
+    for category, files in sorted_categories:
+        import_logger.info(f"🎯 [CATEGORY] Processando categoria '{category}' ({len(files)} file)")
+        
+        # Analizza schema per questa categoria
+        category_schema = analyze_single_category(category, files[:3])  # Solo primi 3 file per schema
+        
+        # Crea tabelle dinamiche per questa categoria
+        if category_schema:
+            create_dynamic_tables_by_category({category: category_schema})
+        
+        # Processa file della categoria uno alla volta
+        for i, json_file in enumerate(files, 1):
+            file_stats = process_single_file_streaming(
+                json_file, category, category_schema, i, len(files)
+            )
+            
+            # Aggiorna statistiche globali
+            overall_stats['processed_files'] += 1
+            if file_stats['success']:
+                overall_stats['successful_files'] += 1
+                overall_stats['total_records'] += file_stats['records_processed']
+            else:
+                overall_stats['failed_files'] += 1
+            
+            # Report progresso ogni 10 file
+            if i % 10 == 0:
+                success_rate = (overall_stats['successful_files'] / overall_stats['processed_files']) * 100
+                import_logger.info(f"📈 [PROGRESS] {overall_stats['processed_files']}/{overall_stats['total_files']} file "
+                                  f"({success_rate:.1f}% successo, {overall_stats['total_records']:,} record)")
+    
+    # 5. Report finale
+    success_rate = (overall_stats['successful_files'] / overall_stats['processed_files']) * 100 if overall_stats['processed_files'] > 0 else 0
+    import_logger.info("🎉 [COMPLETE] Importazione streaming completata!")
+    import_logger.info(f"📊 [STATS] Statistiche finali:")
+    import_logger.info(f"   - File processati: {overall_stats['processed_files']}/{overall_stats['total_files']}")
+    import_logger.info(f"   - Successi: {overall_stats['successful_files']} ({success_rate:.1f}%)")
+    import_logger.info(f"   - Fallimenti: {overall_stats['failed_files']}")
+    import_logger.info(f"   - Record totali: {overall_stats['total_records']:,}")
+
+def process_single_file_streaming(json_file, category, schema, file_index, total_files):
+    """
+    Processa un singolo file con gestione errori avanzata e retry automatico.
+    """
+    file_name = Path(json_file).name
+    import_logger.info(f"📄 [FILE {file_index}/{total_files}] Processando {file_name} (categoria: {category})")
+    
+    file_stats = {
+        'success': False,
+        'records_processed': 0,
+        'errors': [],
+        'retry_attempts': 0
+    }
+    
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            file_stats['retry_attempts'] = attempt + 1
+            
+            # Check if file is already processed
+            with DatabaseManager.get_connection() as conn:
+                if is_file_processed(conn, file_name):
+                    import_logger.info(f"⏭️  [SKIP] File già processato: {file_name}")
+                    file_stats['success'] = True
+                    return file_stats
+            
+            # Process file in chunks with streaming
+            records_in_file = 0
+            chunk_size = 1000  # Chunk piccoli per streaming
+            
+            with open(json_file, 'r', encoding='utf-8') as f:
+                chunk = []
+                
+                for line_num, line in enumerate(f, 1):
+                    try:
+                        record = json.loads(line.strip())
+                        chunk.append(record)
+                        records_in_file += 1
+                        
+                        # Process chunk when full
+                        if len(chunk) >= chunk_size:
+                            success = process_chunk_with_retry(chunk, category, schema, file_name)
+                            if not success:
+                                raise Exception(f"Errore processamento chunk alla riga {line_num}")
+                            chunk = []
+                    
+                    except json.JSONDecodeError as e:
+                        import_logger.warning(f"⚠️  [JSON] Errore riga {line_num} in {file_name}: {e}")
+                        continue
+                
+                # Process remaining chunk
+                if chunk:
+                    success = process_chunk_with_retry(chunk, category, schema, file_name)
+                    if not success:
+                        raise Exception("Errore processamento chunk finale")
+            
+            # Mark file as processed
+            with DatabaseManager.get_connection() as conn:
+                mark_file_processed(conn, file_name, records_in_file, 'completed')
+            
+            file_stats['success'] = True
+            file_stats['records_processed'] = records_in_file
+            import_logger.info(f"✅ [SUCCESS] {file_name}: {records_in_file:,} record processati")
+            break
+            
+        except Exception as e:
+            error_msg = str(e)
+            file_stats['errors'].append(error_msg)
+            
+            if attempt < max_retries - 1:
+                import_logger.warning(f"🔄 [RETRY {attempt + 1}/{max_retries}] {file_name}: {error_msg}")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                import_logger.error(f"❌ [FAILED] {file_name} dopo {max_retries} tentativi: {error_msg}")
+                
+                # Mark as failed
+                with DatabaseManager.get_connection() as conn:
+                    mark_file_processed(conn, file_name, 0, 'failed', error_msg)
+    
+    return file_stats
+
+def process_chunk_with_retry(chunk, category, schema, file_name):
+    """Processa un chunk con retry automatico e gestione errori intelligente."""
+    max_retries = 2
+    
+    for attempt in range(max_retries):
+        try:
+            batch_id = f"{category}_{int(time.time())}_{attempt}"
+            
+            with DatabaseManager.get_connection() as conn:
+                success = process_batch(conn, chunk, schema, batch_id, category=category)
+                if success:
+                    return True
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                import_logger.debug(f"🔄 [CHUNK-RETRY] {file_name} chunk retry {attempt + 1}: {e}")
+                time.sleep(1)
+            else:
+                import_logger.warning(f"⚠️  [CHUNK-FAIL] {file_name} chunk failed: {e}")
+                return False
+    
+    return False
 
 def process_chunk_unified(args, execution_mode="sequential"):
     """
@@ -2281,9 +2664,58 @@ def main():
             logger.warning(f"[AUTO-CLEANUP] Errore durante pulizia preventiva: {cleanup_error}")
             # Non bloccare l'importazione per errori di pulizia
         
+        # SELEZIONE DINAMICA MODALITÀ DI IMPORTAZIONE
+        import_mode = os.environ.get('IMPORT_MODE', 'auto')  # auto, standard, smart, streaming
+        logger.info(f"🚀 [MODE] Modalità importazione: {import_mode.upper()}")
+        
         # Usa DatabaseManager per la connessione principale
         with DatabaseManager.get_connection() as conn:
-            import_all_json_files(JSON_BASE_PATH, conn)
+            
+            if import_mode == 'streaming':
+                # SOLUZIONE 3: Streaming incrementale
+                logger.info("🌊 [STREAMING] Usando importazione streaming incrementale")
+                streaming_incremental_import(JSON_BASE_PATH, conn)
+                
+            elif import_mode == 'smart':
+                # SOLUZIONE 2: Smart categorization
+                logger.info("🧠 [SMART] Usando categorizzazione intelligente")
+                categories = smart_categorization_with_content_analysis(JSON_BASE_PATH)
+                if categories:
+                    logger.info(f"🎯 [SMART-RESULT] Trovate {len(categories)} categorie intelligenti")
+                    # Per ora usa la logica esistente ma con le categorie migliorate
+                    import_all_json_files(JSON_BASE_PATH, conn)
+                else:
+                    logger.warning("⚠️ Fallback a modalità standard")
+                    import_all_json_files(JSON_BASE_PATH, conn)
+                    
+            elif import_mode == 'standard':
+                # Modalità esistente
+                logger.info("📋 [STANDARD] Usando importazione standard")
+                import_all_json_files(JSON_BASE_PATH, conn)
+                
+            else:  # auto
+                # AUTO-DETECT: Sceglie automaticamente la migliore
+                logger.info("🤖 [AUTO] Rilevamento automatico modalità ottimale...")
+                
+                json_files = find_json_files(JSON_BASE_PATH)
+                total_files = len(json_files)
+                total_size_gb = sum(Path(f).stat().st_size for f in json_files) / (1024**3) if json_files else 0
+                
+                if total_files == 0:
+                    logger.error("❌ Nessun file JSON trovato")
+                elif total_files > 1000 or total_size_gb > 10:
+                    logger.info(f"📊 [AUTO-CHOICE] Dataset GRANDE ({total_files} file, {total_size_gb:.1f}GB) → STREAMING")
+                    streaming_incremental_import(JSON_BASE_PATH, conn)
+                elif total_files > 100 or total_size_gb > 2:
+                    logger.info(f"📊 [AUTO-CHOICE] Dataset MEDIO ({total_files} file, {total_size_gb:.1f}GB) → SMART")
+                    categories = smart_categorization_with_content_analysis(JSON_BASE_PATH)
+                    if categories:
+                        logger.info(f"✅ [SMART-SUCCESS] Categorizzazione intelligente riuscita: {len(categories)} categorie")
+                    # Usa comunque la logica esistente
+                    import_all_json_files(JSON_BASE_PATH, conn)
+                else:
+                    logger.info(f"📊 [AUTO-CHOICE] Dataset PICCOLO ({total_files} file, {total_size_gb:.1f}GB) → STANDARD")
+                    import_all_json_files(JSON_BASE_PATH, conn)
             
         # Chiudi il pool alla fine
         DatabaseManager.close_pool()
