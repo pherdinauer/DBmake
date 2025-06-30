@@ -254,49 +254,33 @@ one_click_complete() {
     echo -e "${GREEN}   ✅ Verifica finale del risultato${NC}"
     echo
     
-    # Chiedi modalità di configurazione database
-    echo -e "${YELLOW}🔧 Configurazione Database per ONE-CLICK:${NC}"
-    echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
-    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
-    echo -e "${YELLOW}3)${NC} Modalità super-automatica (salta tutte le conferme)"
-    echo
-    read -p "Scegli opzione (1-3): " db_choice
+    # Chiedi direttamente il nome del database
+    echo -e "${YELLOW}🗄️ Nome Database MySQL:${NC}"
+    read -p "Inserisci nome database (INVIO per default 'anac_import3'): " custom_db
     
-    case $db_choice in
-        1)
-            echo -e "${GREEN}🔧 Utilizzo database di default per ONE-CLICK${NC}"
-            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
-            python run_import.py --one-click
-            ;;
-        2)
-            read -p "Inserisci nome database personalizzato: " custom_db
-            if [ -n "$custom_db" ]; then
-                echo -e "${GREEN}🔧 Utilizzo database personalizzato: $custom_db${NC}"
-                echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
-                python run_import.py --one-click --database "$custom_db"
-            else
-                echo -e "${RED}❌ Nome database non valido, uso database di default${NC}"
-                echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
-                python run_import.py --one-click
-            fi
-            ;;
-        3)
-            echo -e "${GREEN}⚡ Modalità super-automatica attivata${NC}"
-            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
-            python run_import.py --one-click --force
-            ;;
-        *)
-            echo -e "${GREEN}🔧 Utilizzo database di default (opzione non valida)${NC}"
-            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
-            python run_import.py --one-click
-            ;;
-    esac
+    # Se vuoto, usa default
+    if [ -z "$custom_db" ]; then
+        custom_db="anac_import3"
+        echo -e "${GREEN}🔧 Uso database di default: $custom_db${NC}"
+    else
+        echo -e "${GREEN}🔧 Uso database personalizzato: $custom_db${NC}"
+    fi
+    
+    echo
+    echo -e "${YELLOW}🚀 Avvio processo completo automatico...${NC}"
+    echo -e "${CYAN}📋 Target: $custom_db @ localhost${NC}"
+    echo
+    
+    # Avvia ONE-CLICK con database specificato
+    python run_import.py --one-click --database "$custom_db" --force
     
     if [ $? -eq 0 ]; then
+        echo
         echo -e "${GREEN}🎉 ONE-CLICK SUCCESS: Tutto completato automaticamente!${NC}"
-        echo -e "${GREEN}✅ Le tue tabelle dovrebbero ora contenere tutti i dati!${NC}"
+        echo -e "${GREEN}✅ Database '$custom_db' ora contiene tutti i tuoi dati!${NC}"
         echo -e "${GREEN}🎯 Problema tabelle vuote RISOLTO!${NC}"
     else
+        echo
         echo -e "${RED}💔 ONE-CLICK FAILED: Si è verificato un problema${NC}"
         echo -e "${YELLOW}🆘 Ma non preoccuparti! Prova una di queste opzioni:${NC}"
         echo -e "${YELLOW}   - Opzione 4 (Streaming Import) per dataset grandi${NC}"
