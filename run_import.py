@@ -3,13 +3,15 @@
 🚀 WRAPPER CONVENIENTE per le Soluzioni Dinamiche Import JSON
 
 Uso semplificato:
-  python run_import.py                    # Auto-mode (raccomandato)
-  python run_import.py --auto             # Selezione automatica intelligente
-  python run_import.py --smart            # Categorizzazione intelligente
-  python run_import.py --streaming        # Streaming incrementale per grandi volumi
-  python run_import.py --standard         # Modalità standard con auto-discovery
-  python run_import.py --test             # Solo test categorizzazione
-  python run_import.py --test-solutions   # Test tutte le soluzioni
+  python run_import.py --one-click                    # 🎯 ONE-CLICK: FA TUTTO AUTOMATICAMENTE!
+  python run_import.py --one-click --database mio_db  # ONE-CLICK con database personalizzato
+  python run_import.py                                # Auto-mode (raccomandato)
+  python run_import.py --auto                         # Selezione automatica intelligente
+  python run_import.py --smart                        # Categorizzazione intelligente
+  python run_import.py --streaming                    # Streaming incrementale per grandi volumi
+  python run_import.py --standard                     # Modalità standard con auto-discovery
+  python run_import.py --test                         # Solo test categorizzazione
+  python run_import.py --test-all                     # Test tutte le soluzioni
 """
 
 import os
@@ -107,6 +109,11 @@ def run_one_click():
     """🎯 ONE-CLICK: Fa tutto automaticamente! Test + Import + Fix se necessario."""
     print("🎯 [ONE-CLICK] Avvio processo completo automatico...")
     print("✨ [ONE-CLICK] Questo farà tutto senza che tu debba preoccuparti di niente!")
+    
+    # Mostra configurazione database
+    mysql_db = os.environ.get('MYSQL_DATABASE', 'anac_import3')
+    mysql_host = os.environ.get('MYSQL_HOST', 'localhost')
+    print(f"🗄️  [ONE-CLICK] Database di destinazione: {mysql_db} @ {mysql_host}")
     print("")
     
     # Step 1: Test categorizzazione
@@ -241,7 +248,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 🎯 ONE-CLICK (RACCOMANDATISSIMO):
-  python run_import.py --one-click        # FA TUTTO AUTOMATICAMENTE! Test + Import + Fix
+  python run_import.py --one-click                    # Database default (anac_import3)
+  python run_import.py --one-click --database mio_db  # Database personalizzato
+  python run_import.py --one-click --force            # Super automatico (no conferme)
 
 🚀 COMANDI PRINCIPALI:
   python run_import.py                    # SMART mode (RACCOMANDATO per la tua struttura)

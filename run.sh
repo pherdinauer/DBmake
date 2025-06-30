@@ -253,9 +253,44 @@ one_click_complete() {
     echo -e "${GREEN}   ✅ Fix automatico se ci sono problemi${NC}"
     echo -e "${GREEN}   ✅ Verifica finale del risultato${NC}"
     echo
-    echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
     
-    python run_import.py --one-click
+    # Chiedi modalità di configurazione database
+    echo -e "${YELLOW}🔧 Configurazione Database per ONE-CLICK:${NC}"
+    echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
+    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
+    echo -e "${YELLOW}3)${NC} Modalità super-automatica (salta tutte le conferme)"
+    echo
+    read -p "Scegli opzione (1-3): " db_choice
+    
+    case $db_choice in
+        1)
+            echo -e "${GREEN}🔧 Utilizzo database di default per ONE-CLICK${NC}"
+            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+            python run_import.py --one-click
+            ;;
+        2)
+            read -p "Inserisci nome database personalizzato: " custom_db
+            if [ -n "$custom_db" ]; then
+                echo -e "${GREEN}🔧 Utilizzo database personalizzato: $custom_db${NC}"
+                echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+                python run_import.py --one-click --database "$custom_db"
+            else
+                echo -e "${RED}❌ Nome database non valido, uso database di default${NC}"
+                echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+                python run_import.py --one-click
+            fi
+            ;;
+        3)
+            echo -e "${GREEN}⚡ Modalità super-automatica attivata${NC}"
+            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+            python run_import.py --one-click --force
+            ;;
+        *)
+            echo -e "${GREEN}🔧 Utilizzo database di default (opzione non valida)${NC}"
+            echo -e "${YELLOW}🚀 Avvio processo completo...${NC}"
+            python run_import.py --one-click
+            ;;
+    esac
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}🎉 ONE-CLICK SUCCESS: Tutto completato automaticamente!${NC}"
