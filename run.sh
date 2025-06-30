@@ -184,18 +184,35 @@ chmod -R 755 .
 show_menu() {
     clear
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
-    echo -e "║                    CIG Database Management Tool - AUTO-TURBO                   ║"
-    echo -e "║                           Branch: MULTITAB (Ottimizzato)                       ║"
+    echo -e "║              ANAC Import JSON - 3 SOLUZIONI DINAMICHE AVANZATE                ║"
+    echo -e "║                     Branch: MULTITAB (Completamente Ottimizzato)              ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
-    echo -e "${YELLOW}1)${NC} Importa dati in SQLite"
-    echo -e "${YELLOW}2)${NC} Genera file SQL per MySQL"
-    echo -e "${YELLOW}3)${NC} 🚀 Auto-Turbo MySQL Import (Consigliato)"
-    echo -e "${YELLOW}4)${NC} 🛡️ Verifica Integrità Database"
-    echo -e "${YELLOW}5)${NC} Cerca CIG nel database"
-    echo -e "${YELLOW}6)${NC} Esci"
+    echo -e "${GREEN}🎯 COMANDI PRINCIPALI (RACCOMANDATI):${NC}"
+    echo -e "${YELLOW}1)${NC} 🧪 Test Categorizzazione (FAI SEMPRE PRIMA!)"
+    echo -e "${YELLOW}2)${NC} 🚀 SMART Import - Migliore per la tua struttura"
+    echo -e "${YELLOW}3)${NC} 🔧 Fix Tabelle Vuote (risolve il problema)"
     echo
-    echo -n -e "${YELLOW}Scegli un'opzione (1-6): ${NC}"
+    echo -e "${GREEN}🔧 MODALITÀ ALTERNATIVE:${NC}"
+    echo -e "${YELLOW}4)${NC} 🌊 Streaming Import (dataset enormi >10GB)"
+    echo -e "${YELLOW}5)${NC} 🤖 Auto-Mode (rileva automaticamente)"
+    echo -e "${YELLOW}6)${NC} 📋 Modalità Standard (pattern classici)"
+    echo
+    echo -e "${GREEN}📊 UTILITÀ:${NC}"
+    echo -e "${YELLOW}7)${NC} 📊 Status Sistema e Configurazione"
+    echo -e "${YELLOW}8)${NC} 📄 Mostra Ultimi Log"
+    echo -e "${YELLOW}9)${NC} 🧪 Test Tutte le Soluzioni"
+    echo
+    echo -e "${GREEN}🗂️ LEGACY:${NC}"
+    echo -e "${YELLOW}10)${NC} Importa dati in SQLite"
+    echo -e "${YELLOW}11)${NC} Genera file SQL per MySQL"
+    echo -e "${YELLOW}12)${NC} 🛡️ Verifica Integrità Database"
+    echo -e "${YELLOW}13)${NC} Cerca CIG nel database"
+    echo -e "${YELLOW}0)${NC} Esci"
+    echo
+    echo -e "${GREEN}💡 RACCOMANDAZIONE: Usa opzioni 1 → 2 per la migliore esperienza${NC}"
+    echo
+    echo -n -e "${YELLOW}Scegli un'opzione (0-13): ${NC}"
 }
 
 # Funzione per importare in SQLite
@@ -221,15 +238,185 @@ generate_mysql_sql() {
     fi
 }
 
-# Funzione per import diretto in MySQL
-import_to_mysql() {
-    echo -e "${YELLOW}🚀 Avvio Auto-Turbo MySQL Import con gestione errori robusta...${NC}"
-    echo -e "${GREEN}💪 Modalità HIGH-PERFORMANCE con rilevamento automatico risorse${NC}"
-    echo -e "${GREEN}⚡ Ottimizzazioni: multi-thread, batch dinamici, schema intelligente${NC}"
-    echo -e "${GREEN}🛡️ Gestione robusta di MySQLInterfaceError${NC}"
+# 🧪 FUNZIONI NUOVE CON CLI UNIFICATO
+
+# Test categorizzazione
+test_categorization() {
+    echo -e "${YELLOW}🧪 Avvio Test Categorizzazione...${NC}"
+    echo -e "${GREEN}Verifica che i file JSON vengano trovati e categorizzati correttamente${NC}"
+    echo -e "${GREEN}(Questo test NON importa nulla, solo verifica)${NC}"
+    echo
+    
+    python run_import.py --test
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✅ Test categorizzazione completato con successo!${NC}"
+        echo -e "${GREEN}💡 Ora puoi procedere con l'importazione usando opzione 2${NC}"
+    else
+        echo -e "${RED}❌ Test categorizzazione fallito.${NC}"
+        echo -e "${YELLOW}💡 Controlla i path JSON e i file prima di procedere${NC}"
+    fi
+}
+
+# SMART Import - Migliore per la struttura dell'utente
+smart_import() {
+    echo -e "${YELLOW}🧠 Avvio SMART Import - Migliore per la tua struttura...${NC}"
+    echo -e "${GREEN}✨ Caratteristiche SMART mode:${NC}"
+    echo -e "${GREEN}   - Analizza contenuto file oltre ai nomi${NC}"
+    echo -e "${GREEN}   - Gestisce timestamp complessi (YYYYMMDD-)${NC}"
+    echo -e "${GREEN}   - Recovery automatico file non categorizzati${NC}"
+    echo -e "${GREEN}   - Velocità ottimale per dataset medi${NC}"
+    echo
     
     # Chiedi modalità di configurazione database
+    echo -e "${YELLOW}🔧 Configurazione Database:${NC}"
+    echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
+    echo -e "${YELLOW}2)${NC} Specifica database personalizzato"
+    echo -e "${YELLOW}3)${NC} Modalità automatica (salta conferme)"
     echo
+    read -p "Scegli opzione (1-3): " db_choice
+    
+    case $db_choice in
+        1)
+            echo -e "${GREEN}🔧 Utilizzo database di default${NC}"
+            python run_import.py --run
+            ;;
+        2)
+            read -p "Inserisci nome database personalizzato: " custom_db
+            if [ -n "$custom_db" ]; then
+                echo -e "${GREEN}🔧 Utilizzo database personalizzato: $custom_db${NC}"
+                python run_import.py --run --database "$custom_db"
+            else
+                echo -e "${RED}❌ Nome database non valido, uso database di default${NC}"
+                python run_import.py --run
+            fi
+            ;;
+        3)
+            echo -e "${GREEN}⚡ Modalità automatica attivata${NC}"
+            python run_import.py --run --force
+            ;;
+        *)
+            echo -e "${GREEN}🔧 Utilizzo database di default (opzione non valida)${NC}"
+            python run_import.py --run
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 SMART Import completato con successo!${NC}"
+        echo -e "${GREEN}✅ Le tabelle dovrebbero ora contenere i tuoi dati${NC}"
+    else
+        echo -e "${RED}❌ Errore durante SMART Import.${NC}"
+        echo -e "${YELLOW}💡 Prova l'opzione 3 (Fix Tabelle Vuote) per risolvere${NC}"
+    fi
+}
+
+# Fix tabelle vuote
+fix_empty_tables() {
+    echo -e "${YELLOW}🔧 Avvio Fix Tabelle Vuote...${NC}"
+    echo -e "${GREEN}🎯 Questo risolve specificamente il problema delle tabelle vuote${NC}"
+    echo -e "${GREEN}   - Prima testa la categorizzazione${NC}"
+    echo -e "${GREEN}   - Poi usa SMART mode per l'importazione${NC}"
+    echo -e "${GREEN}   - Gestione automatica degli errori${NC}"
+    echo
+    
+    python run_import.py --fix-empty
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 Fix tabelle vuote completato con successo!${NC}"
+        echo -e "${GREEN}✅ Il problema dovrebbe essere risolto${NC}"
+    else
+        echo -e "${RED}❌ Errore durante il fix delle tabelle vuote.${NC}"
+        echo -e "${YELLOW}💡 Verifica i log con l'opzione 8${NC}"
+    fi
+}
+
+# Streaming import per dataset enormi
+streaming_import() {
+    echo -e "${YELLOW}🌊 Avvio Streaming Import...${NC}"
+    echo -e "${GREEN}💪 Modalità STREAMING per dataset enormi:${NC}"
+    echo -e "${GREEN}   - Processing incrementale file-by-file${NC}"
+    echo -e "${GREEN}   - Auto-retry automatico su errori${NC}"
+    echo -e "${GREEN}   - Recovery intelligente da interruzioni${NC}"
+    echo -e "${GREEN}   - Gestione memoria ottimizzata${NC}"
+    echo
+    
+    python run_import.py --streaming
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 Streaming Import completato con successo!${NC}"
+    else
+        echo -e "${RED}❌ Errore durante Streaming Import.${NC}"
+    fi
+}
+
+# Auto-mode (rileva automaticamente)
+auto_import() {
+    echo -e "${YELLOW}🤖 Avvio Auto-Mode...${NC}"
+    echo -e "${GREEN}🧠 Rilevamento automatico modalità ottimale:${NC}"
+    echo -e "${GREEN}   - Dataset piccolo (<100 file): STANDARD${NC}"
+    echo -e "${GREEN}   - Dataset medio (100-1000 file): SMART${NC}"
+    echo -e "${GREEN}   - Dataset grande (>1000 file): STREAMING${NC}"
+    echo
+    
+    python run_import.py --auto
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 Auto-Mode completato con successo!${NC}"
+    else
+        echo -e "${RED}❌ Errore durante Auto-Mode.${NC}"
+    fi
+}
+
+# Modalità standard
+standard_import() {
+    echo -e "${YELLOW}📋 Avvio Modalità Standard...${NC}"
+    echo -e "${GREEN}⚙️ Modalità Standard con pattern classici${NC}"
+    echo
+    
+    python run_import.py --standard
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}🎉 Modalità Standard completata con successo!${NC}"
+    else
+        echo -e "${RED}❌ Errore durante Modalità Standard.${NC}"
+    fi
+}
+
+# Status sistema
+show_status() {
+    echo -e "${YELLOW}📊 Status Sistema e Configurazione...${NC}"
+    echo
+    
+    python run_import.py --status
+}
+
+# Mostra ultimi log
+show_logs() {
+    echo -e "${YELLOW}📄 Ultimi Log di Importazione...${NC}"
+    echo
+    
+    python run_import.py --logs
+}
+
+# Test tutte le soluzioni
+test_all_solutions() {
+    echo -e "${YELLOW}🧪 Test di tutte le 3 Soluzioni Dinamiche...${NC}"
+    echo -e "${GREEN}Questo testa tutte le soluzioni implementate${NC}"
+    echo
+    
+    python run_import.py --test-all
+}
+
+# 🗂️ FUNZIONI LEGACY (mantenute per compatibilità)
+
+# Funzione per import diretto in MySQL (LEGACY)
+legacy_import_to_mysql() {
+    echo -e "${YELLOW}🚀 Avvio Auto-Turbo MySQL Import (LEGACY)...${NC}"
+    echo -e "${RED}⚠️ NOTA: Questa è la versione LEGACY. Usa le opzioni 1-6 per le nuove funzioni${NC}"
+    echo -e "${GREEN}💪 Modalità HIGH-PERFORMANCE con rilevamento automatico risorse${NC}"
+    echo
+    
+    # Chiedi modalità di configurazione database
     echo -e "${YELLOW}🔧 Configurazione Database:${NC}"
     echo -e "${YELLOW}1)${NC} Usa database di default (anac_import3)"
     echo -e "${YELLOW}2)${NC} 🆕 Modalità interattiva (crea nuovo o scegli esistente)"
@@ -264,9 +451,9 @@ import_to_mysql() {
     esac
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}🎉 Auto-Turbo Import completato con successo!${NC}"
+        echo -e "${GREEN}🎉 Auto-Turbo Import (LEGACY) completato con successo!${NC}"
     else
-        echo -e "${RED}❌ Errore durante l'Auto-Turbo Import.${NC}"
+        echo -e "${RED}❌ Errore durante l'Auto-Turbo Import (LEGACY).${NC}"
     fi
 }
 
@@ -337,27 +524,56 @@ while true; do
 
     case $choice in
         1)
-            import_to_sqlite
+            test_categorization
             ;;
         2)
-            generate_mysql_sql
+            smart_import
             ;;
         3)
-            import_to_mysql
+            fix_empty_tables
             ;;
         4)
-            check_database_integrity
+            streaming_import
             ;;
         5)
-            search_cig
+            auto_import
             ;;
         6)
+            standard_import
+            ;;
+        7)
+            show_status
+            ;;
+        8)
+            show_logs
+            ;;
+        9)
+            test_all_solutions
+            ;;
+        10)
+            import_to_sqlite
+            ;;
+        11)
+            generate_mysql_sql
+            ;;
+        12)
+            check_database_integrity
+            ;;
+        13)
+            search_cig
+            ;;
+        0)
             echo -e "${GREEN}Arrivederci!${NC}"
             deactivate
             exit 0
             ;;
+        # Compatibilità con vecchio sistema (per chi digita 3 aspettandosi MySQL import)
+        old3|legacy)
+            legacy_import_to_mysql
+            ;;
         *)
-            echo -e "${RED}Opzione non valida.${NC}"
+            echo -e "${RED}Opzione non valida. Usa numeri da 0 a 13.${NC}"
+            echo -e "${YELLOW}💡 TIP: Usa opzioni 1 → 2 per la migliore esperienza${NC}"
             ;;
     esac
 
