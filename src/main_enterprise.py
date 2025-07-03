@@ -336,6 +336,30 @@ def cli():
     pass
 
 @cli.command()
+def setup_wizard():
+    """🧙‍♂️ Avvia il wizard di setup interattivo completo."""
+    try:
+        from src.cli.wizard import SetupWizard
+        
+        wizard = SetupWizard()
+        success = wizard.run_wizard()
+        
+        if success:
+            print("✅ Setup completato con successo!")
+            sys.exit(0)
+        else:
+            print("❌ Setup fallito!")
+            sys.exit(1)
+            
+    except ImportError as e:
+        print(f"🚨 Wizard non disponibile: {e}")
+        print("Installa le dipendenze: pip install rich click mysql-connector-python")
+        sys.exit(1)
+    except Exception as e:
+        print(f"🚨 Errore durante setup: {e}")
+        sys.exit(1)
+
+@cli.command()
 @click.argument('files', nargs=-1, required=True)
 @click.option('--job-name', '-n', help='Nome del job di importazione')
 @click.option('--validation', '-v', 
@@ -399,6 +423,198 @@ def setup_credentials():
         print("✅ Credenziali configurate con successo!")
     except Exception as e:
         print(f"❌ Errore configurazione credenziali: {e}")
+        sys.exit(1)
+
+@cli.command()
+def status():
+    """📊 Mostra lo stato del sistema e configurazione."""
+    print("📊 ANAC Importer Enterprise - Status Sistema")
+    print("=" * 50)
+    
+    try:
+        # Test moduli
+        print("📦 MODULI:")
+        try:
+            from src.security import SecureCredentialManager
+            print("   ✅ Security Module: OK")
+        except ImportError:
+            print("   ❌ Security Module: ERRORE")
+        
+        try:
+            from src.database.secure_connection import SecureDatabaseConnection
+            print("   ✅ Database Module: OK")
+        except ImportError:
+            print("   ❌ Database Module: ERRORE")
+        
+        try:
+            from src.core import ImportService
+            print("   ✅ Core Module: OK")
+        except ImportError:
+            print("   ❌ Core Module: ERRORE")
+        
+        # Test credenziali
+        print("\n🔑 CREDENZIALI:")
+        try:
+            credential_manager = SecureCredentialManager()
+            credentials = credential_manager.get_database_credentials()
+            print("   ✅ Credenziali: Disponibili")
+            print(f"   🌐 Host: {credentials.get('host', 'N/A')}")
+            print(f"   👤 User: {credentials.get('user', 'N/A')}")
+            print(f"   🗄️ Database: {credentials.get('database', 'N/A')}")
+        except Exception:
+            print("   ❌ Credenziali: Non configurate")
+            print("   💡 Esegui: python3 src/main_enterprise.py setup-wizard")
+        
+        # Test connessione database
+        print("\n🔗 CONNESSIONE DATABASE:")
+        try:
+            importer = EnterpriseImporter()
+            importer._setup_credentials()
+            importer._setup_database_connection()
+            
+            if importer.db_connection.test_connection():
+                print("   ✅ Connessione: OK")
+                
+                # Info schema
+                try:
+                    from src.database.schema_manager import SchemaManager
+                    schema_manager = SchemaManager(importer.db_connection)
+                    schema_info = schema_manager.get_schema_info()
+                    print(f"   📊 Schema Version: {schema_info.get('current_version', 'N/A')}")
+                    print(f"   📋 Tabelle: {schema_info.get('table_count', 'N/A')}")
+                except Exception:
+                    print("   ⚠️ Info schema non disponibili")
+            else:
+                print("   ❌ Connessione: FALLITA")
+        except Exception as e:
+            print(f"   ❌ Connessione: ERRORE - {e}")
+        
+        # Directories
+        print("\n📁 DIRECTORIES:")
+        directories = ['logs', 'database', 'demo']
+        for directory in directories:
+            path = Path(directory)
+            if path.exists():
+                print(f"   ✅ {directory}/: Presente")
+            else:
+                print(f"   ⚠️ {directory}/: Mancante")
+        
+        print("\n" + "=" * 50)
+        
+    except Exception as e:
+        print(f"❌ Errore nel controllo status: {e}")
+        sys.exit(1)
+
+@cli.command()
+def quickstart():
+    """🚀 Guida rapida per iniziare."""
+    quickstart_text = """
+🚀 ANAC Importer Enterprise - Guida Rapida
+
+PRIMO SETUP:
+1. Esegui il wizard di configurazione:
+   python3 src/main_enterprise.py setup-wizard
+
+2. Il wizard ti guiderà attraverso:
+   • Configurazione credenziali database
+   • Creazione database (se necessario)
+   • Inizializzazione schema enterprise
+   • Test completo del sistema
+
+UTILIZZO QUOTIDIANO:
+1. Verifica sistema:
+   python3 src/main_enterprise.py status
+
+2. Test connessione:
+   python3 src/main_enterprise.py test-connection
+
+3. Importa file ANAC:
+   python3 src/main_enterprise.py import-files file1.json file2.json
+
+OPZIONI AVANZATE:
+• Validazione enterprise:
+  python3 src/main_enterprise.py import-files --validation enterprise file.json
+
+• Batch personalizzato:
+  python3 src/main_enterprise.py import-files --batch-size 2000 file.json
+
+• Output verboso:
+  python3 src/main_enterprise.py import-files --verbose file.json
+
+AIUTO:
+• Lista comandi: python3 src/main_enterprise.py --help
+• Help comando: python3 src/main_enterprise.py COMANDO --help
+
+DOCUMENTAZIONE:
+• Guida completa: cat IMPLEMENTAZIONE_COMPLETA_ENTERPRISE.md
+• Demo sistema: python3 demo/enterprise_demo.py
+
+🎯 Per problemi: Controlla sempre prima 'status' e 'test-connection'
+    """
+    
+    print(quickstart_text.strip())
+
+@cli.command()
+@click.option('--format', type=click.Choice(['table', 'json'], case_sensitive=False), 
+              default='table', help='Formato output')
+def list_jobs(format):
+    """📋 Lista i job di importazione recenti."""
+    try:
+        importer = EnterpriseImporter()
+        importer._setup_credentials()
+        importer._setup_database_connection()
+        
+        # Query job recenti
+        query = """
+        SELECT job_id, name, status, created_at, processed_records, 
+               valid_records, failed_records, integrity_verified
+        FROM import_jobs 
+        ORDER BY created_at DESC 
+        LIMIT 10
+        """
+        
+        result = importer.db_connection.execute_with_retry(query)
+        
+        if not result:
+            print("📭 Nessun job trovato.")
+            return
+        
+        if format == 'json':
+            import json
+            jobs = []
+            for row in result:
+                jobs.append({
+                    'job_id': row[0],
+                    'name': row[1],
+                    'status': row[2],
+                    'created_at': str(row[3]),
+                    'processed_records': row[4],
+                    'valid_records': row[5],
+                    'failed_records': row[6],
+                    'integrity_verified': bool(row[7])
+                })
+            print(json.dumps(jobs, indent=2))
+        else:
+            # Formato tabella
+            print("📋 JOB DI IMPORTAZIONE RECENTI")
+            print("=" * 80)
+            print(f"{'ID':<8} {'Nome':<20} {'Stato':<12} {'Data':<19} {'Record':<8} {'✅':<6} {'❌':<6} {'🔒':<3}")
+            print("-" * 80)
+            
+            for row in result:
+                job_id_short = row[0][:8]
+                name = row[1][:20] if row[1] else 'N/A'
+                status = row[2]
+                created_at = str(row[3])[:19] if row[3] else 'N/A'
+                processed = row[4] or 0
+                valid = row[5] or 0
+                failed = row[6] or 0
+                integrity = '✅' if row[7] else '❌'
+                
+                print(f"{job_id_short:<8} {name:<20} {status:<12} {created_at:<19} {processed:<8} {valid:<6} {failed:<6} {integrity:<3}")
+        
+    except Exception as e:
+        print(f"❌ Errore nel recupero job: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
