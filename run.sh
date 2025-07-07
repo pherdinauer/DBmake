@@ -58,20 +58,20 @@ if [ ! -d ".git" ]; then
     exit 1
 fi
 
-# Assicurati di essere sul branch MULTITAB
-echo -e "${YELLOW}🔄 Verifica e checkout branch MULTITAB...${NC}"
+# Assicurati di essere sul branch cursor/crea-un-nuovo-branch-agent-8d8c
+echo -e "${YELLOW}🔄 Verifica e checkout branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
 current_branch=$(git branch --show-current)
-if [ "$current_branch" != "MULTITAB" ]; then
+if [ "$current_branch" != "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
     echo -e "${YELLOW}📋 Branch attuale: $current_branch${NC}"
-    echo -e "${YELLOW}🔄 Switching al branch MULTITAB...${NC}"
-    if git checkout MULTITAB; then
-        echo -e "${GREEN}✅ Checkout su branch MULTITAB completato${NC}"
+    echo -e "${YELLOW}🔄 Switching al branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+    if git checkout "cursor/crea-un-nuovo-branch-agent-8d8c"; then
+        echo -e "${GREEN}✅ Checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c completato${NC}"
     else
-        echo -e "${RED}❌ Errore nel checkout su branch MULTITAB${NC}"
+        echo -e "${RED}❌ Errore nel checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
         exit 1
     fi
 else
-    echo -e "${GREEN}✅ Già sul branch MULTITAB${NC}"
+    echo -e "${GREEN}✅ Già sul branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
 fi
 
 # Gestione delle modifiche locali
@@ -84,15 +84,15 @@ else
 fi
 
 # Aggiornamento repository
-echo -e "${YELLOW}🔄 Aggiornamento repository dal branch MULTITAB...${NC}"
-if git pull origin MULTITAB; then
-    echo -e "${GREEN}✅ Repository aggiornato con successo dal branch MULTITAB${NC}"
+echo -e "${YELLOW}🔄 Aggiornamento repository dal branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+if git pull origin "cursor/crea-un-nuovo-branch-agent-8d8c"; then
+    echo -e "${GREEN}✅ Repository aggiornato con successo dal branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
     
-    # Verifica finale che siamo ancora sul branch MULTITAB
+    # Verifica finale che siamo ancora sul branch cursor/crea-un-nuovo-branch-agent-8d8c
     final_branch=$(git branch --show-current)
-    if [ "$final_branch" != "MULTITAB" ]; then
-        echo -e "${YELLOW}⚠️ Branch cambiato durante il pull, ritorno a MULTITAB...${NC}"
-        git checkout MULTITAB
+    if [ "$final_branch" != "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
+        echo -e "${YELLOW}⚠️ Branch cambiato durante il pull, ritorno a cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+        git checkout "cursor/crea-un-nuovo-branch-agent-8d8c"
     fi
     
     # Ripristino modifiche locali se presenti
@@ -185,7 +185,7 @@ show_menu() {
     clear
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
     echo -e "║              ANAC Import JSON - 3 SOLUZIONI DINAMICHE AVANZATE                ║"
-    echo -e "║                     Branch: MULTITAB (Completamente Ottimizzato)              ║"
+    echo -e "║           Branch: cursor/crea-un-nuovo-branch-agent-8d8c (Sviluppo)           ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${RED}🎯 ONE-CLICK (NON TI DEVI PREOCCUPARE DI NIENTE!):${NC}"
