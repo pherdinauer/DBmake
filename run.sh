@@ -173,19 +173,71 @@ pip install --upgrade pip
 # Installa le dipendenze
 echo -e "${YELLOW}📦 Installazione dipendenze...${NC}"
 pip install -r requirements.txt
-# Installa anche mysql-connector-python se non presente
+
+# Verifica e installa moduli critici se non presenti
+echo -e "${YELLOW}🔍 Verifica moduli critici...${NC}"
+
+# Installa psutil se non presente
+if ! python -c "import psutil" 2>/dev/null; then
+    echo -e "${YELLOW}📦 Installazione modulo psutil (richiesto)...${NC}"
+    pip install psutil>=5.9.0
+fi
+
+# Installa mysql-connector-python se non presente
 if ! python -c "import mysql.connector" 2>/dev/null; then
     echo -e "${YELLOW}📦 Installazione modulo mysql-connector-python...${NC}"
-    pip install mysql-connector-python
-    # Aggiungi a requirements.txt se non già presente
-    if ! grep -q "mysql-connector-python" requirements.txt; then
-        echo "mysql-connector-python" >> requirements.txt
+    pip install mysql-connector-python>=8.0.33
+fi
+
+# Installa pandas se non presente
+if ! python -c "import pandas" 2>/dev/null; then
+    echo -e "${YELLOW}📦 Installazione modulo pandas...${NC}"
+    pip install pandas>=1.5.0
+fi
+
+# Verifica finale di tutti i moduli critici
+echo -e "${YELLOW}🔍 Verifica finale moduli critici...${NC}"
+modules_check=0
+
+# Verifica pandas
+if python -c "import pandas; print(f'✅ Pandas versione {pandas.__version__} installato correttamente')" 2>/dev/null; then
+    modules_check=$((modules_check + 1))
+else
+    echo -e "${RED}❌ Pandas non disponibile${NC}"
+fi
+
+# Verifica psutil
+if python -c "import psutil; print(f'✅ Psutil versione {psutil.__version__} installato correttamente')" 2>/dev/null; then
+    modules_check=$((modules_check + 1))
+else
+    echo -e "${RED}❌ Psutil non disponibile${NC}"
+fi
+
+# Verifica mysql.connector
+if python -c "import mysql.connector; print('✅ MySQL Connector installato correttamente')" 2>/dev/null; then
+    modules_check=$((modules_check + 1))
+else
+    echo -e "${RED}❌ MySQL Connector non disponibile${NC}"
+fi
+
+# Verifica che tutti i moduli critici siano disponibili
+if [ $modules_check -lt 3 ]; then
+    echo -e "${RED}❌ Non tutti i moduli critici sono disponibili. Reinstallazione forzata...${NC}"
+    pip install --force-reinstall psutil pandas mysql-connector-python
+    echo -e "${YELLOW}🔄 Riprova verifica moduli...${NC}"
+    
+    # Seconda verifica
+    if ! python -c "import psutil, pandas, mysql.connector" 2>/dev/null; then
+        echo -e "${RED}❌ ERRORE CRITICO: Impossibile installare i moduli richiesti${NC}"
+        echo -e "${YELLOW}💡 Suggerimenti:${NC}"
+        echo -e "${YELLOW}   - Verifica connessione internet${NC}"
+        echo -e "${YELLOW}   - Controlla spazio disco disponibile${NC}"
+        echo -e "${YELLOW}   - Prova a rilanciare lo script${NC}"
+        exit 1
     fi
 fi
 
-# Verifica l'installazione di pandas
-echo -e "${YELLOW}🔍 Verifica installazione pandas...${NC}"
-python3 -c "import pandas; print(f'✅ Pandas versione {pandas.__version__} installato correttamente')"
+echo -e "${GREEN}✅ Tutti i moduli critici sono disponibili!${NC}"
 
 # Verifica che la directory /database sia montata
 if ! mountpoint -q /database; then
