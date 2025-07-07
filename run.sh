@@ -194,6 +194,67 @@ echo -e "${GREEN}✅ PYTHONPATH configurato: $PYTHONPATH${NC}"
 echo -e "${YELLOW}📦 Aggiornamento pip...${NC}"
 pip install --upgrade pip
 
+# Pulizia file strani creati da errori precedenti
+echo -e "${YELLOW}🧹 Pulizia file temporanei e corrotti...${NC}"
+for strange_file in "=1.5.0" "=5.9.0" "=8.0.33" ">=1.5.0" ">=5.9.0" ">=8.0.33"; do
+    if [ -f "$strange_file" ]; then
+        echo -e "${YELLOW}🗑️ Rimozione file corrotto: $strange_file${NC}"
+        rm -f "$strange_file"
+    fi
+done
+
+# Verifica e riparazione automatica requirements.txt
+echo -e "${YELLOW}🔍 Verifica integrità requirements.txt...${NC}"
+if grep -q "tabulate>=0.9.0 mysql-connector-python" requirements.txt 2>/dev/null; then
+    echo -e "${RED}❌ Requirements.txt corrotto rilevato! Riparazione automatica...${NC}"
+    
+    # Backup del file corrotto
+    cp requirements.txt requirements.txt.backup
+    
+    # Crea una versione pulita del requirements.txt
+    cat > requirements.txt << 'EOF'
+pandas>=1.5.0
+python-dotenv>=0.19.0
+typing-extensions>=4.0.0
+psutil>=5.9.0
+tabulate>=0.9.0
+requests>=2.31.0
+mysql-connector-python>=8.0.33
+cryptography>=41.0.0
+keyring>=24.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+structlog>=23.0.0
+python-json-logger>=2.0.0
+SQLAlchemy>=2.0.0
+alembic>=1.12.0
+aiofiles>=23.0.0
+prometheus-client>=0.17.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.0.0
+mypy>=1.5.0
+flake8>=6.0.0
+bandit>=1.7.0
+jsonschema>=4.19.0
+marshmallow>=3.20.0
+cerberus>=1.3.4
+click>=8.1.0
+rich>=13.0.0
+typer>=0.9.0
+tenacity>=8.2.0
+ipython>=8.14.0
+jupyter>=1.0.0
+memory-profiler>=0.61.0
+line-profiler>=4.1.0
+EOF
+    
+    echo -e "${GREEN}✅ Requirements.txt riparato automaticamente${NC}"
+else
+    echo -e "${GREEN}✅ Requirements.txt è valido${NC}"
+fi
+
 # Installazione dipendenze con retry automatico
 echo -e "${YELLOW}📦 Installazione dipendenze principali...${NC}"
 for attempt in 1 2 3; do
@@ -204,6 +265,8 @@ for attempt in 1 2 3; do
         echo -e "${YELLOW}⚠️ Tentativo $attempt fallito, riprovo...${NC}"
         if [ $attempt -eq 3 ]; then
             echo -e "${RED}❌ Impossibile installare requirements dopo 3 tentativi${NC}"
+            echo -e "${YELLOW}🔍 Contenuto requirements.txt per debug:${NC}"
+            cat -n requirements.txt
             exit 1
         fi
         sleep 2
