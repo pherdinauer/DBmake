@@ -64,15 +64,30 @@ current_branch=$(git branch --show-current)
 if [ "$current_branch" != "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
     echo -e "${YELLOW}📋 Branch attuale: $current_branch${NC}"
     echo -e "${YELLOW}🔄 Switching al branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
-    if git checkout "cursor/crea-un-nuovo-branch-agent-8d8c"; then
+    
+    # Prova prima checkout normale, poi checkout con tracking se è un branch remoto
+    if git checkout "cursor/crea-un-nuovo-branch-agent-8d8c" 2>/dev/null; then
         echo -e "${GREEN}✅ Checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c completato${NC}"
+    elif git checkout -b "cursor/crea-un-nuovo-branch-agent-8d8c" "origin/cursor/crea-un-nuovo-branch-agent-8d8c" 2>/dev/null; then
+        echo -e "${GREEN}✅ Creato e fatto checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c da remoto${NC}"
     else
         echo -e "${RED}❌ Errore nel checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠️ Fallback su branch MULTITAB...${NC}"
+        git checkout MULTITAB
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✅ Fallback completato su branch MULTITAB${NC}"
+        else
+            echo -e "${RED}❌ Errore anche nel fallback${NC}"
+            exit 1
+        fi
     fi
 else
     echo -e "${GREEN}✅ Già sul branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
 fi
+
+# Sincronizzazione con repository remoto
+echo -e "${YELLOW}🔄 Sincronizzazione branch remoti...${NC}"
+git fetch origin
 
 # Gestione delle modifiche locali
 echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
@@ -84,33 +99,45 @@ else
 fi
 
 # Aggiornamento repository
-echo -e "${YELLOW}🔄 Aggiornamento repository dal branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
-if git pull origin "cursor/crea-un-nuovo-branch-agent-8d8c"; then
-    echo -e "${GREEN}✅ Repository aggiornato con successo dal branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
-    
-    # Verifica finale che siamo ancora sul branch cursor/crea-un-nuovo-branch-agent-8d8c
-    final_branch=$(git branch --show-current)
-    if [ "$final_branch" != "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
-        echo -e "${YELLOW}⚠️ Branch cambiato durante il pull, ritorno a cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
-        git checkout "cursor/crea-un-nuovo-branch-agent-8d8c"
+final_branch=$(git branch --show-current)
+if [ "$final_branch" = "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+    if git pull origin "cursor/crea-un-nuovo-branch-agent-8d8c"; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo dal branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
     fi
-    
-    # Ripristino modifiche locali se presenti
-    if git stash list | grep -q "Modifiche locali"; then
-        echo -e "${YELLOW}🔄 Ripristino modifiche locali...${NC}"
-        if git stash pop; then
-            echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
-        else
-            echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
-            echo -e "${YELLOW}📋 Stato attuale:${NC}"
-            git status
-            echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
-            exit 1
-        fi
+elif [ "$final_branch" = "MULTITAB" ]; then
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch MULTITAB (fallback)...${NC}"
+    if git pull origin MULTITAB; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo dal branch MULTITAB${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
     fi
 else
-    echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
-    exit 1
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch corrente ($final_branch)...${NC}"
+    if git pull; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
+    fi
+fi
+
+# Ripristino modifiche locali se presenti
+if git stash list | grep -q "Modifiche locali"; then
+    echo -e "${YELLOW}🔄 Ripristino modifiche locali...${NC}"
+    if git stash pop; then
+        echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
+        echo -e "${YELLOW}📋 Stato attuale:${NC}"
+        git status
+        echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
+        exit 1
+    fi
 fi
 
 # Gestione ambiente virtuale
