@@ -5,53 +5,31 @@ psutil>=5.9.0
 tabulate>=0.9.0
 requests>=2.31.0
 mysql-connector-python>=8.0.33
-
-# === NUOVE DIPENDENZE PER MIGLIORAMENTI ===
-
-# Sicurezza e Gestione Credenziali
-cryptography>=41.0.0          # Per crittografia credenziali
-keyring>=24.0.0               # Per storage sicuro credenziali  
-pydantic>=2.0.0              # Per validazione configurazioni
-pydantic-settings>=2.0.0     # Per gestione settings sicure
-
-# Logging Sicuro e Strutturato
-structlog>=23.0.0            # Logging strutturato
-python-json-logger>=2.0.0    # JSON logging
-
-# Performance e Connection Pooling
-SQLAlchemy>=2.0.0           # ORM e connection pooling enterprise
-alembic>=1.12.0             # Database migrations
-
-# Threading e Async Processing
-asyncio>=3.4.3               # Async processing (built-in ma esplicito)
-aiofiles>=23.0.0            # File I/O asincrono
-concurrent-futures>=3.1.1   # Threading utilities (built-in)
-
-# Monitoring e Metriche
-prometheus-client>=0.17.0    # Metriche Prometheus
-
-# Testing e Quality Assurance
-pytest>=7.4.0              # Framework testing
-pytest-asyncio>=0.21.0     # Testing async
-pytest-cov>=4.1.0          # Coverage testing
-black>=23.0.0               # Code formatting
-mypy>=1.5.0                 # Type checking
-flake8>=6.0.0               # Linting
-bandit>=1.7.0               # Security linting
-
-# Data Validation e Integrity
-jsonschema>=4.19.0          # Validazione schema JSON
-marshmallow>=3.20.0         # Serialization/validation
-cerberus>=1.3.4             # Data validation
-
-# Utilities
-click>=8.1.0                # CLI utilities
-rich>=13.0.0                # Rich console output
-typer>=0.9.0                # Modern CLI framework
-tenacity>=8.2.0             # Retry mechanisms
-
-# Development e Debug
-ipython>=8.14.0             # Interactive Python
-jupyter>=1.0.0              # Notebook per analisi
-memory-profiler>=0.61.0     # Memory profiling
-line-profiler>=4.1.0       # Line-by-line profiling 
+cryptography>=41.0.0
+keyring>=24.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+structlog>=23.0.0
+python-json-logger>=2.0.0
+SQLAlchemy>=2.0.0
+alembic>=1.12.0
+aiofiles>=23.0.0
+prometheus-client>=0.17.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.0.0
+mypy>=1.5.0
+flake8>=6.0.0
+bandit>=1.7.0
+jsonschema>=4.19.0
+marshmallow>=3.20.0
+cerberus>=1.3.4
+click>=8.1.0
+rich>=13.0.0
+typer>=0.9.0
+tenacity>=8.2.0
+ipython>=8.14.0
+jupyter>=1.0.0
+memory-profiler>=0.61.0
+line-profiler>=4.1.0 
