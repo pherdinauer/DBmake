@@ -64,11 +64,26 @@ progress_logger = logger.getChild('progress')
 # Carica le variabili d'ambiente
 load_dotenv()
 
-# Parametri di connessione da variabili d'ambiente
-MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
-MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
-MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
+# SICUREZZA: Gestione sicura delle credenziali - NESSUNA PASSWORD HARDCODED
+try:
+    from src.security import SecureCredentialManager
+    credential_manager = SecureCredentialManager()
+    db_credentials = credential_manager.get_database_credentials()
+    
+    MYSQL_HOST = db_credentials['host']
+    MYSQL_USER = db_credentials['user']
+    MYSQL_PASSWORD = db_credentials['password']
+    MYSQL_DATABASE = db_credentials['database']
+    MYSQL_PORT = db_credentials.get('port', 3306)
+    MYSQL_SSL_DISABLED = db_credentials.get('ssl_disabled', False)
+    
+    logger.info("✅ Credenziali database caricate in modo sicuro")
+    
+except Exception as e:
+    logger.error(f"🚨 ERRORE CRITICO: Impossibile caricare credenziali sicure: {e}")
+    logger.error("Il programma non può continuare senza credenziali sicure.")
+    logger.error("Configura le variabili d'ambiente o usa il setup interattivo.")
+    exit(1)
 
 # AUTO-DISCOVERY PATH con fallback intelligenti
 def discover_json_base_path():

@@ -21,10 +21,27 @@ except ImportError:
     from config import DatabaseConfig
 
 # Parametri di connessione da variabili d'ambiente (mantenuti per compatibilità)
-MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
-MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
-MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
+# SICUREZZA: Rimosso hardcoding delle credenziali
+# Le credenziali vengono ora gestite dal SecureCredentialManager
+try:
+    from ..security import SecureCredentialManager
+    credential_manager = SecureCredentialManager()
+    db_credentials = credential_manager.get_database_credentials()
+    
+    MYSQL_HOST = db_credentials['host']
+    MYSQL_USER = db_credentials['user'] 
+    MYSQL_PASSWORD = db_credentials['password']
+    MYSQL_DATABASE = db_credentials['database']
+    
+except ImportError:
+    # Fallback temporaneo per compatibilità
+    MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
+    MYSQL_USER = os.environ.get('MYSQL_USER')
+    MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD')
+    MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE')
+    
+    if not MYSQL_USER or not MYSQL_PASSWORD:
+        raise ValueError("🚨 SICUREZZA: Credenziali database mancanti! Usa variabili d'ambiente.")
 
 # Logger del modulo
 db_logger = logging.getLogger(__name__)

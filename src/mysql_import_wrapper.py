@@ -22,10 +22,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Parametri di connessione da variabili d'ambiente
-MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
-MYSQL_USER = os.environ.get('MYSQL_USER', 'Nando')
-MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD', 'DataBase2025!')
-MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE', 'anac_import3')
+# SICUREZZA: Rimosso hardcoding delle credenziali
+try:
+    from .security import SecureCredentialManager
+    credential_manager = SecureCredentialManager()
+    db_credentials = credential_manager.get_database_credentials()
+    
+    MYSQL_HOST = db_credentials['host']
+    MYSQL_USER = db_credentials['user']
+    MYSQL_PASSWORD = db_credentials['password'] 
+    MYSQL_DATABASE = db_credentials['database']
+    
+except ImportError:
+    # Fallback con controllo sicurezza
+    MYSQL_HOST = os.environ.get('MYSQL_HOST', 'localhost')
+    MYSQL_USER = os.environ.get('MYSQL_USER')
+    MYSQL_PASSWORD = os.environ.get('MYSQL_PASSWORD')
+    MYSQL_DATABASE = os.environ.get('MYSQL_DATABASE')
+    
+    if not MYSQL_USER or not MYSQL_PASSWORD:
+        raise ValueError("🚨 SICUREZZA: Credenziali database mancanti!")
 
 def safe_str_from_mysql_error(error):
     """

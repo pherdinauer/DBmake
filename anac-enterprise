@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""
+ANAC Importer Enterprise Edition - Script di Avvio Semplificato
+
+Uso:
+  ./anac-enterprise setup           # Primo setup del sistema
+  ./anac-enterprise import file.json   # Importa file
+  ./anac-enterprise status          # Verifica stato sistema
+  ./anac-enterprise help            # Mostra aiuto
+
+Questo script semplifica l'uso del sistema enterprise ANAC Importer.
+"""
+
+import sys
+import os
+import subprocess
+from pathlib import Path
+
+def main():
+    """Script principale di avvio semplificato."""
+    
+    # Verifica di essere nella directory corretta
+    if not Path("src/main_enterprise.py").exists():
+        print("❌ ERRORE: Esegui questo script dalla directory root del progetto ANAC Importer")
+        print("   Dovrebbe contenere src/main_enterprise.py")
+        sys.exit(1)
+    
+    # Comando base
+    base_cmd = [sys.executable, "src/main_enterprise.py"]
+    
+    # Se non ci sono argomenti, mostra l'aiuto semplificato
+    if len(sys.argv) == 1:
+        show_simplified_help()
+        return
+    
+    command = sys.argv[1].lower()
+    
+    # Mapping comandi semplificati
+    if command == "setup":
+        # Avvia il wizard di setup
+        cmd = base_cmd + ["setup-wizard"]
+        print("🧙‍♂️ Avvio Setup Wizard Interattivo...")
+        
+    elif command == "import":
+        if len(sys.argv) < 3:
+            print("❌ ERRORE: Specifica almeno un file da importare")
+            print("   Uso: ./anac-enterprise import file1.json [file2.json ...]")
+            sys.exit(1)
+        
+        files = sys.argv[2:]
+        cmd = base_cmd + ["import-files"] + files
+        print(f"📁 Importazione di {len(files)} file...")
+        
+    elif command == "status":
+        cmd = base_cmd + ["status"]
+        
+    elif command == "test":
+        cmd = base_cmd + ["test-connection"]
+        
+    elif command == "jobs":
+        cmd = base_cmd + ["list-jobs"]
+        
+    elif command == "help" or command == "--help" or command == "-h":
+        show_simplified_help()
+        return
+        
+    elif command == "quickstart":
+        cmd = base_cmd + ["quickstart"]
+        
+    elif command == "advanced":
+        # Passa direttamente al CLI completo
+        if len(sys.argv) > 2:
+            cmd = base_cmd + sys.argv[2:]
+        else:
+            cmd = base_cmd + ["--help"]
+        print("🔧 Modalità avanzata...")
+        
+    else:
+        print(f"❌ ERRORE: Comando '{command}' non riconosciuto")
+        print("   Usa './anac-enterprise help' per vedere i comandi disponibili")
+        sys.exit(1)
+    
+    # Esegui il comando
+    try:
+        result = subprocess.run(cmd, check=False)
+        sys.exit(result.returncode)
+    except Exception as e:
+        print(f"❌ ERRORE nell'esecuzione: {e}")
+        sys.exit(1)
+
+def show_simplified_help():
+    """Mostra l'aiuto semplificato."""
+    help_text = """
+🚀 ANAC Importer Enterprise Edition
+
+COMANDI PRINCIPALI:
+  setup           🧙‍♂️ Configurazione guidata del sistema (primo uso)
+  import FILE     📁 Importa file JSON ANAC
+  status          📊 Verifica stato e configurazione sistema
+  test            🔗 Testa connessione database
+  jobs            📋 Lista job di importazione recenti
+  quickstart      🚀 Guida rapida per iniziare
+
+COMANDI AVANZATI:
+  advanced ARGS   🔧 Accesso diretto al CLI completo
+                     Es: ./anac-enterprise advanced import-files --validation enterprise file.json
+
+ESEMPI D'USO:
+  # Primo setup del sistema
+  ./anac-enterprise setup
+
+  # Importa un singolo file
+  ./anac-enterprise import data/file.json
+
+  # Importa più file
+  ./anac-enterprise import file1.json file2.json file3.json
+
+  # Verifica sistema
+  ./anac-enterprise status
+
+  # Testa connessione
+  ./anac-enterprise test
+
+  # Modalità avanzata con validazione enterprise
+  ./anac-enterprise advanced import-files --validation enterprise --batch-size 2000 file.json
+
+PRIMO UTILIZZO:
+1. Esegui: ./anac-enterprise setup
+2. Segui il wizard interattivo
+3. Testa: ./anac-enterprise test
+4. Importa: ./anac-enterprise import file.json
+
+Per aiuto dettagliato: ./anac-enterprise advanced --help
+    """
+    
+    print(help_text.strip())
+
+if __name__ == "__main__":
+    main()

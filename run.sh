@@ -58,21 +58,36 @@ if [ ! -d ".git" ]; then
     exit 1
 fi
 
-# Assicurati di essere sul branch MULTITAB
-echo -e "${YELLOW}🔄 Verifica e checkout branch MULTITAB...${NC}"
+# Assicurati di essere sul branch cursor/crea-un-nuovo-branch-agent-8d8c
+echo -e "${YELLOW}🔄 Verifica e checkout branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
 current_branch=$(git branch --show-current)
-if [ "$current_branch" != "MULTITAB" ]; then
+if [ "$current_branch" != "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
     echo -e "${YELLOW}📋 Branch attuale: $current_branch${NC}"
-    echo -e "${YELLOW}🔄 Switching al branch MULTITAB...${NC}"
-    if git checkout MULTITAB; then
-        echo -e "${GREEN}✅ Checkout su branch MULTITAB completato${NC}"
+    echo -e "${YELLOW}🔄 Switching al branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+    
+    # Prova prima checkout normale, poi checkout con tracking se è un branch remoto
+    if git checkout "cursor/crea-un-nuovo-branch-agent-8d8c" 2>/dev/null; then
+        echo -e "${GREEN}✅ Checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c completato${NC}"
+    elif git checkout -b "cursor/crea-un-nuovo-branch-agent-8d8c" "origin/cursor/crea-un-nuovo-branch-agent-8d8c" 2>/dev/null; then
+        echo -e "${GREEN}✅ Creato e fatto checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c da remoto${NC}"
     else
-        echo -e "${RED}❌ Errore nel checkout su branch MULTITAB${NC}"
-        exit 1
+        echo -e "${RED}❌ Errore nel checkout su branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
+        echo -e "${YELLOW}⚠️ Fallback su branch MULTITAB...${NC}"
+        git checkout MULTITAB
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✅ Fallback completato su branch MULTITAB${NC}"
+        else
+            echo -e "${RED}❌ Errore anche nel fallback${NC}"
+            exit 1
+        fi
     fi
 else
-    echo -e "${GREEN}✅ Già sul branch MULTITAB${NC}"
+    echo -e "${GREEN}✅ Già sul branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
 fi
+
+# Sincronizzazione con repository remoto
+echo -e "${YELLOW}🔄 Sincronizzazione branch remoti...${NC}"
+git fetch origin
 
 # Gestione delle modifiche locali
 echo -e "${YELLOW}🔄 Gestione modifiche locali...${NC}"
@@ -84,37 +99,56 @@ else
 fi
 
 # Aggiornamento repository
-echo -e "${YELLOW}🔄 Aggiornamento repository dal branch MULTITAB...${NC}"
-if git pull origin MULTITAB; then
-    echo -e "${GREEN}✅ Repository aggiornato con successo dal branch MULTITAB${NC}"
-    
-    # Verifica finale che siamo ancora sul branch MULTITAB
-    final_branch=$(git branch --show-current)
-    if [ "$final_branch" != "MULTITAB" ]; then
-        echo -e "${YELLOW}⚠️ Branch cambiato durante il pull, ritorno a MULTITAB...${NC}"
-        git checkout MULTITAB
+final_branch=$(git branch --show-current)
+if [ "$final_branch" = "cursor/crea-un-nuovo-branch-agent-8d8c" ]; then
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch cursor/crea-un-nuovo-branch-agent-8d8c...${NC}"
+    if git pull origin "cursor/crea-un-nuovo-branch-agent-8d8c"; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo dal branch cursor/crea-un-nuovo-branch-agent-8d8c${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
     fi
-    
-    # Ripristino modifiche locali se presenti
-    if git stash list | grep -q "Modifiche locali"; then
-        echo -e "${YELLOW}🔄 Ripristino modifiche locali...${NC}"
-        if git stash pop; then
-            echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
-        else
-            echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
-            echo -e "${YELLOW}📋 Stato attuale:${NC}"
-            git status
-            echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
-            exit 1
-        fi
+elif [ "$final_branch" = "MULTITAB" ]; then
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch MULTITAB (fallback)...${NC}"
+    if git pull origin MULTITAB; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo dal branch MULTITAB${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
     fi
 else
-    echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
-    exit 1
+    echo -e "${YELLOW}🔄 Aggiornamento repository dal branch corrente ($final_branch)...${NC}"
+    if git pull; then
+        echo -e "${GREEN}✅ Repository aggiornato con successo${NC}"
+    else
+        echo -e "${RED}❌ Errore durante l'aggiornamento del repository${NC}"
+        exit 1
+    fi
+fi
+
+# Ripristino modifiche locali se presenti
+if git stash list | grep -q "Modifiche locali"; then
+    echo -e "${YELLOW}🔄 Ripristino modifiche locali...${NC}"
+    if git stash pop; then
+        echo -e "${GREEN}✅ Modifiche locali ripristinate${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Conflitti durante il ripristino delle modifiche locali${NC}"
+        echo -e "${YELLOW}📋 Stato attuale:${NC}"
+        git status
+        echo -e "${RED}❌ Risolvi manualmente i conflitti e riprova${NC}"
+        exit 1
+    fi
 fi
 
 # Gestione ambiente virtuale
 echo -e "${YELLOW}🔧 Gestione ambiente virtuale...${NC}"
+
+# Controlla se Python3 è disponibile
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}❌ Python3 non trovato nel sistema${NC}"
+    echo -e "${YELLOW}💡 Installa Python3 prima di continuare${NC}"
+    exit 1
+fi
 
 # Rimuovi l'ambiente virtuale esistente se presente
 if [ -d "venv" ]; then
@@ -122,43 +156,199 @@ if [ -d "venv" ]; then
     rm -rf venv
 fi
 
-# Crea nuovo ambiente virtuale
+# Crea nuovo ambiente virtuale con retry
 echo -e "${YELLOW}📦 Creazione nuovo ambiente virtuale...${NC}"
-python3 -m venv venv
+for attempt in 1 2 3; do
+    if python3 -m venv venv --clear; then
+        echo -e "${GREEN}✅ Ambiente virtuale creato con successo${NC}"
+        break
+    else
+        echo -e "${YELLOW}⚠️ Tentativo $attempt di creazione venv fallito${NC}"
+        if [ $attempt -eq 3 ]; then
+            echo -e "${RED}❌ Impossibile creare ambiente virtuale dopo 3 tentativi${NC}"
+            exit 1
+        fi
+        sleep 2
+    fi
+done
 
 # Attiva l'ambiente virtuale
 echo -e "${YELLOW}🔌 Attivazione ambiente virtuale...${NC}"
 source venv/bin/activate
 
-# Imposta PYTHONPATH per includere la directory corrente e src
-export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH}"
-
 # Verifica che l'ambiente virtuale sia attivo
 if [ -z "$VIRTUAL_ENV" ]; then
     echo -e "${RED}❌ Errore nell'attivazione dell'ambiente virtuale${NC}"
+    echo -e "${YELLOW}💡 Path environment: $VIRTUAL_ENV${NC}"
+    echo -e "${YELLOW}💡 Python location: $(which python)${NC}"
     exit 1
+else
+    echo -e "${GREEN}✅ Ambiente virtuale attivo: $VIRTUAL_ENV${NC}"
 fi
+
+# Imposta PYTHONPATH per includere la directory corrente e src
+export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH}"
+echo -e "${GREEN}✅ PYTHONPATH configurato: $PYTHONPATH${NC}"
 
 # Aggiorna pip
 echo -e "${YELLOW}📦 Aggiornamento pip...${NC}"
 pip install --upgrade pip
 
-# Installa le dipendenze
-echo -e "${YELLOW}📦 Installazione dipendenze...${NC}"
-pip install -r requirements.txt
-# Installa anche mysql-connector-python se non presente
-if ! python -c "import mysql.connector" 2>/dev/null; then
-    echo -e "${YELLOW}📦 Installazione modulo mysql-connector-python...${NC}"
-    pip install mysql-connector-python
-    # Aggiungi a requirements.txt se non già presente
-    if ! grep -q "mysql-connector-python" requirements.txt; then
-        echo "mysql-connector-python" >> requirements.txt
+# Pulizia file strani creati da errori precedenti
+echo -e "${YELLOW}🧹 Pulizia file temporanei e corrotti...${NC}"
+for strange_file in "=1.5.0" "=5.9.0" "=8.0.33" ">=1.5.0" ">=5.9.0" ">=8.0.33"; do
+    if [ -f "$strange_file" ]; then
+        echo -e "${YELLOW}🗑️ Rimozione file corrotto: $strange_file${NC}"
+        rm -f "$strange_file"
+    fi
+done
+
+# Verifica e riparazione automatica requirements.txt
+echo -e "${YELLOW}🔍 Verifica integrità requirements.txt...${NC}"
+if grep -q "tabulate>=0.9.0 mysql-connector-python" requirements.txt 2>/dev/null; then
+    echo -e "${RED}❌ Requirements.txt corrotto rilevato! Riparazione automatica...${NC}"
+    
+    # Backup del file corrotto
+    cp requirements.txt requirements.txt.backup
+    
+    # Crea una versione pulita del requirements.txt
+    cat > requirements.txt << 'EOF'
+pandas>=1.5.0
+python-dotenv>=0.19.0
+typing-extensions>=4.0.0
+psutil>=5.9.0
+tabulate>=0.9.0
+requests>=2.31.0
+mysql-connector-python>=8.0.33
+cryptography>=41.0.0
+keyring>=24.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+structlog>=23.0.0
+python-json-logger>=2.0.0
+SQLAlchemy>=2.0.0
+alembic>=1.12.0
+aiofiles>=23.0.0
+prometheus-client>=0.17.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+black>=23.0.0
+mypy>=1.5.0
+flake8>=6.0.0
+bandit>=1.7.0
+jsonschema>=4.19.0
+marshmallow>=3.20.0
+cerberus>=1.3.4
+click>=8.1.0
+rich>=13.0.0
+typer>=0.9.0
+tenacity>=8.2.0
+ipython>=8.14.0
+jupyter>=1.0.0
+memory-profiler>=0.61.0
+line-profiler>=4.1.0
+EOF
+    
+    echo -e "${GREEN}✅ Requirements.txt riparato automaticamente${NC}"
+else
+    echo -e "${GREEN}✅ Requirements.txt è valido${NC}"
+fi
+
+# Installazione dipendenze con retry automatico
+echo -e "${YELLOW}📦 Installazione dipendenze principali...${NC}"
+for attempt in 1 2 3; do
+    if pip install -r requirements.txt; then
+        echo -e "${GREEN}✅ Requirements installati con successo${NC}"
+        break
+    else
+        echo -e "${YELLOW}⚠️ Tentativo $attempt fallito, riprovo...${NC}"
+        if [ $attempt -eq 3 ]; then
+            echo -e "${RED}❌ Impossibile installare requirements dopo 3 tentativi${NC}"
+            echo -e "${YELLOW}🔍 Contenuto requirements.txt per debug:${NC}"
+            cat -n requirements.txt
+            exit 1
+        fi
+        sleep 2
+    fi
+done
+
+# Lista dei moduli critici richiesti
+echo -e "${YELLOW}🔍 Verifica e installazione moduli critici...${NC}"
+
+declare -A critical_modules=(
+    ["dotenv"]="python-dotenv>=0.19.0"
+    ["psutil"]="psutil>=5.9.0"
+    ["pandas"]="pandas>=1.5.0"
+    ["mysql.connector"]="mysql-connector-python>=8.0.33"
+    ["tabulate"]="tabulate>=0.9.0"
+    ["requests"]="requests>=2.31.0"
+)
+
+# Verifica e installa ogni modulo critico
+for module in "${!critical_modules[@]}"; do
+    package="${critical_modules[$module]}"
+    if ! python -c "import $module" 2>/dev/null; then
+        echo -e "${YELLOW}📦 Installazione modulo $module...${NC}"
+        pip install "$package"
+        
+        # Verifica installazione
+        if ! python -c "import $module" 2>/dev/null; then
+            echo -e "${RED}❌ Fallita installazione di $module, riprovo...${NC}"
+            pip install --force-reinstall "$package"
+        fi
+    else
+        echo -e "${GREEN}✅ Modulo $module già disponibile${NC}"
+    fi
+done
+
+# Verifica finale di tutti i moduli critici
+echo -e "${YELLOW}🔍 Verifica finale completa dei moduli...${NC}"
+modules_check=0
+total_modules=6
+
+# Verifica tutti i moduli critici
+declare -A verification_modules=(
+    ["dotenv"]="python-dotenv"
+    ["psutil"]="psutil"
+    ["pandas"]="pandas"
+    ["mysql.connector"]="mysql-connector"
+    ["tabulate"]="tabulate"
+    ["requests"]="requests"
+)
+
+for module in "${!verification_modules[@]}"; do
+    name="${verification_modules[$module]}"
+    if python -c "import $module; print(f'✅ $name installato correttamente')" 2>/dev/null; then
+        modules_check=$((modules_check + 1))
+    else
+        echo -e "${RED}❌ $name non disponibile${NC}"
+    fi
+done
+
+# Verifica che tutti i moduli critici siano disponibili
+if [ $modules_check -lt $total_modules ]; then
+    echo -e "${RED}❌ Solo $modules_check/$total_modules moduli disponibili. Reinstallazione forzata...${NC}"
+    pip install --force-reinstall python-dotenv psutil pandas mysql-connector-python tabulate requests
+    echo -e "${YELLOW}🔄 Riprova verifica completa...${NC}"
+    
+    # Seconda verifica
+    if ! python -c "import dotenv, psutil, pandas, mysql.connector, tabulate, requests" 2>/dev/null; then
+        echo -e "${RED}❌ ERRORE CRITICO: Impossibile installare tutti i moduli richiesti${NC}"
+        echo -e "${YELLOW}💡 Suggerimenti:${NC}"
+        echo -e "${YELLOW}   - Verifica connessione internet${NC}"
+        echo -e "${YELLOW}   - Controlla spazio disco disponibile${NC}"
+        echo -e "${YELLOW}   - Verifica permessi di scrittura${NC}"
+        echo -e "${YELLOW}   - Prova a rilanciare lo script come amministratore${NC}"
+        echo -e "${YELLOW}   - Controlla che Python sia installato correttamente${NC}"
+        exit 1
+    else
+        echo -e "${GREEN}✅ Reinstallazione completata con successo!${NC}"
     fi
 fi
 
-# Verifica l'installazione di pandas
-echo -e "${YELLOW}🔍 Verifica installazione pandas...${NC}"
-python3 -c "import pandas; print(f'✅ Pandas versione {pandas.__version__} installato correttamente')"
+echo -e "${GREEN}✅ Tutti i $total_modules moduli critici sono disponibili!${NC}"
+echo -e "${CYAN}📋 Moduli verificati: python-dotenv, psutil, pandas, mysql-connector, tabulate, requests${NC}"
 
 # Verifica che la directory /database sia montata
 if ! mountpoint -q /database; then
@@ -185,7 +375,7 @@ show_menu() {
     clear
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════════════════════╗"
     echo -e "║              ANAC Import JSON - 3 SOLUZIONI DINAMICHE AVANZATE                ║"
-    echo -e "║                     Branch: MULTITAB (Completamente Ottimizzato)              ║"
+    echo -e "║           Branch: cursor/crea-un-nuovo-branch-agent-8d8c (Sviluppo)           ║"
     echo -e "╚════════════════════════════════════════════════════════════════════════════╝${NC}"
     echo
     echo -e "${RED}🎯 ONE-CLICK (NON TI DEVI PREOCCUPARE DI NIENTE!):${NC}"
