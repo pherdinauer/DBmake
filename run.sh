@@ -143,101 +143,149 @@ fi
 # Gestione ambiente virtuale
 echo -e "${YELLOW}🔧 Gestione ambiente virtuale...${NC}"
 
+# Controlla se Python3 è disponibile
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}❌ Python3 non trovato nel sistema${NC}"
+    echo -e "${YELLOW}💡 Installa Python3 prima di continuare${NC}"
+    exit 1
+fi
+
 # Rimuovi l'ambiente virtuale esistente se presente
 if [ -d "venv" ]; then
     echo -e "${YELLOW}🗑️ Rimozione ambiente virtuale esistente...${NC}"
     rm -rf venv
 fi
 
-# Crea nuovo ambiente virtuale
+# Crea nuovo ambiente virtuale con retry
 echo -e "${YELLOW}📦 Creazione nuovo ambiente virtuale...${NC}"
-python3 -m venv venv
+for attempt in 1 2 3; do
+    if python3 -m venv venv --clear; then
+        echo -e "${GREEN}✅ Ambiente virtuale creato con successo${NC}"
+        break
+    else
+        echo -e "${YELLOW}⚠️ Tentativo $attempt di creazione venv fallito${NC}"
+        if [ $attempt -eq 3 ]; then
+            echo -e "${RED}❌ Impossibile creare ambiente virtuale dopo 3 tentativi${NC}"
+            exit 1
+        fi
+        sleep 2
+    fi
+done
 
 # Attiva l'ambiente virtuale
 echo -e "${YELLOW}🔌 Attivazione ambiente virtuale...${NC}"
 source venv/bin/activate
 
-# Imposta PYTHONPATH per includere la directory corrente e src
-export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH}"
-
 # Verifica che l'ambiente virtuale sia attivo
 if [ -z "$VIRTUAL_ENV" ]; then
     echo -e "${RED}❌ Errore nell'attivazione dell'ambiente virtuale${NC}"
+    echo -e "${YELLOW}💡 Path environment: $VIRTUAL_ENV${NC}"
+    echo -e "${YELLOW}💡 Python location: $(which python)${NC}"
     exit 1
+else
+    echo -e "${GREEN}✅ Ambiente virtuale attivo: $VIRTUAL_ENV${NC}"
 fi
+
+# Imposta PYTHONPATH per includere la directory corrente e src
+export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH}"
+echo -e "${GREEN}✅ PYTHONPATH configurato: $PYTHONPATH${NC}"
 
 # Aggiorna pip
 echo -e "${YELLOW}📦 Aggiornamento pip...${NC}"
 pip install --upgrade pip
 
-# Installa le dipendenze
-echo -e "${YELLOW}📦 Installazione dipendenze...${NC}"
-pip install -r requirements.txt
+# Installazione dipendenze con retry automatico
+echo -e "${YELLOW}📦 Installazione dipendenze principali...${NC}"
+for attempt in 1 2 3; do
+    if pip install -r requirements.txt; then
+        echo -e "${GREEN}✅ Requirements installati con successo${NC}"
+        break
+    else
+        echo -e "${YELLOW}⚠️ Tentativo $attempt fallito, riprovo...${NC}"
+        if [ $attempt -eq 3 ]; then
+            echo -e "${RED}❌ Impossibile installare requirements dopo 3 tentativi${NC}"
+            exit 1
+        fi
+        sleep 2
+    fi
+done
 
-# Verifica e installa moduli critici se non presenti
-echo -e "${YELLOW}🔍 Verifica moduli critici...${NC}"
+# Lista dei moduli critici richiesti
+echo -e "${YELLOW}🔍 Verifica e installazione moduli critici...${NC}"
 
-# Installa psutil se non presente
-if ! python -c "import psutil" 2>/dev/null; then
-    echo -e "${YELLOW}📦 Installazione modulo psutil (richiesto)...${NC}"
-    pip install psutil>=5.9.0
-fi
+declare -A critical_modules=(
+    ["dotenv"]="python-dotenv>=0.19.0"
+    ["psutil"]="psutil>=5.9.0"
+    ["pandas"]="pandas>=1.5.0"
+    ["mysql.connector"]="mysql-connector-python>=8.0.33"
+    ["tabulate"]="tabulate>=0.9.0"
+    ["requests"]="requests>=2.31.0"
+)
 
-# Installa mysql-connector-python se non presente
-if ! python -c "import mysql.connector" 2>/dev/null; then
-    echo -e "${YELLOW}📦 Installazione modulo mysql-connector-python...${NC}"
-    pip install mysql-connector-python>=8.0.33
-fi
-
-# Installa pandas se non presente
-if ! python -c "import pandas" 2>/dev/null; then
-    echo -e "${YELLOW}📦 Installazione modulo pandas...${NC}"
-    pip install pandas>=1.5.0
-fi
+# Verifica e installa ogni modulo critico
+for module in "${!critical_modules[@]}"; do
+    package="${critical_modules[$module]}"
+    if ! python -c "import $module" 2>/dev/null; then
+        echo -e "${YELLOW}📦 Installazione modulo $module...${NC}"
+        pip install "$package"
+        
+        # Verifica installazione
+        if ! python -c "import $module" 2>/dev/null; then
+            echo -e "${RED}❌ Fallita installazione di $module, riprovo...${NC}"
+            pip install --force-reinstall "$package"
+        fi
+    else
+        echo -e "${GREEN}✅ Modulo $module già disponibile${NC}"
+    fi
+done
 
 # Verifica finale di tutti i moduli critici
-echo -e "${YELLOW}🔍 Verifica finale moduli critici...${NC}"
+echo -e "${YELLOW}🔍 Verifica finale completa dei moduli...${NC}"
 modules_check=0
+total_modules=6
 
-# Verifica pandas
-if python -c "import pandas; print(f'✅ Pandas versione {pandas.__version__} installato correttamente')" 2>/dev/null; then
-    modules_check=$((modules_check + 1))
-else
-    echo -e "${RED}❌ Pandas non disponibile${NC}"
-fi
+# Verifica tutti i moduli critici
+declare -A verification_modules=(
+    ["dotenv"]="python-dotenv"
+    ["psutil"]="psutil"
+    ["pandas"]="pandas"
+    ["mysql.connector"]="mysql-connector"
+    ["tabulate"]="tabulate"
+    ["requests"]="requests"
+)
 
-# Verifica psutil
-if python -c "import psutil; print(f'✅ Psutil versione {psutil.__version__} installato correttamente')" 2>/dev/null; then
-    modules_check=$((modules_check + 1))
-else
-    echo -e "${RED}❌ Psutil non disponibile${NC}"
-fi
-
-# Verifica mysql.connector
-if python -c "import mysql.connector; print('✅ MySQL Connector installato correttamente')" 2>/dev/null; then
-    modules_check=$((modules_check + 1))
-else
-    echo -e "${RED}❌ MySQL Connector non disponibile${NC}"
-fi
+for module in "${!verification_modules[@]}"; do
+    name="${verification_modules[$module]}"
+    if python -c "import $module; print(f'✅ $name installato correttamente')" 2>/dev/null; then
+        modules_check=$((modules_check + 1))
+    else
+        echo -e "${RED}❌ $name non disponibile${NC}"
+    fi
+done
 
 # Verifica che tutti i moduli critici siano disponibili
-if [ $modules_check -lt 3 ]; then
-    echo -e "${RED}❌ Non tutti i moduli critici sono disponibili. Reinstallazione forzata...${NC}"
-    pip install --force-reinstall psutil pandas mysql-connector-python
-    echo -e "${YELLOW}🔄 Riprova verifica moduli...${NC}"
+if [ $modules_check -lt $total_modules ]; then
+    echo -e "${RED}❌ Solo $modules_check/$total_modules moduli disponibili. Reinstallazione forzata...${NC}"
+    pip install --force-reinstall python-dotenv psutil pandas mysql-connector-python tabulate requests
+    echo -e "${YELLOW}🔄 Riprova verifica completa...${NC}"
     
     # Seconda verifica
-    if ! python -c "import psutil, pandas, mysql.connector" 2>/dev/null; then
-        echo -e "${RED}❌ ERRORE CRITICO: Impossibile installare i moduli richiesti${NC}"
+    if ! python -c "import dotenv, psutil, pandas, mysql.connector, tabulate, requests" 2>/dev/null; then
+        echo -e "${RED}❌ ERRORE CRITICO: Impossibile installare tutti i moduli richiesti${NC}"
         echo -e "${YELLOW}💡 Suggerimenti:${NC}"
         echo -e "${YELLOW}   - Verifica connessione internet${NC}"
         echo -e "${YELLOW}   - Controlla spazio disco disponibile${NC}"
-        echo -e "${YELLOW}   - Prova a rilanciare lo script${NC}"
+        echo -e "${YELLOW}   - Verifica permessi di scrittura${NC}"
+        echo -e "${YELLOW}   - Prova a rilanciare lo script come amministratore${NC}"
+        echo -e "${YELLOW}   - Controlla che Python sia installato correttamente${NC}"
         exit 1
+    else
+        echo -e "${GREEN}✅ Reinstallazione completata con successo!${NC}"
     fi
 fi
 
-echo -e "${GREEN}✅ Tutti i moduli critici sono disponibili!${NC}"
+echo -e "${GREEN}✅ Tutti i $total_modules moduli critici sono disponibili!${NC}"
+echo -e "${CYAN}📋 Moduli verificati: python-dotenv, psutil, pandas, mysql-connector, tabulate, requests${NC}"
 
 # Verifica che la directory /database sia montata
 if ! mountpoint -q /database; then
